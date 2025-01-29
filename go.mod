@@ -4,7 +4,10 @@ go 1.22.5
 
 require (
 	github.com/XiaoConstantine/dspy-go v0.15.1
+	github.com/google/go-github v17.0.0+incompatible
 	github.com/google/go-github/v68 v68.0.0
+	github.com/logrusorgru/aurora v2.0.3+incompatible
+	github.com/mattn/go-isatty v0.0.20
 	golang.org/x/oauth2 v0.25.0
 )
 
@@ -16,4 +19,5 @@ require (
 	github.com/sourcegraph/conc v0.3.0 // indirect
 	go.uber.org/atomic v1.7.0 // indirect
 	go.uber.org/multierr v1.9.0 // indirect
+	golang.org/x/sys v0.28.0 // indirect
 )

@@ -319,9 +319,7 @@ func NewPRReviewAgent() (*PRReviewAgent, error) {
 }
 
 // ReviewPR reviews a complete pull request.
-func (a *PRReviewAgent) ReviewPR(ctx context.Context, tasks []PRReviewTask) ([]PRReviewComment, error) {
-	logger := logging.GetLogger()
-
+func (a *PRReviewAgent) ReviewPR(ctx context.Context, tasks []PRReviewTask, console *Console) ([]PRReviewComment, error) {
 	var allComments []PRReviewComment
 	// Create review context
 	fileData := make(map[string]map[string]interface{})
@@ -367,6 +365,7 @@ func (a *PRReviewAgent) ReviewPR(ctx context.Context, tasks []PRReviewTask) ([]P
 				"review_type": "chunk_review",
 			}
 
+			console.ReviewingFile(task.FilePath, i+1, len(task.Changes))
 			// Execute review for this chunk
 			result, err := a.orchestrator.Process(ctx,
 				fmt.Sprintf("Review chunk %d of %s", i+1, task.FilePath),
@@ -374,46 +373,25 @@ func (a *PRReviewAgent) ReviewPR(ctx context.Context, tasks []PRReviewTask) ([]P
 			if err != nil {
 				return nil, fmt.Errorf("failed to process chunk %d of %s: %w", i+1, task.FilePath, err)
 			}
-			logging.GetLogger().Info(ctx, "Result: %v", result)
 
 			// Collect comments from this chunk
 			for taskID, taskResult := range result.CompletedTasks {
-				logging.GetLogger().Info(ctx, "Processing task: %s", taskID)
-
 				// Convert task results to comments
 				if reviewComments, err := extractComments(taskResult, task.FilePath); err != nil {
 					logging.GetLogger().Error(ctx, "Failed to extract comments from task %s: %v", taskID, err)
 					continue
 				} else {
+					// Show the results for this file
+					if len(reviewComments) == 0 {
+						console.NoIssuesFound(task.FilePath)
+					} else {
+						console.ShowComments(reviewComments)
+					}
 					allComments = append(allComments, reviewComments...)
 				}
 			}
 		}
 	}
-	logger.Info(ctx, "All comments: %v", allComments)
-
-	// reviewContext := map[string]interface{}{
-	// 	"files":       fileData,
-	// 	"review_type": "pull_request",
-	// }
-	// logger.Info(ctx, "Tasks: %v", tasks)
-	//
-	// // Execute orchestrated review
-	// result, err := a.orchestrator.Process(ctx, "Review pull request changes", reviewContext)
-	// if err != nil {
-	// 	return nil, fmt.Errorf("failed to process PR review: %w", err)
-	// }
-	//
-	// // Collect and format comments
-	// comments := make([]PRReviewComment, 0)
-	// for taskID, taskResult := range result.CompletedTasks {
-	// 	logging.GetLogger().Info(ctx, "Processing task: %s", taskID)
-	//
-	// 	if reviewComments, ok := taskResult.([]PRReviewComment); ok {
-	// 		comments = append(comments, reviewComments...)
-	// 	}
-	// }
-
 	return allComments, nil
 }
 
@@ -433,32 +411,36 @@ func (p *CodeReviewProcessor) Process(ctx context.Context, task agents.Task, con
 			{Field: core.NewField("summary")},
 		},
 	).WithInstruction(`Review the code changes and provide specific, actionable feedback.
-    Analyze the code for:
-    1. Code Style and Readability:
-       - Clear and consistent formatting
-       - Meaningful variable and function names
-       - Code complexity and readability
-    
-    2. Code Structure:
-       - Function size and responsibility
-       - Code organization and modularity
-       - Interface design and abstraction
-    
-    3. Error Handling:
-       - Comprehensive error cases
-       - Proper error propagation
-       - Meaningful error messages
-    
-    4. Documentation:
-       - Function and type documentation
-       - Important logic explanation
-       - Usage examples where needed
+For each issue found, output in this format:
 
-    Provide comments in this format:
-    - Each comment should be specific and actionable
-    - Include line numbers where applicable
-    - Suggest improvements with example code when helpful
-    - Prioritize major issues over minor style concerns`)
+comments:
+  file: [filename]
+  line: [specific line number where the issue occurs]
+  severity: [must be one of: critical, warning, suggestion]
+  category: [must be one of: error-handling, code-style, performance, security, documentation]
+  content: [clear explanation of the issue and why it matters]
+  suggestion: [specific code example or clear steps to fix the issue]
+
+Review for these specific issues:
+1. Error Handling
+   - Missing error checks or ignored errors
+   - Inconsistent error handling patterns
+   - Silent failures
+2. Code Quality
+   - Function complexity and length
+   - Code duplication
+   - Unclear logic or control flow
+3. Documentation
+   - Missing documentation for exported items
+   - Unclear or incomplete comments
+4. Performance
+   - Inefficient patterns
+   - Resource leaks
+   - Unnecessary allocations
+5. Best Practices
+   - Go idioms and conventions
+   - Package organization
+   - Clear naming conventions`)
 
 	// Create predict module for review
 	predict := modules.NewPredict(signature)
@@ -496,10 +478,52 @@ func (p *CodeReviewProcessor) Process(ctx context.Context, task agents.Task, con
 
 // Helper functions.
 func parseReviewComments(filePath string, commentsStr string) ([]PRReviewComment, error) {
-	// Parse the comments string into structured comments
-	// This is a placeholder - actual implementation would parse the
-	// LLM's output format into PRReviewComment structs
-	return []PRReviewComment{}, nil
+	var comments []PRReviewComment
+
+	// Parse the YAML-like format from the LLM response
+	sections := strings.Split(commentsStr, "\n-")
+	for _, section := range sections {
+		if strings.TrimSpace(section) == "" {
+			continue
+		}
+
+		// Extract comment fields
+		comment := PRReviewComment{FilePath: filePath}
+
+		// Parse each field
+		lines := strings.Split(section, "\n")
+		for _, line := range lines {
+			parts := strings.SplitN(strings.TrimSpace(line), ":", 2)
+			if len(parts) != 2 {
+				continue
+			}
+
+			key := strings.TrimSpace(parts[0])
+			value := strings.TrimSpace(parts[1])
+
+			switch key {
+			case "line":
+				if lineNum, err := strconv.Atoi(value); err == nil {
+					comment.LineNumber = lineNum
+				}
+			case "severity":
+				comment.Severity = value
+			case "content":
+				comment.Content = value
+			case "suggestion":
+				comment.Suggestion = value
+			case "category":
+				comment.Category = value
+			}
+		}
+
+		// Add valid comments
+		if comment.Content != "" {
+			comments = append(comments, comment)
+		}
+	}
+
+	return comments, nil
 }
 
 func extractComments(result interface{}, filePath string) ([]PRReviewComment, error) {
@@ -601,6 +625,7 @@ func main() {
 	})
 	logging.SetLogger(logger)
 
+	console := NewConsole(os.Stdout, logger)
 	err := VerifyTokenPermissions(ctx, *githubToken, *owner, *repo)
 	if err != nil {
 		logger.Error(ctx, "Token permission verification failed: %v", err)
@@ -617,7 +642,6 @@ func main() {
 	if err != nil {
 		logger.Error(ctx, "Failed to configure LLM: %v", err)
 	}
-
 	agent, err := NewPRReviewAgent()
 	if err != nil {
 		panic(err)
@@ -625,6 +649,9 @@ func main() {
 
 	githubTools := NewGitHubTools(*githubToken, *owner, *repo)
 	logger.Info(ctx, "Fetching changes for PR #%d", *prNumber)
+	pr, _, err := githubTools.client.PullRequests.Get(ctx, *owner, *repo, *prNumber)
+	console.StartReview(pr)
+
 	changes, err := githubTools.GetPullRequestChanges(ctx, *prNumber)
 	if err != nil {
 		logger.Error(ctx, "Failed to get PR changes: %v", err)
@@ -651,39 +678,13 @@ func main() {
 	}
 
 	logger.Info(ctx, "Starting code review for %d files", len(tasks))
-	//logger.Info(ctx, "tasks: %v", tasks)
 
-	comments, err := agent.ReviewPR(ctx, tasks)
+	comments, err := agent.ReviewPR(ctx, tasks, console)
 	if err != nil {
 		logger.Error(ctx, "Failed to review PR: %v", err)
 		os.Exit(1)
 	}
-	categoryCounts := make(map[string]int)
-	severityCounts := make(map[string]int)
-	for _, comment := range comments {
-		categoryCounts[comment.Category]++
-		severityCounts[comment.Severity]++
-	}
-
-	logger.Info(ctx, "Review completed: %d comments generated", len(comments))
-	logger.Info(ctx, "Categories:")
-	for category, count := range categoryCounts {
-		logger.Info(ctx, "  - %s: %d", category, count)
-	}
-	logger.Info(ctx, "Severities:")
-	for severity, count := range severityCounts {
-		logger.Info(ctx, "  - %s: %d", severity, count)
-	}
-
-	// Post review comments
-	// Post comments back to GitHub
-	for _, comment := range comments {
-		// Use GitHub API to post review comments
-		fmt.Printf("Review comment for %s:%d: %s\n",
-			comment.FilePath,
-			comment.LineNumber,
-			comment.Content)
-	}
+	console.ShowSummary(comments)
 
 	logger.Info(ctx, "Posting review comments to GitHub")
 	// err = githubTools.CreateReviewComments(ctx, *prNumber, comments)
@@ -692,5 +693,6 @@ func main() {
 	// 	os.Exit(1)
 	// }
 
+	console.ReviewComplete()
 	logger.Info(ctx, "Successfully completed PR review")
 }
