@@ -29,7 +29,7 @@ type config struct {
 }
 
 const (
-	DefaultModelProvider = "llamacpp"
+	DefaultModelProvider = "llamacpp:"
 	DefaultModelName     = ""
 )
 
@@ -64,6 +64,7 @@ and impl changes through interactive learning sessions.`,
 	rootCmd.PersistentFlags().StringVar(&cfg.apiKey, "api-key", "", "API Key for vendors")
 	rootCmd.PersistentFlags().StringVar(&cfg.githubToken, "github-token", os.Getenv("GITHUB_TOKEN"), "Github token")
 	rootCmd.PersistentFlags().StringVar(&cfg.owner, "owner", "", "Repository owner")
+	rootCmd.PersistentFlags().StringVar(&cfg.repo, "repo", "", "Repository")
 	rootCmd.PersistentFlags().StringVar(&cfg.memoryPath, "path", "./memory", "Path for sqlite table")
 	rootCmd.PersistentFlags().IntVar(&cfg.prNumber, "pr", 0, "Pull request number")
 	rootCmd.PersistentFlags().BoolVar(&cfg.verbose, "verbose", false, "Enable verbose logging")
@@ -215,7 +216,7 @@ func constructModelID(cfg *config) core.ModelID {
 func validateModelConfig(cfg *config) error {
 	// Validate provider
 	switch cfg.modelProvider {
-	case "llamacpp", "ollama", "anthropic", "google":
+	case "llamacpp:", "ollama", "anthropic", "google":
 		// Valid providers
 	default:
 		return fmt.Errorf("unsupported model provider: %s", cfg.modelProvider)
