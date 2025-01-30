@@ -8,12 +8,14 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/XiaoConstantine/dspy-go/pkg/agents"
 	"github.com/XiaoConstantine/dspy-go/pkg/core"
 	"github.com/XiaoConstantine/dspy-go/pkg/llms"
 	"github.com/XiaoConstantine/dspy-go/pkg/logging"
 	"github.com/XiaoConstantine/dspy-go/pkg/modules"
+	"github.com/briandowns/spinner"
 )
 
 type ReviewChunk struct {
@@ -626,7 +628,14 @@ func main() {
 	logging.SetLogger(logger)
 
 	console := NewConsole(os.Stdout, logger)
-	err := VerifyTokenPermissions(ctx, *githubToken, *owner, *repo)
+
+	s := spinner.New(spinner.CharSets[14], 100*time.Millisecond)
+	s.Prefix = "Processing "
+	err := s.Color("cyan")
+	if err != nil {
+		logger.Error(ctx, "Failed to start spinner properly")
+	}
+	err = VerifyTokenPermissions(ctx, *githubToken, *owner, *repo)
 	if err != nil {
 		logger.Error(ctx, "Token permission verification failed: %v", err)
 		os.Exit(1)
@@ -679,7 +688,9 @@ func main() {
 
 	logger.Info(ctx, "Starting code review for %d files", len(tasks))
 
+	s.Start()
 	comments, err := agent.ReviewPR(ctx, tasks, console)
+	s.Stop()
 	if err != nil {
 		logger.Error(ctx, "Failed to review PR: %v", err)
 		os.Exit(1)
