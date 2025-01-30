@@ -411,7 +411,7 @@ func (p *CodeReviewProcessor) Process(ctx context.Context, task agents.Task, con
 			{Field: core.NewField("summary")},
 		},
 	).WithInstruction(`Review the code changes and provide specific, actionable feedback.
-For each issue found, output in this format:
+For each issue found, output in following format:
 
 comments:
   file: [filename]
@@ -649,7 +649,7 @@ func main() {
 
 	githubTools := NewGitHubTools(*githubToken, *owner, *repo)
 	logger.Info(ctx, "Fetching changes for PR #%d", *prNumber)
-	pr, _, err := githubTools.client.PullRequests.Get(ctx, *owner, *repo, *prNumber)
+	pr, _, _ := githubTools.client.PullRequests.Get(ctx, *owner, *repo, *prNumber)
 	console.StartReview(pr)
 
 	changes, err := githubTools.GetPullRequestChanges(ctx, *prNumber)

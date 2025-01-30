@@ -169,6 +169,8 @@ func (c *Console) ShowSummary(comments []PRReviewComment) {
 			c.printf("%s %s: %d\n", icon, severity, count)
 		}
 	}
+	c.ShowComments(comments)
+
 }
 
 func (c *Console) FileError(filepath string, err error) {
