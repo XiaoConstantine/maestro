@@ -1,0 +1,14 @@
+linters:
+  disable-all: true
+  enable:
+    - errcheck
+    - godot
+    - gosimple
+    - govet
+    - ineffassign
+    - staticcheck
+    - typecheck
+    - unused
+
+run:
+  timeout: 5m

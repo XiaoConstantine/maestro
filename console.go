@@ -13,7 +13,7 @@ import (
 	"github.com/mattn/go-isatty"
 )
 
-// Console handles user-facing output separate from logging
+// Console handles user-facing output separate from logging.
 type Console struct {
 	w      io.Writer
 	logger *logging.Logger // For debug logs
@@ -232,7 +232,7 @@ func (c *Console) printf(format string, a ...interface{}) {
 	fmt.Fprintf(c.w, format, a...)
 }
 
-// indent adds spaces to the start of each line
+// indent adds spaces to the start of each line.
 func indent(s string, spaces int) string {
 	prefix := strings.Repeat(" ", spaces)
 	return prefix + strings.ReplaceAll(s, "\n", "\n"+prefix)
