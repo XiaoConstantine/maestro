@@ -72,9 +72,8 @@ func NewChunkConfig() ChunkConfig {
 }
 
 // chunkfile splits a file into reviewable chunks while preserving context.
-func chunkfile(content string, changes string, config ChunkConfig) ([]ReviewChunk, error) {
+func chunkfile(ctx context.Context, content string, changes string, config ChunkConfig) ([]ReviewChunk, error) {
 	logger := logging.GetLogger()
-	ctx := context.Background() // For logging
 	lines := strings.Split(content, "\n")
 	chunks := make([]ReviewChunk, 0)
 
@@ -326,7 +325,7 @@ func (a *PRReviewAgent) ReviewPR(ctx context.Context, tasks []PRReviewTask, cons
 			"file_type": filepath.Ext(task.FilePath),
 			"package":   filepath.Base(filepath.Dir(task.FilePath)),
 		}
-		chunks, err := chunkfile(task.FileContent, task.Changes, config)
+		chunks, err := chunkfile(ctx, task.FileContent, task.Changes, config)
 		if err != nil {
 			return nil, fmt.Errorf("failed to chunk file %s: %w", task.FilePath, err)
 		}

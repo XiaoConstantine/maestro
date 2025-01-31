@@ -59,7 +59,7 @@ and impl changes through interactive learning sessions.`,
 
 	// Add flags
 	rootCmd.PersistentFlags().StringVar(&cfg.apiKey, "api-key", "", "API Key for vendors")
-	rootCmd.PersistentFlags().StringVar(&cfg.githubToken, "github-token", os.Getenv("GITHUB_TOKEN"), "Github token")
+	rootCmd.PersistentFlags().StringVar(&cfg.githubToken, "github-token", os.Getenv("MAESTRO_GITHUB_TOKEN"), "Github token")
 	rootCmd.PersistentFlags().StringVar(&cfg.owner, "owner", "", "Repository owner")
 	rootCmd.PersistentFlags().StringVar(&cfg.repo, "repo", "", "Repository")
 	rootCmd.PersistentFlags().StringVar(&cfg.memoryPath, "path", "./memory", "Path for sqlite table")
@@ -72,11 +72,13 @@ and impl changes through interactive learning sessions.`,
 	rootCmd.PersistentFlags().StringVar(&cfg.modelName, "model-name", DefaultModelName, "Specific model name")
 	rootCmd.PersistentFlags().StringVar(&cfg.modelConfig, "model-config", "", "Additional model configuration")
 	// Mark required flags
-	if err := rootCmd.MarkPersistentFlagRequired("github-token"); err != nil {
-		// Use fmt.Fprintf to write to stderr since we don't have a logger configured yet
-		fmt.Fprintf(os.Stderr, "Failed to mark github-token flag as required: %v\n", err)
-		os.Exit(1)
+	rootCmd.PersistentPreRun = func(cmd *cobra.Command, args []string) {
+		if cfg.githubToken == "" {
+			fmt.Fprintln(os.Stderr, "GitHub token required via --github-token or MAESTRO_GITHUB_TOKEN")
+			os.Exit(1)
+		}
 	}
+
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
 	}
@@ -165,11 +167,11 @@ func runCLI(cfg *config) error {
 	console.ShowSummary(comments)
 
 	logger.Info(ctx, "Posting review comments to GitHub")
-	// err = githubTools.CreateReviewComments(ctx, *prNumber, comments)
-	// if err != nil {
-	// 	logger.Error(ctx, "Failed to post review comments: %v", err)
-	// 	os.Exit(1)
-	// }
+	err = githubTools.CreateReviewComments(ctx, cfg.prNumber, comments)
+	if err != nil {
+		logger.Error(ctx, "Failed to post review comments: %v", err)
+		os.Exit(1)
+	}
 
 	console.ReviewComplete()
 	return nil

@@ -3,7 +3,11 @@ package main
 import (
 	"context"
 	"fmt"
+	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/XiaoConstantine/dspy-go/pkg/logging"
 	"github.com/google/go-github/v68/github"
@@ -120,24 +124,31 @@ func (g *GitHubTools) GetPullRequestChanges(ctx context.Context, prNumber int) (
 
 // CreateReviewComments posts review comments back to GitHub.
 func (g *GitHubTools) CreateReviewComments(ctx context.Context, prNumber int, comments []PRReviewComment) error {
+	changes, err := g.GetPullRequestChanges(ctx, prNumber)
+	if err != nil {
+		return fmt.Errorf("Failed to get changes for: %d", prNumber)
+	}
 	// Convert our comments into GitHub review comments
 	ghComments := make([]*github.DraftReviewComment, 0, len(comments))
 
 	for _, comment := range comments {
-		// Find the line number in the diff for this comment
-		position, err := g.findDiffPosition(ctx, prNumber, comment)
-		if err != nil {
-			continue // Skip comments we can't place in the diff
+
+		commentCopy := comment
+		if err := findReviewPosition(changes.Files, &commentCopy); err != nil {
+			logger := logging.GetLogger()
+			logger.Warn(ctx, "Skipping comment due to position error: %v", err)
+			continue
 		}
 
-		// Format the comment body with severity and category
-		body := formatCommentBody(comment)
-
+		body := formatCommentBody(commentCopy)
 		ghComments = append(ghComments, &github.DraftReviewComment{
-			Path:     &comment.FilePath,
-			Position: github.Ptr(position),
+			Path:     &commentCopy.FilePath,
+			Position: github.Ptr(commentCopy.LineNumber),
 			Body:     &body,
 		})
+	}
+	if len(ghComments) == 0 {
+		return fmt.Errorf("no valid comments to create")
 	}
 
 	// Create the review
@@ -148,7 +159,7 @@ func (g *GitHubTools) CreateReviewComments(ctx context.Context, prNumber int, co
 		Comments: ghComments,
 	}
 
-	_, _, err := g.client.PullRequests.CreateReview(ctx, g.owner, g.repo, prNumber, review)
+	_, _, err = g.client.PullRequests.CreateReview(ctx, g.owner, g.repo, prNumber, review)
 	if err != nil {
 		return fmt.Errorf("failed to create review: %w", err)
 	}
@@ -156,37 +167,127 @@ func (g *GitHubTools) CreateReviewComments(ctx context.Context, prNumber int, co
 	return nil
 }
 
-// Helper functions
+type fileFilterRules struct {
+	// Simple path contains matches - fastest check
+	pathContains []string
 
-func shouldSkipFile(filename string) bool {
-	// Skip common files we don't want to review
-	skippedPaths := []string{
-		"go.mod",
-		"go.sum",
+	// File extension matches - very fast check
+	extensions []string
+
+	// Regex patterns for complex matches
+	regexPatterns []*regexp.Regexp
+}
+
+func newFileFilterRules() *fileFilterRules {
+	// Simple contains matches for common paths
+	pathContains := []string{
 		"vendor/",
 		"generated/",
+		"node_modules/",
 		".git",
+		"dist/",
+		"build/",
 	}
 
-	for _, path := range skippedPaths {
+	// Direct extension matches
+	extensions := []string{
+		".pb.go",   // Generated protobuf
+		".gen.go",  // Other generated files
+		".md",      // Documentation
+		".txt",     // Text files
+		".yaml",    // Config files
+		".yml",     // Config files
+		".json",    // Config files
+		".lock",    // Lock files
+		".sum",     // Checksum files
+		".min.js",  // Minified JavaScript
+		".min.css", // Minified CSS
+	}
+
+	// Complex patterns that need regex
+	patterns := []string{
+		// Generated code patterns
+		`\.generated\..*$`,
+		`_generated\..*$`,
+
+		// IDE and system files
+		`\.idea/.*$`,
+		`\.vscode/.*$`,
+		`\.DS_Store$`,
+
+		// Test fixtures and data files
+		`testdata/.*$`,
+		`fixtures/.*$`,
+
+		// Build artifacts
+		`\.exe$`,
+		`\.dll$`,
+		`\.so$`,
+		`\.dylib$`,
+	}
+
+	// Compile all regex patterns
+	regexPatterns := make([]*regexp.Regexp, 0, len(patterns))
+	for _, pattern := range patterns {
+		regex := regexp.MustCompile(pattern)
+		regexPatterns = append(regexPatterns, regex)
+	}
+
+	return &fileFilterRules{
+		pathContains:  pathContains,
+		extensions:    extensions,
+		regexPatterns: regexPatterns,
+	}
+}
+
+var (
+	filterRules     *fileFilterRules
+	filterRulesOnce sync.Once
+)
+
+// getFilterRules returns the singleton instance of filter rules.
+func getFilterRules() *fileFilterRules {
+	filterRulesOnce.Do(func() {
+		filterRules = newFileFilterRules()
+	})
+	return filterRules
+}
+
+// Helper functions.
+func shouldSkipFile(filename string) bool {
+	// Use a singleton instance of filter rules
+	rules := getFilterRules()
+
+	// 1. Check specific filenames first (fastest)
+	specificFiles := map[string]bool{
+		"go.mod":            true,
+		"go.sum":            true,
+		"package-lock.json": true,
+		"yarn.lock":         true,
+		"Cargo.lock":        true,
+	}
+	if specificFiles[filename] {
+		return true
+	}
+
+	// 2. Check path contains (very fast)
+	for _, path := range rules.pathContains {
 		if strings.Contains(filename, path) {
 			return true
 		}
 	}
 
-	// Skip based on file extension
-	skippedExtensions := []string{
-		".pb.go",  // Generated protobuf
-		".gen.go", // Other generated files
-		".md",     // Documentation
-		".txt",    // Text files
-		".yaml",   // Config files
-		".yml",    // Config files
-		".json",   // Config files
+	// 3. Check file extensions (fast)
+	ext := filepath.Ext(filename)
+	for _, skipExt := range rules.extensions {
+		if ext == skipExt || strings.HasSuffix(filename, skipExt) {
+			return true
+		}
 	}
 
-	for _, ext := range skippedExtensions {
-		if strings.HasSuffix(filename, ext) {
+	// 4. Check regex patterns (slower but handles complex cases)
+	for _, pattern := range rules.regexPatterns {
+		if pattern.MatchString(filename) {
 			return true
 		}
 	}
@@ -194,31 +295,87 @@ func shouldSkipFile(filename string) bool {
 	return false
 }
 
-func (g *GitHubTools) findDiffPosition(ctx context.Context, prNumber int, comment PRReviewComment) (int, error) {
-	// Get the file changes
-	files, _, err := g.client.PullRequests.ListFiles(ctx, g.owner, g.repo, prNumber, &github.ListOptions{})
-	if err != nil {
-		return 0, err
+type DiffPosition struct {
+	Path     string // File path
+	Line     int    // Line number in the new file
+	Position int    // Position in the diff (required by GitHub API)
+}
+
+// calculateDiffPositions parses a git diff and returns valid positions for review comments.
+func calculateDiffPositions(patch string) (map[int]int, error) {
+	if patch == "" {
+		return nil, nil
 	}
 
-	// Find the right file
-	var targetFile *github.CommitFile
-	for _, file := range files {
-		if file.GetFilename() == comment.FilePath {
-			targetFile = file
+	positions := make(map[int]int)
+	currentPosition := 0
+	currentLine := 0
+
+	lines := strings.Split(patch, "\n")
+
+	for _, line := range lines {
+		currentPosition++
+
+		// Skip diff headers
+		if strings.HasPrefix(line, "diff ") ||
+			strings.HasPrefix(line, "index ") ||
+			strings.HasPrefix(line, "--- ") ||
+			strings.HasPrefix(line, "+++ ") {
+			continue
+		}
+
+		// Parse hunk headers
+		if strings.HasPrefix(line, "@@") {
+			// Parse the new file line number from hunk header
+			matches := regexp.MustCompile(`\+(\d+)`).FindStringSubmatch(line)
+			if len(matches) >= 2 {
+				lineNum, _ := strconv.Atoi(matches[1])
+				currentLine = lineNum - 1
+			}
+			continue
+		}
+
+		// Track line numbers for additions and context lines
+		if !strings.HasPrefix(line, "-") {
+			currentLine++
+			if !strings.HasPrefix(line, "\\") { // Ignore "\ No newline at end of file"
+				positions[currentLine] = currentPosition
+			}
+		}
+	}
+
+	return positions, nil
+}
+
+// findReviewPosition determines the correct position for a review comment.
+func findReviewPosition(fileChanges []PRFileChange, comment *PRReviewComment) error {
+	// Find the corresponding file change
+	var targetFile *PRFileChange
+	for i := range fileChanges {
+		if fileChanges[i].FilePath == comment.FilePath {
+			targetFile = &fileChanges[i]
 			break
 		}
 	}
 
-	if targetFile == nil {
-		return 0, fmt.Errorf("file not found in PR: %s", comment.FilePath)
+	if targetFile == nil || targetFile.Patch == "" {
+		return fmt.Errorf("no diff available for file: %s", comment.FilePath)
 	}
 
-	// Convert line number to diff position
-	// This is a simplified version - in practice, you'd need to parse the patch
-	// to find the exact position in the diff
-	position := comment.LineNumber
-	return position, nil
+	// Calculate valid positions from the diff
+	positions, err := calculateDiffPositions(targetFile.Patch)
+	if err != nil {
+		return fmt.Errorf("failed to calculate diff positions: %w", err)
+	}
+
+	// Find the position for the comment's line number
+	position, exists := positions[comment.LineNumber]
+	if !exists {
+		return fmt.Errorf("invalid line number %d for file %s", comment.LineNumber, comment.FilePath)
+	}
+
+	comment.LineNumber = position
+	return nil
 }
 
 func formatCommentBody(comment PRReviewComment) string {
