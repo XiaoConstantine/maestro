@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/XiaoConstantine/dspy-go/pkg/logging"
 	"github.com/google/go-github/v68/github"
@@ -18,9 +19,10 @@ import (
 
 // GitHubTools handles interactions with GitHub API.
 type GitHubTools struct {
-	client *github.Client
-	owner  string
-	repo   string
+	client            *github.Client
+	owner             string
+	repo              string
+	authenticatedUser string
 }
 
 // NewGitHubTools creates a new GitHub tools instance.
@@ -33,10 +35,15 @@ func NewGitHubTools(token, owner, repo string) *GitHubTools {
 	tc := oauth2.NewClient(ctx, ts)
 	client := github.NewClient(tc)
 
+	user, _, err := client.Users.Get(ctx, "")
+	if err != nil {
+		return nil
+	}
 	return &GitHubTools{
-		client: client,
-		owner:  owner,
-		repo:   repo,
+		client:            client,
+		owner:             owner,
+		repo:              repo,
+		authenticatedUser: user.GetLogin(),
 	}
 }
 
@@ -167,6 +174,35 @@ func (g *GitHubTools) CreateReviewComments(ctx context.Context, prNumber int, co
 	}
 
 	return nil
+}
+
+func (g *GitHubTools) MonitorPRComments(ctx context.Context, prNumber int, callback func(comment *github.PullRequestComment)) error {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+
+	lastChecked := time.Now()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+			comments, _, err := g.client.PullRequests.ListComments(ctx, g.owner, g.repo, prNumber, &github.PullRequestListCommentsOptions{
+				Since: lastChecked,
+			})
+			if err != nil {
+				return fmt.Errorf("failed to fetch new comments: %w", err)
+			}
+
+			for _, comment := range comments {
+				if comment.GetUser().GetLogin() != g.authenticatedUser {
+					callback(comment)
+				}
+			}
+
+			lastChecked = time.Now()
+		}
+	}
 }
 
 type fileFilterRules struct {
@@ -400,6 +436,7 @@ func formatCommentBody(comment PRReviewComment) string {
 
 	return sb.String()
 }
+
 func VerifyTokenPermissions(ctx context.Context, token, owner, repo string) error {
 	// Create an authenticated client
 	ts := oauth2.StaticTokenSource(&oauth2.Token{AccessToken: token})

@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/XiaoConstantine/dspy-go/pkg/agents"
 	"github.com/XiaoConstantine/dspy-go/pkg/logging"
@@ -37,7 +38,11 @@ type PRReviewComment struct {
 	Content    string
 	Severity   string
 	Suggestion string
-	Category   string // e.g., "security", "performance", "style"
+	Category   string    // e.g., "security", "performance", "style"
+	InReplyTo  *int64    // ID of the parent comment
+	ThreadID   *int64    // Unique thread identifier
+	Resolved   bool      // Track if the discussion is resolved
+	Timestamp  time.Time // When the comment was made
 }
 
 // PRReviewAgent handles code review using dspy-go.
@@ -45,6 +50,7 @@ type PRReviewAgent struct {
 	orchestrator *agents.FlexibleOrchestrator
 	memory       agents.Memory
 }
+
 type ReviewMetadata struct {
 	FilePath    string
 	FileContent string
@@ -300,7 +306,8 @@ func NewPRReviewAgent() (*PRReviewAgent, error) {
 			BackoffMultiplier: 2.0,
 		},
 		CustomProcessors: map[string]agents.TaskProcessor{
-			"code_review": &CodeReviewProcessor{},
+			"code_review":      &CodeReviewProcessor{},
+			"comment_response": &CommentResponseProcessor{},
 		},
 	}
 
