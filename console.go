@@ -1,13 +1,17 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
 	"sort"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/XiaoConstantine/dspy-go/pkg/logging"
+	"github.com/briandowns/spinner"
 	"github.com/google/go-github/v68/github"
 	"github.com/logrusorgru/aurora"
 	"github.com/mattn/go-isatty"
@@ -15,12 +19,45 @@ import (
 
 // Console handles user-facing output separate from logging.
 type Console struct {
-	w      io.Writer
-	logger *logging.Logger // For debug logs
-	color  bool
+	w       io.Writer
+	logger  *logging.Logger // For debug logs
+	spinner *spinner.Spinner
+	color   bool
+
+	mu sync.Mutex
 }
 
-func NewConsole(w io.Writer, logger *logging.Logger) *Console {
+type SpinnerConfig struct {
+	Color   string
+	Speed   time.Duration
+	CharSet []string
+	Prefix  string
+	Suffix  string
+}
+
+func DefaultSpinnerConfig() SpinnerConfig {
+	return SpinnerConfig{
+		Color:   "cyan",
+		Speed:   100 * time.Millisecond,
+		CharSet: spinner.CharSets[14], // Using the character set from your example
+		Prefix:  "Processing ",
+		Suffix:  "",
+	}
+}
+
+func NewConsole(w io.Writer, logger *logging.Logger, cfg *SpinnerConfig) *Console {
+	if cfg == nil {
+		defaultCfg := DefaultSpinnerConfig()
+		cfg = &defaultCfg
+	}
+
+	s := spinner.New(cfg.CharSet, cfg.Speed)
+	s.Prefix = cfg.Prefix
+	s.Suffix = cfg.Suffix
+
+	if err := s.Color(cfg.Color); err != nil {
+		logger.Warn(context.Background(), "Failed to set spinner color: %v", err)
+	}
 	// Detect if terminal supports color
 	color := true
 	if f, ok := w.(*os.File); ok {
@@ -28,9 +65,50 @@ func NewConsole(w io.Writer, logger *logging.Logger) *Console {
 	}
 
 	return &Console{
-		w:      w,
-		logger: logger,
-		color:  color,
+		w:       w,
+		logger:  logger,
+		color:   color,
+		spinner: s,
+	}
+}
+
+func (c *Console) StartSpinner(message string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.spinner.Suffix = fmt.Sprintf(" %s", message)
+	c.spinner.Start()
+}
+
+// StopSpinner stops the current spinner.
+func (c *Console) StopSpinner() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.spinner.Active() {
+		c.spinner.Stop()
+	}
+}
+
+// Helper method for handling LLM operations with spinner.
+func (c *Console) WithSpinner(ctx context.Context, message string, fn func() error) error {
+	c.StartSpinner(message)
+	defer c.StopSpinner()
+
+	// Create a channel for the result
+	errCh := make(chan error, 1)
+
+	// Run the operation in a goroutine
+	go func() {
+		errCh <- fn()
+	}()
+
+	// Wait for either completion or context cancellation
+	select {
+	case err := <-errCh:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }
 

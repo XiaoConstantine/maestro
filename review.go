@@ -297,7 +297,7 @@ func NewPRReviewAgent() (*PRReviewAgent, error) {
 		PlanCreator:    &agents.DependencyPlanCreator{},
 		AnalyzerConfig: analyzerConfig,
 		RetryConfig: &agents.RetryConfig{
-			MaxAttempts:       1,
+			MaxAttempts:       2,
 			BackoffMultiplier: 2.0,
 		},
 		CustomProcessors: map[string]agents.TaskProcessor{
@@ -361,31 +361,62 @@ func (a *PRReviewAgent) ReviewPR(ctx context.Context, tasks []PRReviewTask, cons
 			}
 
 			console.ReviewingFile(task.FilePath, i+1, len(task.Changes))
-			// Execute review for this chunk
-			result, err := a.orchestrator.Process(ctx,
-				fmt.Sprintf("Review chunk %d of %s", i+1, task.FilePath),
-				chunkContext)
+
+			message := fmt.Sprintf("Reviewing %s (chunk %d/%d)", task.FilePath, i+1, len(task.Chunks))
+			err := console.WithSpinner(ctx, message, func() error {
+				result, err := a.orchestrator.Process(ctx,
+					fmt.Sprintf("Review chunk %d of %s", i+1, task.FilePath),
+					chunkContext)
+				if err != nil {
+					return err
+				}
+				for taskID, taskResult := range result.CompletedTasks {
+					// Convert task results to comments
+					if reviewComments, err := extractComments(taskResult, task.FilePath); err != nil {
+						logging.GetLogger().Error(ctx, "Failed to extract comments from task %s: %v", taskID, err)
+						continue
+					} else {
+						// Show the results for this file
+						if len(reviewComments) == 0 {
+							console.NoIssuesFound(task.FilePath)
+						} else {
+							console.ShowComments(reviewComments)
+						}
+						allComments = append(allComments, reviewComments...)
+					}
+				}
+				return nil
+
+			})
 			if err != nil {
 				return nil, fmt.Errorf("failed to process chunk %d of %s: %w", i+1, task.FilePath, err)
 			}
-
-			// Collect comments from this chunk
-			for taskID, taskResult := range result.CompletedTasks {
-				// Convert task results to comments
-				if reviewComments, err := extractComments(taskResult, task.FilePath); err != nil {
-					logging.GetLogger().Error(ctx, "Failed to extract comments from task %s: %v", taskID, err)
-					continue
-				} else {
-					// Show the results for this file
-					if len(reviewComments) == 0 {
-						console.NoIssuesFound(task.FilePath)
-					} else {
-						console.ShowComments(reviewComments)
-					}
-					allComments = append(allComments, reviewComments...)
-				}
-			}
 		}
+		// Execute review for this chunk
+		// 	result, err := a.orchestrator.Process(ctx,
+		// 		fmt.Sprintf("Review chunk %d of %s", i+1, task.FilePath),
+		// 		chunkContext)
+		// 	if err != nil {
+		// 		return nil, fmt.Errorf("failed to process chunk %d of %s: %w", i+1, task.FilePath, err)
+		// 	}
+		//
+		// 	// Collect comments from this chunk
+		// 	for taskID, taskResult := range result.CompletedTasks {
+		// 		// Convert task results to comments
+		// 		if reviewComments, err := extractComments(taskResult, task.FilePath); err != nil {
+		// 			logging.GetLogger().Error(ctx, "Failed to extract comments from task %s: %v", taskID, err)
+		// 			continue
+		// 		} else {
+		// 			// Show the results for this file
+		// 			if len(reviewComments) == 0 {
+		// 				console.NoIssuesFound(task.FilePath)
+		// 			} else {
+		// 				console.ShowComments(reviewComments)
+		// 			}
+		// 			allComments = append(allComments, reviewComments...)
+		// 		}
+		// 	}
+		// }
 	}
 	return allComments, nil
 }
