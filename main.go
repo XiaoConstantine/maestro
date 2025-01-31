@@ -164,7 +164,12 @@ func runCLI(cfg *config) error {
 		logger.Error(ctx, "Failed to review PR: %v", err)
 		os.Exit(1)
 	}
-	console.ShowSummary(comments)
+	err = githubTools.PreviewReview(ctx, console, cfg.prNumber, comments)
+	if err != nil {
+		logger.Error(ctx, "Failed to preview review: %v", err)
+		os.Exit(1)
+	}
+	//	console.ShowSummary(comments)
 
 	logger.Info(ctx, "Posting review comments to GitHub")
 	err = githubTools.CreateReviewComments(ctx, cfg.prNumber, comments)

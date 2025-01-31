@@ -125,3 +125,18 @@ func firstNonEmpty(values ...string) string {
 	}
 	return ""
 }
+
+// Helper function until Go 1.21's min/max functions are available.
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}

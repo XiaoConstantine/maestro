@@ -10,6 +10,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/AlecAivazis/survey/v2"
+	"github.com/AlecAivazis/survey/v2/terminal"
 	"github.com/XiaoConstantine/dspy-go/pkg/logging"
 	"github.com/briandowns/spinner"
 	"github.com/google/go-github/v68/github"
@@ -33,6 +35,87 @@ type SpinnerConfig struct {
 	CharSet []string
 	Prefix  string
 	Suffix  string
+}
+
+// PromptOptions configures how the confirmation prompt behaves.
+type PromptOptions struct {
+	Message  string        // The question to ask
+	Default  bool          // Default answer if user just hits enter
+	HelpText string        // Optional help text shown below prompt
+	Timeout  time.Duration // Optional timeout for response
+	Color    bool          // Whether to use colors in prompt
+}
+
+func DefaultPromptOptions() PromptOptions {
+	return PromptOptions{
+		Message:  "Continue?",
+		Default:  false,
+		HelpText: "",
+		Timeout:  30 * time.Second,
+		Color:    true,
+	}
+}
+
+func (c *Console) Confirm(opts PromptOptions) (bool, error) {
+	// Create the survey prompt with styling
+	prompt := &survey.Confirm{
+		Message: opts.Message,
+		Default: opts.Default,
+		Help:    opts.HelpText,
+	}
+
+	// Configure survey settings
+	surveyOpts := []survey.AskOpt{
+		survey.WithIcons(func(icons *survey.IconSet) {
+			if c.color {
+				icons.Question.Text = "?"
+				icons.Question.Format = "cyan+b"
+				icons.Help.Format = "blue"
+			}
+		}),
+	}
+
+	// Add timeout if specified
+	// if opts.Timeout > 0 {
+	// 	surveyOpts = append(surveyOpts, survey.WithTimeout(opts.Timeout))
+	// }
+	//
+	// Handle piped input (non-interactive mode)
+	if !isatty.IsTerminal(os.Stdin.Fd()) {
+		return opts.Default, nil
+	}
+
+	var response bool
+	err := survey.AskOne(prompt, &response, surveyOpts...)
+
+	// Special handling for interrupt (Ctrl+C)
+	if err == terminal.InterruptErr {
+		if c.color {
+			c.println(aurora.Red("\n✖ Operation cancelled").String())
+		} else {
+			c.println("\n✖ Operation cancelled")
+		}
+		return false, nil
+	}
+
+	return response, err
+}
+
+func (c *Console) ConfirmReviewPost(commentCount int) (bool, error) {
+	// Format message based on comment count
+	message := fmt.Sprintf("Post %d review comment", commentCount)
+	if commentCount != 1 {
+		message += "s"
+	}
+	message += " to GitHub?"
+
+	// Create options with helpful context
+	opts := DefaultPromptOptions()
+	opts.Message = message
+	opts.HelpText = "This will create a pull request review with the comments shown above"
+	opts.Color = c.color
+
+	return c.Confirm(opts)
 }
 
 func DefaultSpinnerConfig() SpinnerConfig {

@@ -119,22 +119,23 @@ func parseReviewComments(filePath string, commentsStr string) ([]PRReviewComment
 
 			switch key {
 			case "line":
-				if lineNum, err := strconv.Atoi(value); err == nil {
+				value = strings.TrimPrefix(value, "L") // Handle "L123" format
+				value = strings.Split(value, "-")[0]   // Hand
+				if lineNum, err := strconv.Atoi(value); err == nil && lineNum > 0 {
 					comment.LineNumber = lineNum
 				}
 			case "severity":
-				comment.Severity = value
+				comment.Severity = validateSeverity(value)
 			case "content":
 				comment.Content = value
 			case "suggestion":
 				comment.Suggestion = value
 			case "category":
-				comment.Category = value
+				comment.Category = validateCategory(value)
 			}
 		}
 
-		// Add valid comments
-		if comment.Content != "" {
+		if isValidComment(comment) {
 			comments = append(comments, comment)
 		}
 	}
@@ -205,4 +206,40 @@ func extractReviewMetadata(metadata map[string]interface{}) (*ReviewMetadata, er
 	}
 
 	return rm, nil
+}
+
+func validateSeverity(severity string) string {
+	validSeverities := map[string]bool{
+		"critical":   true,
+		"warning":    true,
+		"suggestion": true,
+	}
+
+	severity = strings.ToLower(strings.TrimSpace(severity))
+	if validSeverities[severity] {
+		return severity
+	}
+	return "suggestion" // Default severity
+}
+
+func validateCategory(category string) string {
+	validCategories := map[string]bool{
+		"error-handling": true,
+		"code-style":     true,
+		"performance":    true,
+		"security":       true,
+		"documentation":  true,
+	}
+
+	category = strings.ToLower(strings.TrimSpace(category))
+	if validCategories[category] {
+		return category
+	}
+	return "code-style" // Default category
+}
+func isValidComment(comment PRReviewComment) bool {
+	return comment.LineNumber > 0 &&
+		comment.Content != "" &&
+		comment.Severity != "" &&
+		comment.Category != ""
 }

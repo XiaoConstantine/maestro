@@ -5,12 +5,14 @@ import (
 	"fmt"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
 
 	"github.com/XiaoConstantine/dspy-go/pkg/logging"
 	"github.com/google/go-github/v68/github"
+	"github.com/logrusorgru/aurora"
 	"golang.org/x/oauth2"
 )
 
@@ -499,4 +501,204 @@ func VerifyTokenPermissions(ctx context.Context, token, owner, repo string) erro
 
 	fmt.Println("\n✅ Token has all required permissions for PR review functionality")
 	return nil
+}
+
+type PreviewOptions struct {
+	ShowColors      bool   // Use ANSI colors for formatting
+	ContextLines    int    // Number of context lines around changes
+	FilePathStyle   string // How to display file paths (full, relative, basename)
+	ShowLineNumbers bool   // Whether to show line numbers
+}
+
+func (g *GitHubTools) PreviewReview(ctx context.Context, console *Console, prNumber int, comments []PRReviewComment) error {
+	// Use spinner while fetching PR changes
+	var changes *PRChanges
+	err := console.WithSpinner(ctx, "Fetching PR changes", func() error {
+		var err error
+		changes, err = g.GetPullRequestChanges(ctx, prNumber)
+		return err
+	})
+	if err != nil {
+		return fmt.Errorf("failed to get PR changes: %w", err)
+	}
+
+	// Group comments by file
+	commentsByFile := make(map[string][]PRReviewComment)
+	for _, comment := range comments {
+		if comment.LineNumber <= 0 {
+			logging.GetLogger().Warn(ctx,
+				"Skipping comment with invalid line number %d for file %s",
+				comment.LineNumber,
+				comment.FilePath)
+			continue
+		}
+		commentsByFile[comment.FilePath] = append(commentsByFile[comment.FilePath], comment)
+	}
+
+	// Print preview header
+	if console.color {
+		console.printHeader(aurora.Bold("Pull Request Review Preview").String())
+	} else {
+		console.printHeader("Pull Request Review Preview")
+	}
+
+	// For each file with comments
+	for filePath, fileComments := range commentsByFile {
+		// Find the file changes
+		var fileChange *PRFileChange
+		for i := range changes.Files {
+			if changes.Files[i].FilePath == filePath {
+				fileChange = &changes.Files[i]
+				break
+			}
+		}
+		if fileChange == nil {
+			continue
+		}
+
+		// Print file header with styling
+		if console.color {
+			console.println(aurora.Blue("📄").String(), aurora.Bold(filePath).String())
+		} else {
+			console.printf("📄 %s\n", filePath)
+		}
+		console.println(strings.Repeat("─", 80))
+
+		// Sort comments by line number
+		sort.Slice(fileComments, func(i, j int) bool {
+			return fileComments[i].LineNumber < fileComments[j].LineNumber
+		})
+
+		shownLines := make(map[int]bool)
+
+		// Print each comment in context
+		for _, comment := range fileComments {
+			if comment.LineNumber <= 0 {
+				continue
+			}
+			// Extract context around the comment
+			context, err := extractContext(fileChange.FileContent, comment.LineNumber, 3)
+			if err != nil {
+				logging.GetLogger().Warn(ctx, "Failed to extract context for file %s line %d: %v",
+					filePath, comment.LineNumber, err)
+				continue
+			}
+
+			if !shownLines[comment.LineNumber] {
+				// Print the code context with gutters
+				console.println(aurora.Cyan("┃").String() + " " +
+					aurora.Cyan("┃").String() + " " +
+					aurora.Cyan("┃").String())
+
+				for i, line := range context.Lines {
+					lineNum := context.StartLine + i
+
+					shownLines[lineNum] = true
+					if lineNum == comment.LineNumber {
+						// Highlight commented line
+						if console.color {
+							console.printf("%s %4d %s %s\n",
+								aurora.Blue("┃").String(),
+								lineNum,
+								aurora.Blue("│").String(),
+								aurora.Cyan(line).String())
+						} else {
+							console.printf("┃ %4d │ %s\n", lineNum, line)
+						}
+					} else {
+						if console.color {
+							console.printf("%s %4d %s %s\n",
+								aurora.Blue("┃").String(),
+								lineNum,
+								aurora.Blue("│").String(),
+								line)
+						} else {
+							console.printf("┃ %4d │ %s\n", lineNum, line)
+						}
+					}
+				}
+
+				// Print the review comment using existing console methods
+				console.println(aurora.Cyan("┃").String() + " " +
+					aurora.Cyan("┃").String() + " " +
+					aurora.Cyan("┃").String())
+			}
+			// Print severity icon and comment
+			icon := console.severityIcon(comment.Severity)
+			if console.color {
+				console.printf("%s %s:\n", icon, aurora.Bold(strings.ToUpper(comment.Severity)))
+			} else {
+				console.printf("%s %s:\n", icon, strings.ToUpper(comment.Severity))
+			}
+
+			console.println(indent(comment.Content, 4))
+
+			// Print suggestion if present
+			if comment.Suggestion != "" {
+				if console.color {
+					console.println(aurora.Green("  ✨ Suggestion:").String())
+				} else {
+					console.println("  ✨ Suggestion:")
+				}
+				console.println(indent(comment.Suggestion, 4))
+			}
+
+			// Print category
+			if console.color {
+				console.printf("\n  %s %s: %s\n\n",
+					aurora.Blue("🏷").String(),
+					aurora.Blue("Category").String(),
+					comment.Category)
+			} else {
+				console.printf("\n  🏷 Category: %s\n\n", comment.Category)
+			}
+		}
+	}
+
+	// Print summary using existing console method
+	console.ShowSummary(comments)
+
+	shouldPost, err := console.ConfirmReviewPost(len(comments))
+	if err != nil {
+		return fmt.Errorf("failed to get confirmation: %w", err)
+	}
+
+	if !shouldPost {
+		if console.color {
+			console.println(aurora.Yellow("\nReview cancelled - no comments posted").String())
+		} else {
+			console.println("\nReview cancelled - no comments posted")
+		}
+		return nil
+	}
+
+	return nil
+}
+
+// CodeContext represents lines of code around a specific line.
+type CodeContext struct {
+	StartLine int
+	Lines     []string
+}
+
+// extractContext gets lines of code around a specific line number.
+func extractContext(content string, line int, contextLines int) (*CodeContext, error) {
+	if content == "" {
+		return nil, fmt.Errorf("empty file content")
+	}
+
+	lines := strings.Split(content, "\n")
+	if line < 1 || line > len(lines) {
+		return nil, fmt.Errorf("line number out of range")
+	}
+
+	startLine := max(1, line-contextLines)
+	endLine := min(len(lines), line+contextLines)
+
+	context := &CodeContext{
+		StartLine: startLine,
+		Lines:     lines[startLine-1 : endLine],
+	}
+
+	return context, nil
 }
