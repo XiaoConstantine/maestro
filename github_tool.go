@@ -396,10 +396,13 @@ func findReviewPosition(fileChanges []PRFileChange, comment *PRReviewComment) er
 		}
 	}
 
-	if targetFile == nil || targetFile.Patch == "" {
-		return fmt.Errorf("no diff available for file: %s", comment.FilePath)
+	if targetFile == nil {
+		return fmt.Errorf("file not found in changes: %s", comment.FilePath)
 	}
 
+	if targetFile.Patch == "" {
+		return fmt.Errorf("no changes found in file: %s", comment.FilePath)
+	}
 	// Calculate valid positions from the diff
 	positions, err := calculateDiffPositions(targetFile.Patch)
 	if err != nil {
@@ -409,7 +412,14 @@ func findReviewPosition(fileChanges []PRFileChange, comment *PRReviewComment) er
 	// Find the position for the comment's line number
 	position, exists := positions[comment.LineNumber]
 	if !exists {
-		return fmt.Errorf("invalid line number %d for file %s", comment.LineNumber, comment.FilePath)
+		// If exact line not found, try to find nearest valid position
+		nearestLine := findNearestValidLine(positions, comment.LineNumber)
+		if nearestLine > 0 {
+			comment.LineNumber = positions[nearestLine]
+			return nil
+		}
+		return fmt.Errorf("no valid position found near line %d in file %s",
+			comment.LineNumber, comment.FilePath)
 	}
 
 	comment.LineNumber = position
@@ -435,6 +445,37 @@ func formatCommentBody(comment PRReviewComment) string {
 	sb.WriteString(fmt.Sprintf("\n\n_Category: %s_", comment.Category))
 
 	return sb.String()
+}
+
+func findNearestValidLine(positions map[int]int, target int) int {
+	if len(positions) == 0 {
+		return 0
+	}
+
+	// Convert positions map keys to slice for sorting
+	lines := make([]int, 0, len(positions))
+	for line := range positions {
+		lines = append(lines, line)
+	}
+	sort.Ints(lines)
+
+	// Find nearest line
+	nearest := lines[0]
+	minDist := abs(target - nearest)
+
+	for _, line := range lines[1:] {
+		dist := abs(target - line)
+		if dist < minDist {
+			minDist = dist
+			nearest = line
+		}
+	}
+
+	// Only return if within reasonable distance (e.g., 5 lines)
+	if minDist <= 5 {
+		return nearest
+	}
+	return 0
 }
 
 func VerifyTokenPermissions(ctx context.Context, token, owner, repo string) error {
@@ -547,7 +588,7 @@ type PreviewOptions struct {
 	ShowLineNumbers bool   // Whether to show line numbers
 }
 
-func (g *GitHubTools) PreviewReview(ctx context.Context, console *Console, prNumber int, comments []PRReviewComment) error {
+func (g *GitHubTools) PreviewReview(ctx context.Context, console *Console, prNumber int, comments []PRReviewComment) (bool, error) {
 	// Use spinner while fetching PR changes
 	var changes *PRChanges
 	err := console.WithSpinner(ctx, "Fetching PR changes", func() error {
@@ -556,7 +597,7 @@ func (g *GitHubTools) PreviewReview(ctx context.Context, console *Console, prNum
 		return err
 	})
 	if err != nil {
-		return fmt.Errorf("failed to get PR changes: %w", err)
+		return false, fmt.Errorf("failed to get PR changes: %w", err)
 	}
 
 	// Group comments by file
@@ -697,7 +738,7 @@ func (g *GitHubTools) PreviewReview(ctx context.Context, console *Console, prNum
 
 	shouldPost, err := console.ConfirmReviewPost(len(comments))
 	if err != nil {
-		return fmt.Errorf("failed to get confirmation: %w", err)
+		return false, fmt.Errorf("failed to get confirmation: %w", err)
 	}
 
 	if !shouldPost {
@@ -706,10 +747,10 @@ func (g *GitHubTools) PreviewReview(ctx context.Context, console *Console, prNum
 		} else {
 			console.println("\nReview cancelled - no comments posted")
 		}
-		return nil
+		return false, nil
 	}
 
-	return nil
+	return true, nil
 }
 
 // CodeContext represents lines of code around a specific line.
