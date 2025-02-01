@@ -122,12 +122,13 @@ func runCLI(cfg *config) error {
 	if err != nil {
 		logger.Error(ctx, "Failed to configure LLM: %v", err)
 	}
-	agent, err := NewPRReviewAgent()
+
+	githubTools := NewGitHubTools(cfg.githubToken, cfg.owner, cfg.repo)
+	agent, err := NewPRReviewAgent(githubTools)
 	if err != nil {
 		panic(err)
 	}
 
-	githubTools := NewGitHubTools(cfg.githubToken, cfg.owner, cfg.repo)
 	logger.Info(ctx, "Fetching changes for PR #%d", cfg.prNumber)
 	pr, _, _ := githubTools.client.PullRequests.Get(ctx, cfg.owner, cfg.repo, cfg.prNumber)
 	console.StartReview(pr)
@@ -159,7 +160,7 @@ func runCLI(cfg *config) error {
 
 	logger.Info(ctx, "Starting code review for %d files", len(tasks))
 
-	comments, err := agent.ReviewPR(ctx, tasks, console)
+	comments, err := agent.ReviewPR(ctx, cfg.prNumber, tasks, console)
 	if err != nil {
 		logger.Error(ctx, "Failed to review PR: %v", err)
 		os.Exit(1)

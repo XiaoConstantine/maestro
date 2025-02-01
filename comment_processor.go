@@ -12,6 +12,58 @@ import (
 	"github.com/XiaoConstantine/dspy-go/pkg/modules"
 )
 
+// Extend ThreadContext to include more detailed tracking.
+type ThreadContext struct {
+	// Existing fields
+	OriginalConcern    string
+	ConversationFlow   []PRReviewComment
+	RelatedChanges     []ReviewChunk
+	ResolutionAttempts []ResolutionAttempt
+	LastInteraction    time.Time
+
+	// New fields for enhanced context
+	Status          ThreadStatus
+	Participants    []string
+	RelatedThreads  []int64        // IDs of related discussion threads
+	CategoryMetrics map[string]int // Track frequency of issue categories
+}
+
+type ThreadStatus string
+
+const (
+	ThreadOpen       ThreadStatus = "open"
+	ThreadResolved   ThreadStatus = "resolved"
+	ThreadInProgress ThreadStatus = "in_progress"
+	ThreadStale      ThreadStatus = "stale"
+)
+
+type ResolutionEffectiveness string
+
+const (
+	HighEffectiveness    ResolutionEffectiveness = "high"
+	MediumEffectiveness  ResolutionEffectiveness = "medium"
+	LowEffectiveness     ResolutionEffectiveness = "low"
+	UnknownEffectiveness ResolutionEffectiveness = "unknown"
+)
+
+type ResolutionAttempt struct {
+	Proposal  string
+	Outcome   ResolutionOutcome
+	Timestamp time.Time
+	Feedback  string
+	Changes   []ReviewChunk // Use ReviewChunk instead of CodeChange
+}
+
+type ResolutionOutcome string
+
+const (
+	ResolutionAccepted     ResolutionOutcome = "accepted"
+	ResolutionRejected     ResolutionOutcome = "rejected"
+	ResolutionNeedsWork    ResolutionOutcome = "needs_work"
+	ResolutionInProgress   ResolutionOutcome = "in_progress"
+	ResolutionInconclusive ResolutionOutcome = "inconclusive"
+)
+
 type CommentResponseProcessor struct {
 	previousContext string
 }
@@ -74,19 +126,22 @@ action_items: List of specific tasks or clarifications needed, if any`)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse response: %w", err)
 	}
+	comment := &PRReviewComment{
+		FilePath:   metadata.FilePath,
+		LineNumber: metadata.LineNumber,
+		Content:    response.Response,
+		Severity:   deriveSeverity(response.ResolutionStatus),
+		Category:   metadata.Category,
+		InReplyTo:  metadata.InReplyTo,
+		ThreadID:   metadata.ThreadID,
+		Resolved:   response.ResolutionStatus == "resolved",
+		Timestamp:  time.Now(),
+	}
+	if len(response.ActionItems) > 0 {
+		comment.Suggestion = formatActionItems(response.ActionItems)
+	}
 
-	logger.Debug(ctx, "Generated response with status: %s", response.ResolutionStatus)
-
-	return response, nil
-}
-
-// ResponseMetadata contains all the context needed for processing a response.
-type ResponseMetadata struct {
-	OriginalComment string
-	ThreadContext   []CommentThread
-	FileContent     string
-	ReviewHistory   []ReviewAction
-	FilePath        string
+	return comment, nil
 }
 
 // CommentThread represents a series of related comments.
@@ -104,44 +159,69 @@ type ReviewAction struct {
 	Author    string
 }
 
-// ResponseResult represents the structured output of our response generation.
 type ResponseResult struct {
 	Response         string
 	ResolutionStatus string
 	ActionItems      []string
 }
 
+// Extract metadata from the task context.
 func extractResponseMetadata(metadata map[string]interface{}) (*ResponseMetadata, error) {
 	rm := &ResponseMetadata{}
 
-	// Extract original comment
+	// Get original comment details
 	if comment, ok := metadata["original_comment"].(string); ok {
 		rm.OriginalComment = comment
 	} else {
 		return nil, fmt.Errorf("missing or invalid original comment")
 	}
 
-	// Extract thread context
-	if threadCtx, ok := metadata["thread_context"].([]CommentThread); ok {
-		rm.ThreadContext = threadCtx
-	} else {
-		// Initialize empty thread context if none provided
-		rm.ThreadContext = []CommentThread{}
+	// Get thread context
+	if thread, ok := metadata["thread_context"].([]PRReviewComment); ok {
+		rm.ThreadContext = thread
 	}
 
-	// Extract file content
+	// Get file content
 	if content, ok := metadata["file_content"].(string); ok {
 		rm.FileContent = content
 	}
 
-	// Extract review history
-	if history, ok := metadata["review_history"].([]ReviewAction); ok {
-		rm.ReviewHistory = history
-	} else {
-		rm.ReviewHistory = []ReviewAction{}
+	// Get file path
+	if path, ok := metadata["file_path"].(string); ok {
+		rm.FilePath = path
+	}
+
+	// Get line number
+	if line, ok := metadata["line_number"].(int); ok {
+		rm.LineNumber = line
+	}
+
+	// Get thread identifiers
+	if threadID, ok := metadata["thread_id"].(*int64); ok {
+		rm.ThreadID = threadID
+	}
+	if replyTo, ok := metadata["in_reply_to"].(*int64); ok {
+		rm.InReplyTo = replyTo
+	}
+
+	// Get category
+	if category, ok := metadata["category"].(string); ok {
+		rm.Category = category
 	}
 
 	return rm, nil
+}
+
+type ResponseMetadata struct {
+	OriginalComment string
+	ThreadContext   []PRReviewComment
+	FileContent     string
+	FilePath        string
+	LineNumber      int
+	ThreadID        *int64
+	InReplyTo       *int64
+	Category        string
+	ReviewHistory   []ReviewChunk
 }
 
 func parseResponseResult(result interface{}) (*ResponseResult, error) {
@@ -224,4 +304,27 @@ func containsUnprofessionalContent(content string) bool {
 	}
 
 	return false
+}
+
+func deriveSeverity(status string) string {
+	switch status {
+	case "needs_work":
+		return "warning"
+	case "needs_clarification":
+		return "suggestion"
+	case "resolved":
+		return "suggestion"
+	default:
+		return "suggestion"
+	}
+}
+
+// Helper function to format action items into a suggestion.
+func formatActionItems(items []string) string {
+	var sb strings.Builder
+	sb.WriteString("Suggested actions:\n")
+	for _, item := range items {
+		sb.WriteString(fmt.Sprintf("- %s\n", item))
+	}
+	return sb.String()
 }

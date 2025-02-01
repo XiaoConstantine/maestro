@@ -10,6 +10,7 @@ import (
 
 	"github.com/XiaoConstantine/dspy-go/pkg/agents"
 	"github.com/XiaoConstantine/dspy-go/pkg/logging"
+	"github.com/google/go-github/v68/github"
 )
 
 type ReviewChunk struct {
@@ -33,22 +34,46 @@ type PRReviewTask struct {
 
 // PRReviewComment represents a review comment.
 type PRReviewComment struct {
-	FilePath   string
-	LineNumber int
-	Content    string
-	Severity   string
-	Suggestion string
-	Category   string    // e.g., "security", "performance", "style"
-	InReplyTo  *int64    // ID of the parent comment
-	ThreadID   *int64    // Unique thread identifier
-	Resolved   bool      // Track if the discussion is resolved
-	Timestamp  time.Time // When the comment was made
+	FilePath    string
+	LineNumber  int
+	Content     string
+	Severity    string
+	Suggestion  string
+	Category    string    // e.g., "security", "performance", "style"
+	InReplyTo   *int64    // ID of the parent comment
+	ThreadID    *int64    // Unique thread identifier
+	Resolved    bool      // Track if the discussion is resolved
+	Timestamp   time.Time // When the comment was made
+	Author      string
+	MessageType MessageType
 }
+
+type MessageType string
+
+const (
+	QuestionMessage        MessageType = "question"
+	ClarificationMessage   MessageType = "clarification"
+	ResolutionMessage      MessageType = "resolution"
+	SuggestionMessage      MessageType = "suggestion"
+	AcknowledgementMessage MessageType = "acknowledgement"
+)
 
 // PRReviewAgent handles code review using dspy-go.
 type PRReviewAgent struct {
-	orchestrator *agents.FlexibleOrchestrator
-	memory       agents.Memory
+	orchestrator  *agents.FlexibleOrchestrator
+	memory        agents.Memory
+	activeThreads map[int64]*ThreadTracker // Track active discussion threads
+	lastCheck     time.Time                // Last time we checked for new comments
+	// TODO: should align with dspy agent interface
+	githubTools *GitHubTools // Add this field
+}
+
+type ThreadTracker struct {
+	LastComment  *PRReviewComment
+	ReviewChunks []ReviewChunk
+	FileContent  string
+	LastUpdate   time.Time
+	Status       ThreadStatus // Using our existing ThreadStatus type
 }
 
 type ReviewMetadata struct {
@@ -272,7 +297,7 @@ func ExtractRelevantChanges(changes string, startline, endline int) string {
 }
 
 // NewPRReviewAgent creates a new PR review agent.
-func NewPRReviewAgent() (*PRReviewAgent, error) {
+func NewPRReviewAgent(githubTool *GitHubTools) (*PRReviewAgent, error) {
 	memory := agents.NewInMemoryStore()
 
 	analyzerConfig := agents.AnalyzerConfig{
@@ -316,11 +341,46 @@ func NewPRReviewAgent() (*PRReviewAgent, error) {
 	return &PRReviewAgent{
 		orchestrator: orchestrator,
 		memory:       memory,
+		githubTools:  githubTool,
 	}, nil
 }
 
+func (a *PRReviewAgent) GetGitHubTools() *GitHubTools {
+	if a.githubTools == nil {
+		panic("GitHub tools not initialized")
+	}
+	return a.githubTools
+}
+
 // ReviewPR reviews a complete pull request.
-func (a *PRReviewAgent) ReviewPR(ctx context.Context, tasks []PRReviewTask, console *Console) ([]PRReviewComment, error) {
+func (a *PRReviewAgent) ReviewPR(ctx context.Context, prNumber int, tasks []PRReviewTask, console *Console) ([]PRReviewComment, error) {
+	if a.activeThreads == nil {
+		a.activeThreads = make(map[int64]*ThreadTracker)
+	}
+
+	comments, err := a.performInitialReview(ctx, tasks, console)
+	if err != nil {
+		return nil, fmt.Errorf("initial review failed: %w", err)
+	}
+	// Track new threads from initial review
+	for _, comment := range comments {
+		if comment.ThreadID != nil {
+			a.activeThreads[*comment.ThreadID] = &ThreadTracker{
+				LastComment:  &comment,
+				ReviewChunks: findRelevantChunks(tasks, comment),
+				FileContent:  findFileContent(tasks, comment.FilePath),
+				LastUpdate:   time.Now(),
+				Status:       ThreadOpen, // Initial status for new threads
+			}
+		}
+	}
+
+	// Set up comment monitoring for interactive responses
+	go a.monitorAndRespond(ctx, prNumber, console)
+	return comments, nil
+}
+
+func (a *PRReviewAgent) performInitialReview(ctx context.Context, tasks []PRReviewTask, console *Console) ([]PRReviewComment, error) {
 	var allComments []PRReviewComment
 	// Create review context
 	fileData := make(map[string]map[string]interface{})
@@ -398,31 +458,137 @@ func (a *PRReviewAgent) ReviewPR(ctx context.Context, tasks []PRReviewTask, cons
 				return nil, fmt.Errorf("failed to process chunk %d of %s: %w", i+1, task.FilePath, err)
 			}
 		}
-		// Execute review for this chunk
-		// 	result, err := a.orchestrator.Process(ctx,
-		// 		fmt.Sprintf("Review chunk %d of %s", i+1, task.FilePath),
-		// 		chunkContext)
-		// 	if err != nil {
-		// 		return nil, fmt.Errorf("failed to process chunk %d of %s: %w", i+1, task.FilePath, err)
-		// 	}
-		//
-		// 	// Collect comments from this chunk
-		// 	for taskID, taskResult := range result.CompletedTasks {
-		// 		// Convert task results to comments
-		// 		if reviewComments, err := extractComments(taskResult, task.FilePath); err != nil {
-		// 			logging.GetLogger().Error(ctx, "Failed to extract comments from task %s: %v", taskID, err)
-		// 			continue
-		// 		} else {
-		// 			// Show the results for this file
-		// 			if len(reviewComments) == 0 {
-		// 				console.NoIssuesFound(task.FilePath)
-		// 			} else {
-		// 				console.ShowComments(reviewComments)
-		// 			}
-		// 			allComments = append(allComments, reviewComments...)
-		// 		}
-		// 	}
-		// }
 	}
 	return allComments, nil
+
+}
+
+func (a *PRReviewAgent) monitorAndRespond(ctx context.Context, prNumber int, console *Console) error {
+	githubTools := a.GetGitHubTools()
+	return githubTools.MonitorPRComments(ctx, prNumber, func(comment *github.PullRequestComment) {
+		// Only respond to comments in threads we're tracking
+		threadID := comment.GetID()
+		threadStatus, exists := a.activeThreads[threadID]
+		if !exists {
+			return
+		}
+
+		// Create context for response generation
+		responseContext := map[string]interface{}{
+			"original_comment": threadStatus.LastComment.Content,
+			"thread_context":   []PRReviewComment{*threadStatus.LastComment},
+			"file_content":     threadStatus.FileContent,
+			"file_path":        threadStatus.LastComment.FilePath,
+			"line_number":      threadStatus.LastComment.LineNumber,
+			"thread_id":        threadStatus.LastComment.ThreadID,
+			"in_reply_to":      comment.GetID(),
+			"category":         threadStatus.LastComment.Category,
+		}
+
+		// Process the response using CommentResponseProcessor
+		result, err := a.orchestrator.Process(ctx, "Generate response", responseContext)
+		if err != nil {
+			console.FileError(threadStatus.LastComment.FilePath, fmt.Errorf("failed to generate response: %v", err))
+			return
+		}
+
+		response, err := handleOrchestratorResult(result)
+		if err != nil {
+			console.FileError(threadStatus.LastComment.FilePath, fmt.Errorf("failed to process response: %v", err))
+			return
+		}
+		threadStatus.LastComment = response
+		threadStatus.LastUpdate = time.Now()
+		// Update thread status with new response
+		// Post the response
+		if response.ThreadID != nil {
+			err = githubTools.CreateReviewComments(ctx, prNumber, []PRReviewComment{*response})
+			if err != nil {
+				console.FileError(response.FilePath, fmt.Errorf("failed to post response: %v", err))
+			}
+		}
+
+	})
+}
+
+func determineThreadStatus(comment *PRReviewComment) ThreadStatus {
+	if comment.Resolved {
+		return ThreadResolved
+	}
+
+	// Check comment content for indicators of progress
+	content := strings.ToLower(comment.Content)
+	if strings.Contains(content, "working") || strings.Contains(content, "in progress") {
+		return ThreadInProgress
+	}
+
+	// Check for staleness based on time
+	if time.Since(comment.Timestamp) > 7*24*time.Hour {
+		return ThreadStale
+	}
+
+	return ThreadOpen
+}
+
+// findRelevantChunks locates the code chunks that are relevant to a specific comment.
+func findRelevantChunks(tasks []PRReviewTask, comment PRReviewComment) []ReviewChunk {
+	var relevantChunks []ReviewChunk
+
+	// Find the task containing the file
+	for _, task := range tasks {
+		if task.FilePath == comment.FilePath {
+			// Look through chunks to find those containing the comment line
+			for _, chunk := range task.Chunks {
+				if chunk.startline <= comment.LineNumber && chunk.endline >= comment.LineNumber {
+					relevantChunks = append(relevantChunks, chunk)
+				}
+			}
+			break
+		}
+	}
+
+	return relevantChunks
+}
+
+// findFileContent retrieves the full content of a specific file from the tasks.
+func findFileContent(tasks []PRReviewTask, filePath string) string {
+	for _, task := range tasks {
+		if task.FilePath == filePath {
+			return task.FileContent
+		}
+	}
+	return ""
+}
+
+func handleOrchestratorResult(result *agents.OrchestratorResult) (*PRReviewComment, error) {
+	// Look for completed tasks
+	for _, taskResult := range result.CompletedTasks {
+		// Try to convert the task result to a PRReviewComment
+		if comment, ok := taskResult.(PRReviewComment); ok {
+			return &comment, nil
+		}
+
+		// If it's a map, try to construct a PRReviewComment
+		if resultMap, ok := taskResult.(map[string]interface{}); ok {
+			comment := &PRReviewComment{}
+
+			// Extract fields from the map
+			if content, ok := resultMap["content"].(string); ok {
+				comment.Content = content
+			}
+			if severity, ok := resultMap["severity"].(string); ok {
+				comment.Severity = severity
+			}
+			if suggestion, ok := resultMap["suggestion"].(string); ok {
+				comment.Suggestion = suggestion
+			}
+			if category, ok := resultMap["category"].(string); ok {
+				comment.Category = category
+			}
+
+			return comment, nil
+		}
+	}
+
+	return nil, fmt.Errorf("no valid review comment found in orchestrator result")
 }
