@@ -602,7 +602,7 @@ func (a *PRReviewAgent) monitorAndRespond(ctx context.Context, prNumber int, con
 
 }
 
-// processComment handles the processing of a single PR comment
+// processComment handles the processing of a single PR comment.
 func (a *PRReviewAgent) processComment(ctx context.Context, comment *github.PullRequestComment, console *Console) {
 	logger := logging.GetLogger()
 
