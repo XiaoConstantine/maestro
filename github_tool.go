@@ -180,22 +180,29 @@ func (g *GitHubTools) MonitorPRComments(ctx context.Context, prNumber int, callb
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 
-	lastChecked := time.Now()
-
+	lastChecked := time.Now().Add(-5 * time.Minute)
+	logger := logging.GetLogger()
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-ticker.C:
 			comments, _, err := g.client.PullRequests.ListComments(ctx, g.owner, g.repo, prNumber, &github.PullRequestListCommentsOptions{
-				Since: lastChecked,
+				Since:     lastChecked,
+				Sort:      "created",
+				Direction: "desc",
 			})
 			if err != nil {
-				return fmt.Errorf("failed to fetch new comments: %w", err)
+				logger.Warn(ctx, "Failed to fetch comments: %v", err)
+				continue
 			}
 
 			for _, comment := range comments {
+				logger.Info(ctx, "")
+
 				if comment.GetUser().GetLogin() != g.authenticatedUser {
+					logger.Info(ctx, "Processing comment from user %s",
+						comment.GetUser().GetLogin())
 					callback(comment)
 				}
 			}
@@ -203,6 +210,39 @@ func (g *GitHubTools) MonitorPRComments(ctx context.Context, prNumber int, callb
 			lastChecked = time.Now()
 		}
 	}
+}
+
+// GetFileContent retrieves the content of a specific file from the repository.
+// This uses the GitHub API's GetContents endpoint to fetch file content.
+func (g *GitHubTools) GetFileContent(ctx context.Context, filePath string) (string, error) {
+	// Get the content using GitHub's API
+	content, _, resp, err := g.client.Repositories.GetContents(
+		ctx,
+		g.owner,
+		g.repo,
+		filePath,
+		&github.RepositoryContentGetOptions{},
+	)
+
+	if err != nil {
+		if resp != nil && resp.StatusCode == 404 {
+			return "", fmt.Errorf("file not found: %s", filePath)
+		}
+		return "", fmt.Errorf("failed to get file content: %w", err)
+	}
+
+	// content will be nil for directories
+	if content == nil {
+		return "", fmt.Errorf("no content available for %s", filePath)
+	}
+
+	// Decode the content
+	fileContent, err := content.GetContent()
+	if err != nil {
+		return "", fmt.Errorf("failed to decode content: %w", err)
+	}
+
+	return fileContent, nil
 }
 
 type fileFilterRules struct {

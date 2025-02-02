@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/XiaoConstantine/dspy-go/pkg/core"
 	"github.com/XiaoConstantine/dspy-go/pkg/llms"
@@ -159,7 +160,11 @@ func runCLI(cfg *config) error {
 	}
 
 	logger.Info(ctx, "Starting code review for %d files", len(tasks))
-
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		agent.Stop(shutdownCtx)
+	}()
 	comments, err := agent.ReviewPR(ctx, cfg.prNumber, tasks, console)
 	if err != nil {
 		logger.Error(ctx, "Failed to review PR: %v", err)

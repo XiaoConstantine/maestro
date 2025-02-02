@@ -2,16 +2,33 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/XiaoConstantine/dspy-go/pkg/agents"
 	"github.com/XiaoConstantine/dspy-go/pkg/logging"
 	"github.com/google/go-github/v68/github"
 )
+
+type Stopper struct {
+	stop     chan struct{}
+	stopped  chan struct{}
+	cancel   context.CancelFunc
+	wg       sync.WaitGroup
+	stopOnce sync.Once
+}
+
+func NewStopper() *Stopper {
+	return &Stopper{
+		stop:    make(chan struct{}),
+		stopped: make(chan struct{}),
+	}
+}
 
 type ReviewChunk struct {
 	content         string
@@ -66,6 +83,7 @@ type PRReviewAgent struct {
 	lastCheck     time.Time                // Last time we checked for new comments
 	// TODO: should align with dspy agent interface
 	githubTools *GitHubTools // Add this field
+	stopper     *Stopper
 }
 
 type ThreadTracker struct {
@@ -74,6 +92,8 @@ type ThreadTracker struct {
 	FileContent  string
 	LastUpdate   time.Time
 	Status       ThreadStatus // Using our existing ThreadStatus type
+
+	ParentCommentID int64
 }
 
 type ReviewMetadata struct {
@@ -300,6 +320,7 @@ func ExtractRelevantChanges(changes string, startline, endline int) string {
 func NewPRReviewAgent(githubTool *GitHubTools) (*PRReviewAgent, error) {
 	memory := agents.NewInMemoryStore()
 
+	stopper := NewStopper()
 	analyzerConfig := agents.AnalyzerConfig{
 		BaseInstruction: `
 		IMPORTANT FORMAT RULES:
@@ -342,6 +363,7 @@ func NewPRReviewAgent(githubTool *GitHubTools) (*PRReviewAgent, error) {
 		orchestrator: orchestrator,
 		memory:       memory,
 		githubTools:  githubTool,
+		stopper:      stopper,
 	}, nil
 }
 
@@ -358,6 +380,33 @@ func (a *PRReviewAgent) ReviewPR(ctx context.Context, prNumber int, tasks []PRRe
 		a.activeThreads = make(map[int64]*ThreadTracker)
 	}
 
+	if err := a.processExistingComments(ctx, prNumber, console); err != nil {
+		return nil, fmt.Errorf("failed to process existing comments: %w", err)
+	}
+
+	a.stopper.wg.Add(1)
+	monitorCtx, cancel := context.WithCancel(ctx)
+
+	a.stopper.cancel = cancel
+
+	go func() {
+		defer a.stopper.wg.Done()
+		if err := a.monitorAndRespond(monitorCtx, prNumber, console); err != nil {
+			if !errors.Is(err, context.Canceled) {
+				console.FileError("monitoring", fmt.Errorf("monitoring error: %w", err))
+			}
+		}
+	}()
+	var existingResponses []PRReviewComment
+	for _, thread := range a.activeThreads {
+		response, err := a.generateResponse(ctx, thread, console)
+		if err != nil {
+			continue
+		}
+		if response != nil {
+			existingResponses = append(existingResponses, *response)
+		}
+	}
 	comments, err := a.performInitialReview(ctx, tasks, console)
 	if err != nil {
 		return nil, fmt.Errorf("initial review failed: %w", err)
@@ -374,10 +423,32 @@ func (a *PRReviewAgent) ReviewPR(ctx context.Context, prNumber int, tasks []PRRe
 			}
 		}
 	}
+	return append(existingResponses, comments...), nil
+}
 
-	// Set up comment monitoring for interactive responses
-	go a.monitorAndRespond(ctx, prNumber, console)
-	return comments, nil
+func (a *PRReviewAgent) Stop(ctx context.Context) {
+	logger := logging.GetLogger()
+	a.stopper.stopOnce.Do(func() {
+		if a.stopper.cancel != nil {
+			a.stopper.cancel()
+		}
+		close(a.stopper.stop)
+
+		done := make(chan struct{})
+		go func() {
+			a.stopper.wg.Wait()
+			close(a.stopper.stopped)
+			close(done)
+		}()
+
+		// Wait with timeout
+		select {
+		case <-done:
+		case <-ctx.Done():
+			// Log timeout but continue
+			logger.Warn(ctx, "Warning: shutdown timed out")
+		}
+	})
 }
 
 func (a *PRReviewAgent) performInitialReview(ctx context.Context, tasks []PRReviewTask, console *Console) ([]PRReviewComment, error) {
@@ -463,52 +534,209 @@ func (a *PRReviewAgent) performInitialReview(ctx context.Context, tasks []PRRevi
 
 }
 
-func (a *PRReviewAgent) monitorAndRespond(ctx context.Context, prNumber int, console *Console) error {
+func (a *PRReviewAgent) processExistingComments(ctx context.Context, prNumber int, console *Console) error {
+	console.printf("process existing comments...")
 	githubTools := a.GetGitHubTools()
-	return githubTools.MonitorPRComments(ctx, prNumber, func(comment *github.PullRequestComment) {
-		// Only respond to comments in threads we're tracking
-		threadID := comment.GetID()
-		threadStatus, exists := a.activeThreads[threadID]
-		if !exists {
-			return
+	changes, err := githubTools.GetPullRequestChanges(ctx, prNumber)
+	if err != nil {
+		return fmt.Errorf("failed to fetch PR changes: %w", err)
+	}
+	fileContents := make(map[string]string)
+	for _, change := range changes.Files {
+		fileContents[change.FilePath] = change.FileContent
+	}
+	comments, _, err := githubTools.client.PullRequests.ListComments(ctx,
+		githubTools.owner, githubTools.repo, prNumber,
+		&github.PullRequestListCommentsOptions{})
+	if err != nil {
+		return fmt.Errorf("failed to fetch existing comments: %w", err)
+	}
+	commentMap := make(map[int64]*github.PullRequestComment)
+	for _, comment := range comments {
+		commentMap[comment.GetID()] = comment
+	}
+	for _, comment := range comments {
+		commentID := comment.GetID()
+		parentID := comment.GetInReplyTo()
+
+		filePath := comment.GetPath()
+		// Skip our own comments
+		if comment.GetUser().GetLogin() == githubTools.authenticatedUser {
+			continue
 		}
 
-		// Create context for response generation
-		responseContext := map[string]interface{}{
-			"original_comment": threadStatus.LastComment.Content,
-			"thread_context":   []PRReviewComment{*threadStatus.LastComment},
-			"file_content":     threadStatus.FileContent,
-			"file_path":        threadStatus.LastComment.FilePath,
-			"line_number":      threadStatus.LastComment.LineNumber,
-			"thread_id":        threadStatus.LastComment.ThreadID,
-			"in_reply_to":      comment.GetID(),
-			"category":         threadStatus.LastComment.Category,
-		}
+		// Create a thread tracker if it doesn't exist
+		if _, exists := a.activeThreads[commentID]; !exists {
+			// Convert GitHub comment to our format
+			reviewComment := convertGitHubComment(comment)
 
-		// Process the response using CommentResponseProcessor
-		result, err := a.orchestrator.Process(ctx, "Generate response", responseContext)
-		if err != nil {
-			console.FileError(threadStatus.LastComment.FilePath, fmt.Errorf("failed to generate response: %v", err))
-			return
-		}
-
-		response, err := handleOrchestratorResult(result)
-		if err != nil {
-			console.FileError(threadStatus.LastComment.FilePath, fmt.Errorf("failed to process response: %v", err))
-			return
-		}
-		threadStatus.LastComment = response
-		threadStatus.LastUpdate = time.Now()
-		// Update thread status with new response
-		// Post the response
-		if response.ThreadID != nil {
-			err = githubTools.CreateReviewComments(ctx, prNumber, []PRReviewComment{*response})
-			if err != nil {
-				console.FileError(response.FilePath, fmt.Errorf("failed to post response: %v", err))
+			a.activeThreads[commentID] = &ThreadTracker{
+				LastComment:     &reviewComment,
+				ParentCommentID: parentID,
+				LastUpdate:      comment.GetCreatedAt().Time,
+				Status:          ThreadOpen,
+				FileContent:     fileContents[filePath],
+			}
+			// If this is a reply, link it to the parent thread
+			if parentID != 0 {
+				if parentThread, exists := a.activeThreads[parentID]; exists {
+					// Update the parent thread with this comment
+					parentThread.LastComment = &reviewComment
+					parentThread.LastUpdate = comment.GetCreatedAt().Time
+				}
 			}
 		}
+	}
+	return nil
+}
 
+func (a *PRReviewAgent) monitorAndRespond(ctx context.Context, prNumber int, console *Console) error {
+	githubTools := a.GetGitHubTools()
+
+	return githubTools.MonitorPRComments(ctx, prNumber, func(comment *github.PullRequestComment) {
+		// Only process comments from other users
+		if comment.GetUser().GetLogin() != githubTools.authenticatedUser {
+			a.processComment(ctx, comment, console)
+		}
 	})
+
+}
+
+// processComment handles the processing of a single PR comment
+func (a *PRReviewAgent) processComment(ctx context.Context, comment *github.PullRequestComment, console *Console) {
+	logger := logging.GetLogger()
+
+	// Extract comment identifiers
+	commentID := comment.GetID()
+	parentID := comment.GetInReplyTo()
+
+	logger.Info(ctx, "Processing comment ID: %d, Parent ID: %d", commentID, parentID)
+
+	var threadStatus *ThreadTracker
+	var exists bool
+
+	// Check parent thread first
+	if parentID != 0 {
+		threadStatus, exists = a.activeThreads[parentID]
+	}
+
+	// If no parent thread, check comment thread
+	if !exists {
+		threadStatus, exists = a.activeThreads[commentID]
+	}
+	if !exists {
+		reviewComment := convertGitHubComment(comment)
+		threadStatus = &ThreadTracker{
+			LastComment:     &reviewComment,
+			LastUpdate:      comment.GetCreatedAt().Time,
+			Status:          ThreadOpen,
+			ParentCommentID: parentID,
+		}
+		a.activeThreads[commentID] = threadStatus
+		logger.Info(ctx, "Created new thread tracker for comment ID: %d", commentID)
+	}
+
+	// Prepare context for response generation
+	responseContext := map[string]interface{}{
+		"original_comment": threadStatus.LastComment.Content,
+		"thread_context":   []PRReviewComment{*threadStatus.LastComment},
+		"file_content":     threadStatus.FileContent,
+		"file_path":        threadStatus.LastComment.FilePath,
+		"line_number":      threadStatus.LastComment.LineNumber,
+		"thread_id":        threadStatus.LastComment.ThreadID,
+		"in_reply_to":      commentID,
+		"category":         threadStatus.LastComment.Category,
+	}
+
+	// Generate response using the orchestrator
+	result, err := a.orchestrator.Process(ctx, "Generate response", responseContext)
+	if err != nil {
+		console.FileError(threadStatus.LastComment.FilePath,
+			fmt.Errorf("failed to generate response: %w", err))
+		return
+	}
+
+	// Process the orchestrator result
+	response, err := handleOrchestratorResult(result)
+	if err != nil {
+		console.FileError(threadStatus.LastComment.FilePath,
+			fmt.Errorf("failed to process response: %w", err))
+		return
+	}
+
+	// Update thread status
+	threadStatus.LastComment = response
+	threadStatus.LastUpdate = time.Now()
+	threadStatus.ParentCommentID = parentID
+
+	// Update thread trackers
+	a.activeThreads[commentID] = threadStatus
+	if parentID != 0 {
+		a.activeThreads[parentID] = threadStatus
+	}
+
+	// Post the response if needed
+	if response.ThreadID != nil {
+		githubTools := a.GetGitHubTools()
+		err = githubTools.CreateReviewComments(ctx,
+			int(comment.GetPullRequestReviewID()),
+			[]PRReviewComment{*response})
+		if err != nil {
+			console.FileError(response.FilePath,
+				fmt.Errorf("failed to post response: %v", err))
+		}
+	}
+}
+func (a *PRReviewAgent) generateResponse(ctx context.Context, thread *ThreadTracker, console *Console) (*PRReviewComment, error) {
+	logger := logging.GetLogger()
+	if thread.FileContent == "" {
+		if err := a.refreshThreadContent(ctx, thread); err != nil {
+			logger.Warn(ctx, "Could not refresh file content for %s: %v",
+				thread.LastComment.FilePath, err)
+		}
+	}
+	responseContext := map[string]interface{}{
+		"original_comment": thread.LastComment.Content,
+		"thread_context":   []PRReviewComment{*thread.LastComment},
+		"file_content":     thread.FileContent,
+		"file_path":        thread.LastComment.FilePath,
+		"line_number":      thread.LastComment.LineNumber,
+		"thread_id":        thread.LastComment.ThreadID,
+		"category":         thread.LastComment.Category,
+	}
+
+	logger.Info(ctx, "Generating response for comment in file %s at line %d",
+		thread.LastComment.FilePath, thread.LastComment.LineNumber)
+
+	result, err := a.orchestrator.Process(ctx, "Generate response", responseContext)
+	if err != nil {
+		return nil, err
+	}
+
+	response, err := handleOrchestratorResult(result)
+	if err != nil {
+		return nil, err
+	}
+
+	// Set the InReplyTo field to maintain the thread
+	response.InReplyTo = thread.LastComment.ThreadID
+
+	return response, nil
+}
+
+func (a *PRReviewAgent) refreshThreadContent(ctx context.Context, thread *ThreadTracker) error {
+	if thread.FileContent == "" {
+		// Fetch current file content
+		content, err := a.githubTools.GetFileContent(ctx, thread.LastComment.FilePath)
+		if err != nil {
+			return fmt.Errorf("failed to refresh file content for %s: %w",
+				thread.LastComment.FilePath, err)
+		}
+		thread.FileContent = content
+		logging.GetLogger().Debug(ctx, "Successfully refreshed content for file: %s",
+			thread.LastComment.FilePath)
+	}
+	return nil
 }
 
 func determineThreadStatus(comment *PRReviewComment) ThreadStatus {
@@ -591,4 +819,16 @@ func handleOrchestratorResult(result *agents.OrchestratorResult) (*PRReviewComme
 	}
 
 	return nil, fmt.Errorf("no valid review comment found in orchestrator result")
+}
+
+func convertGitHubComment(comment *github.PullRequestComment) PRReviewComment {
+	return PRReviewComment{
+		FilePath:   comment.GetPath(),
+		LineNumber: comment.GetLine(),
+		Content:    comment.GetBody(),
+		ThreadID:   github.Ptr(comment.GetID()),
+		InReplyTo:  github.Ptr(comment.GetInReplyTo()),
+		Timestamp:  comment.GetCreatedAt().Time,
+		Author:     comment.GetUser().GetLogin(),
+	}
 }
