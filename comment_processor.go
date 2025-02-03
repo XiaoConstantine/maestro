@@ -159,12 +159,12 @@ For needs_work responses, always provide specific action items
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse response: %w", err)
 	}
-	comment := &PRReviewComment{
+	comment := PRReviewComment{
 		FilePath:   metadata.FilePath,
 		LineNumber: metadata.LineNumber,
 		Content:    response.Response,
 		Severity:   deriveSeverity(response.ResolutionStatus),
-		Category:   metadata.Category,
+		Category:   "code-style",
 		InReplyTo:  metadata.InReplyTo,
 		ThreadID:   metadata.ThreadID,
 		Resolved:   response.ResolutionStatus == "resolved",

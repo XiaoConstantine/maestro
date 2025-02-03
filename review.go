@@ -338,7 +338,11 @@ func NewPRReviewAgent(githubTool *GitHubTools) (*PRReviewAgent, error) {
 		2. Provide raw XML directly after 'tasks:' without any wrapping
 		3. Keep the exact field prefix format - no decorations or modifications
 		4. Ensure proper indentation and structure in the XML
-		5. When thread_id is present in the context, always create a comment_response task.`,
+		5. When thread_id is present in the context, always create a comment_response task.
+		6 FOR TASK FIELD 'file_content':
+		- Before inserting it into the XML, replace every '<' with '&lt; and every '>' with '&gt;'.**  
+	        - For example, '<reasoning>' should become '&lt;reasoning&gt;' and '<answer>' should become '&lt;answer&gt;'.
+		`,
 
 		FormatInstructions: `Format tasks section in following XML format:
 	   <tasks>
@@ -351,7 +355,7 @@ func NewPRReviewAgent(githubTool *GitHubTools) (*PRReviewAgent, error) {
 	               <item key="category">{category}</item>
                        <item key="original_comment">{original_comment}</item>
                        <item key="thread_id">{thread_id}</item>
-		       <item key="line_number">{line_number}</line_number>
+		       <item key="line_number">{line_number}</item>
 	           </metadata>
 	       </task>
 	   </tasks>`,
@@ -587,6 +591,7 @@ func (a *PRReviewAgent) processExistingComments(ctx context.Context, prNumber in
 	logger := logging.GetLogger()
 	console.println(aurora.Cyan("\nprocess existing comments..."))
 	githubTools := a.GetGitHubTools()
+
 	changes, err := githubTools.GetPullRequestChanges(ctx, prNumber)
 	if err != nil {
 		return fmt.Errorf("failed to fetch PR changes: %w", err)
@@ -704,6 +709,10 @@ func (a *PRReviewAgent) processComment(ctx context.Context, comment *github.Pull
 		}
 		a.activeThreads[commentID] = threadStatus
 		logger.Info(ctx, "Created new thread tracker for comment ID: %d", commentID)
+	}
+	if err := a.refreshThreadContent(ctx, threadStatus); err != nil {
+		logger.Error(ctx, "Failed to get file content: %v", err)
+		return
 	}
 
 	// Prepare context for response generation
@@ -829,7 +838,7 @@ func (a *PRReviewAgent) refreshThreadContent(ctx context.Context, thread *Thread
 				thread.LastComment.FilePath, err)
 		}
 		thread.FileContent = content
-		logging.GetLogger().Debug(ctx, "Successfully refreshed content for file: %s",
+		logging.GetLogger().Info(ctx, "Successfully refreshed content for file: %s",
 			thread.LastComment.FilePath)
 	}
 	return nil
