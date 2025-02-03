@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -70,7 +71,28 @@ type CommentResponseProcessor struct {
 
 func (p *CommentResponseProcessor) Process(ctx context.Context, task agents.Task, context map[string]interface{}) (interface{}, error) {
 	logger := logging.GetLogger()
+	// Ensure we have valid thread context
+	if _, exists := context["thread_context"]; !exists {
+		logger.Debug(ctx, "No thread context found in request")
+		context["thread_context"] = []PRReviewComment{}
+	}
 
+	threadContext, exists := context["thread_context"].([]PRReviewComment)
+	if exists && len(threadContext) > 0 {
+		// Build conversation history
+		var conversationHistory strings.Builder
+		for _, comment := range threadContext {
+			conversationHistory.WriteString(fmt.Sprintf("Author: %s\n", comment.Author))
+			conversationHistory.WriteString(fmt.Sprintf("Message: %s\n", comment.Content))
+			if comment.Suggestion != "" {
+				conversationHistory.WriteString(fmt.Sprintf("Suggestion: %s\n", comment.Suggestion))
+			}
+			conversationHistory.WriteString("---\n")
+		}
+		p.previousContext = conversationHistory.String()
+
+		logger.Debug(ctx, "Built conversation history: %s", p.previousContext)
+	}
 	// Define our signature with clear input and output expectations
 	signature := core.NewSignature(
 		[]core.InputField{
@@ -78,6 +100,7 @@ func (p *CommentResponseProcessor) Process(ctx context.Context, task agents.Task
 			{Field: core.Field{Name: "thread_context"}},
 			{Field: core.Field{Name: "file_content"}},
 			{Field: core.Field{Name: "review_history"}},
+			{Field: core.Field{Name: "line_number"}},
 		},
 		[]core.OutputField{
 			{Field: core.NewField("response")},
@@ -95,10 +118,17 @@ Consider the following aspects:
 Provide response in the following format:
 response: Clear and professional response addressing the feedback
 resolution_status: [resolved|needs_work|needs_clarification|acknowledged]
-action_items: List of specific tasks or clarifications needed, if any`)
+action_items: List of specific tasks or clarifications needed, if any
+
+NOTE: 
+For needs_clarification responses, focus on asking specific questions about what needs to be clarified.
+For needs_work responses, always provide specific action items
+`)
 
 	// Create predict module for generating responses
 	predict := modules.NewPredict(signature)
+
+	logger.Info(ctx, "Raw task Meta: %v", task.Metadata)
 
 	// Extract metadata from the task
 	metadata, err := extractResponseMetadata(task.Metadata)
@@ -110,12 +140,15 @@ action_items: List of specific tasks or clarifications needed, if any`)
 	logger.Debug(ctx, "Processing response for comment thread with %d messages",
 		len(metadata.ThreadContext))
 
+	logger.Info(ctx, "Comment Processing response with line number: %d", metadata.LineNumber)
 	// Process the response
 	result, err := predict.Process(ctx, map[string]interface{}{
 		"original_comment": metadata.OriginalComment,
 		"thread_context":   metadata.ThreadContext,
 		"file_content":     metadata.FileContent,
-		"review_history":   metadata.ReviewHistory,
+		"review_history":   p.previousContext,
+		"line_number":      metadata.LineNumber,
+		"file_path":        metadata.FilePath,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("prediction failed: %w", err)
@@ -168,6 +201,34 @@ type ResponseResult struct {
 // Extract metadata from the task context.
 func extractResponseMetadata(metadata map[string]interface{}) (*ResponseMetadata, error) {
 	rm := &ResponseMetadata{}
+	if lineNum, exists := metadata["line_number"]; exists {
+		switch v := lineNum.(type) {
+		case int:
+			rm.LineNumber = v
+		case float64:
+			rm.LineNumber = int(v)
+		case string:
+			if num, err := strconv.Atoi(v); err == nil {
+				rm.LineNumber = num
+			}
+		default:
+			// Log what type we actually received
+			logging.GetLogger().Warn(context.Background(),
+				"Unexpected line number type: %T with value: %v", lineNum, lineNum)
+		}
+	}
+
+	if rm.LineNumber == 0 {
+		// Try to recover line number from other metadata fields
+		if threadContext, ok := metadata["thread_context"].([]PRReviewComment); ok {
+			for _, comment := range threadContext {
+				if comment.LineNumber > 0 {
+					rm.LineNumber = comment.LineNumber
+					break
+				}
+			}
+		}
+	}
 
 	// Get original comment details
 	if comment, ok := metadata["original_comment"].(string); ok {
@@ -197,8 +258,14 @@ func extractResponseMetadata(metadata map[string]interface{}) (*ResponseMetadata
 	}
 
 	// Get thread identifiers
-	if threadID, ok := metadata["thread_id"].(*int64); ok {
-		rm.ThreadID = threadID
+	if threadID, exists := metadata["thread_id"]; exists {
+		switch v := threadID.(type) {
+		case int64:
+			rm.ThreadID = &v
+		case float64:
+			val := int64(v)
+			rm.ThreadID = &val
+		}
 	}
 	if replyTo, ok := metadata["in_reply_to"].(*int64); ok {
 		rm.InReplyTo = replyTo
@@ -207,6 +274,9 @@ func extractResponseMetadata(metadata map[string]interface{}) (*ResponseMetadata
 	// Get category
 	if category, ok := metadata["category"].(string); ok {
 		rm.Category = category
+	}
+	if rm.LineNumber == 0 {
+		return nil, fmt.Errorf("failed to extract valid line number from metadata: %+v", metadata)
 	}
 
 	return rm, nil
@@ -227,7 +297,7 @@ type ResponseMetadata struct {
 func parseResponseResult(result interface{}) (*ResponseResult, error) {
 	resultMap, ok := result.(map[string]interface{})
 	if !ok {
-		return nil, fmt.Errorf("invalid result type: %T", result)
+		return nil, fmt.Errorf("invalid result type: %T, expected map[string]interface{}", result)
 	}
 
 	response := &ResponseResult{}
@@ -236,7 +306,7 @@ func parseResponseResult(result interface{}) (*ResponseResult, error) {
 	if respContent, ok := resultMap["response"].(string); ok {
 		response.Response = respContent
 	} else {
-		return nil, fmt.Errorf("missing response content")
+		return nil, fmt.Errorf("missing or invalid response content, got %T", resultMap["response"])
 	}
 
 	// Extract resolution status

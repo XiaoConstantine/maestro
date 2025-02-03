@@ -224,11 +224,12 @@ func validateSeverity(severity string) string {
 
 func validateCategory(category string) string {
 	validCategories := map[string]bool{
-		"error-handling": true,
-		"code-style":     true,
-		"performance":    true,
-		"security":       true,
-		"documentation":  true,
+		"error-handling":   true,
+		"code-style":       true,
+		"performance":      true,
+		"security":         true,
+		"documentation":    true,
+		"comment-response": true,
 	}
 
 	category = strings.ToLower(strings.TrimSpace(category))
