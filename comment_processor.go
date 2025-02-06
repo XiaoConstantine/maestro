@@ -99,7 +99,7 @@ func (p *CommentResponseProcessor) Process(ctx context.Context, task agents.Task
 			{Field: core.Field{Name: "thread_context"}},
 			{Field: core.Field{Name: "file_content"}},
 			{Field: core.Field{Name: "review_history"}},
-			{Field: core.Field{Name: "line_number"}},
+			{Field: core.Field{Name: "line_range"}},
 		},
 		[]core.OutputField{
 			{Field: core.NewField("response")},
@@ -144,7 +144,7 @@ For needs_work responses, always provide specific action items
 	result, err := predict.Process(ctx, map[string]interface{}{
 		"original_comment": metadata.OriginalComment,
 		"thread_context":   metadata.ThreadContext,
-		"file_content":     metadata.FileContent,
+		"file_content":     escapeXMLContent(metadata.FileContent),
 		"review_history":   p.previousContext,
 		"line_range":       metadata.LineRange,
 		"file_path":        metadata.FilePath,
@@ -200,47 +200,6 @@ type ResponseResult struct {
 // Extract metadata from the task context.
 func extractResponseMetadata(metadata map[string]interface{}) (*ResponseMetadata, error) {
 	rm := &ResponseMetadata{}
-	if rangeData, ok := metadata["line_range"].(map[string]interface{}); ok {
-		startLine, startOk := rangeData["start"].(int)
-		endLine, endOk := rangeData["end"].(int)
-
-		if !startOk || !endOk {
-			return nil, fmt.Errorf("invalid line range format: start and end must be integers")
-		}
-
-		rm.LineRange = LineRange{
-			Start: startLine,
-			End:   endLine,
-			File:  rm.FilePath,
-		}
-
-		if !rm.LineRange.IsValid() {
-			return nil, fmt.Errorf("invalid line range: %v", rm.LineRange)
-		}
-	} else {
-		// For backward compatibility, check for single line number
-		if line, ok := metadata["line_number"].(int); ok {
-			rm.LineRange = LineRange{
-				Start: line,
-				End:   line,
-				File:  rm.FilePath,
-			}
-		} else {
-			return nil, fmt.Errorf("missing or invalid line range information")
-		}
-	}
-
-	// if rm.LineNumber == 0 {
-	// 	// Try to recover line number from other metadata fields
-	// 	if threadContext, ok := metadata["thread_context"].([]PRReviewComment); ok {
-	// 		for _, comment := range threadContext {
-	// 			if comment.LineNumber > 0 {
-	// 				rm.LineNumber = comment.LineNumber
-	// 				break
-	// 			}
-	// 		}
-	// 	}
-	// }
 
 	// Get original comment details
 	if comment, ok := metadata["original_comment"].(string); ok {
@@ -274,6 +233,36 @@ func extractResponseMetadata(metadata map[string]interface{}) (*ResponseMetadata
 			rm.ThreadID = &val
 		}
 	}
+	if rangeData, ok := metadata["line_range"].(map[string]interface{}); ok {
+		startLine, startOk := rangeData["start"].(int)
+		endLine, endOk := rangeData["end"].(int)
+
+		if !startOk || !endOk {
+			return nil, fmt.Errorf("invalid line range format: start and end must be integers")
+		}
+
+		rm.LineRange = LineRange{
+			Start: startLine,
+			End:   endLine,
+			File:  rm.FilePath,
+		}
+
+		if !rm.LineRange.IsValid() {
+			return nil, fmt.Errorf("invalid line range: %v", rm.LineRange)
+		}
+	} else {
+		// For backward compatibility, check for single line number
+		if line, ok := metadata["line_number"].(int); ok {
+			rm.LineRange = LineRange{
+				Start: line,
+				End:   line,
+				File:  rm.FilePath,
+			}
+		} else {
+			return nil, fmt.Errorf("missing or invalid line range information")
+		}
+	}
+
 	if replyTo, ok := metadata["in_reply_to"].(*int64); ok {
 		rm.InReplyTo = replyTo
 	}

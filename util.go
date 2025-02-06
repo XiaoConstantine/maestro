@@ -147,3 +147,12 @@ func abs(x int) int {
 	}
 	return x
 }
+
+func escapeXMLContent(content string) string {
+	content = strings.ReplaceAll(content, "&", "&amp;")
+	content = strings.ReplaceAll(content, "<", "&lt;")
+	content = strings.ReplaceAll(content, ">", "&gt;")
+	content = strings.ReplaceAll(content, "\"", "&quot;")
+	content = strings.ReplaceAll(content, "'", "&apos;")
+	return content
+}

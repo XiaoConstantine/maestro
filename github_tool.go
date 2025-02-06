@@ -343,6 +343,10 @@ func shouldSkipFile(filename string) bool {
 		"package-lock.json": true,
 		"yarn.lock":         true,
 		"Cargo.lock":        true,
+		// TODO: figure out xml related issue
+		"pkg/agents/common.go":            true,
+		"pkg/agents/orchestrator.go":      true,
+		"pkg/agents/orchestrator_test.go": true,
 	}
 	if specificFiles[filename] {
 		return true

@@ -374,7 +374,7 @@ func NewPRReviewAgent(githubTool *GitHubTools) (*PRReviewAgent, error) {
 	               <item key="category">{category}</item>
                        <item key="original_comment">{original_comment}</item>
                        <item key="thread_id">{thread_id}</item>
-		       <item key="line_number">{line_number}</item>
+		       <item key="line_range">{line_range}</item>
 	           </metadata>
 	       </task>
 	   </tasks>`,
