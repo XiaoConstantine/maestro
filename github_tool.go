@@ -198,12 +198,13 @@ func (g *GitHubTools) MonitorPRComments(ctx context.Context, prNumber int, callb
 			}
 
 			for _, comment := range comments {
-				logger.Info(ctx, "")
-
 				if comment.GetUser().GetLogin() != g.authenticatedUser {
 					logger.Info(ctx, "Processing comment from user %s",
 						comment.GetUser().GetLogin())
 					callback(comment)
+				} else {
+					logger.Debug(ctx, "Skipping comment from authenticated user %s on file %s",
+						g.authenticatedUser, comment.GetPath())
 				}
 			}
 
@@ -344,9 +345,9 @@ func shouldSkipFile(filename string) bool {
 		"yarn.lock":         true,
 		"Cargo.lock":        true,
 		// TODO: figure out xml related issue
-		"pkg/agents/common.go":            true,
-		"pkg/agents/orchestrator.go":      true,
-		"pkg/agents/orchestrator_test.go": true,
+		// "pkg/agents/common.go":            true,
+		// "pkg/agents/orchestrator.go":      true,
+		// "pkg/agents/orchestrator_test.go": true,
 	}
 	if specificFiles[filename] {
 		return true

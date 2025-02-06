@@ -63,7 +63,7 @@ and impl changes through interactive learning sessions.`,
 	rootCmd.PersistentFlags().StringVar(&cfg.githubToken, "github-token", os.Getenv("MAESTRO_GITHUB_TOKEN"), "Github token")
 	rootCmd.PersistentFlags().StringVar(&cfg.owner, "owner", "", "Repository owner")
 	rootCmd.PersistentFlags().StringVar(&cfg.repo, "repo", "", "Repository")
-	rootCmd.PersistentFlags().StringVar(&cfg.memoryPath, "path", "./memory", "Path for sqlite table")
+	rootCmd.PersistentFlags().StringVar(&cfg.memoryPath, "path", "~/.maestro/", "Path for sqlite table")
 	rootCmd.PersistentFlags().IntVar(&cfg.prNumber, "pr", 0, "Pull request number")
 	rootCmd.PersistentFlags().BoolVar(&cfg.verbose, "verbose", false, "Enable verbose logging")
 	rootCmd.PersistentFlags().BoolVar(&cfg.verifyOnly, "verify-only", false, "Only verify token permissions")
@@ -125,7 +125,12 @@ func runCLI(cfg *config) error {
 	}
 
 	githubTools := NewGitHubTools(cfg.githubToken, cfg.owner, cfg.repo)
-	agent, err := NewPRReviewAgent(githubTools)
+
+	dbPath, err := CreateStoragePath(cfg.owner, cfg.repo)
+	if err != nil {
+		panic(err)
+	}
+	agent, err := NewPRReviewAgent(githubTools, dbPath)
 	if err != nil {
 		panic(err)
 	}
@@ -170,20 +175,21 @@ func runCLI(cfg *config) error {
 		logger.Error(ctx, "Failed to review PR: %v", err)
 		os.Exit(1)
 	}
-	shouldPost, err := githubTools.PreviewReview(ctx, console, cfg.prNumber, comments)
-	if err != nil {
-		logger.Error(ctx, "Failed to preview review: %v", err)
-		os.Exit(1)
-	}
-
-	if shouldPost {
-		logger.Info(ctx, "Posting review comments to GitHub")
-		err = githubTools.CreateReviewComments(ctx, cfg.prNumber, comments)
+	if len(comments) != 0 {
+		shouldPost, err := githubTools.PreviewReview(ctx, console, cfg.prNumber, comments)
 		if err != nil {
-			logger.Error(ctx, "Failed to post review comments: %v", err)
+			logger.Error(ctx, "Failed to preview review: %v", err)
 			os.Exit(1)
 		}
 
+		if shouldPost {
+			logger.Info(ctx, "Posting review comments to GitHub")
+			err = githubTools.CreateReviewComments(ctx, cfg.prNumber, comments)
+			if err != nil {
+				logger.Error(ctx, "Failed to post review comments: %v", err)
+				os.Exit(1)
+			}
+		}
 	}
 	console.ReviewComplete()
 	return nil

@@ -144,10 +144,11 @@ For needs_work responses, always provide specific action items
 	result, err := predict.Process(ctx, map[string]interface{}{
 		"original_comment": metadata.OriginalComment,
 		"thread_context":   metadata.ThreadContext,
-		"file_content":     escapeXMLContent(metadata.FileContent),
-		"review_history":   p.previousContext,
-		"line_range":       metadata.LineRange,
-		"file_path":        metadata.FilePath,
+		//"file_content":     escapeXMLContent(metadata.FileContent),
+		"file_content":   metadata.FileContent,
+		"review_history": p.previousContext,
+		"line_range":     metadata.LineRange,
+		"file_path":      metadata.FilePath,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("prediction failed: %w", err)

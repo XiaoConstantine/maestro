@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/XiaoConstantine/dspy-go/pkg/agents"
+
+	"github.com/XiaoConstantine/dspy-go/pkg/agents/memory"
 	"github.com/XiaoConstantine/dspy-go/pkg/logging"
 	"github.com/google/go-github/v68/github"
 	"github.com/logrusorgru/aurora"
@@ -342,8 +344,11 @@ func ExtractRelevantChanges(changes string, startline, endline int) string {
 }
 
 // NewPRReviewAgent creates a new PR review agent.
-func NewPRReviewAgent(githubTool *GitHubTools) (*PRReviewAgent, error) {
-	memory := agents.NewInMemoryStore()
+func NewPRReviewAgent(githubTool *GitHubTools, dbPath string) (*PRReviewAgent, error) {
+	memory, err := memory.NewSQLiteStore(dbPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize memory store: %v", err)
+	}
 
 	stopper := NewStopper()
 	analyzerConfig := agents.AnalyzerConfig{

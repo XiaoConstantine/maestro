@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/XiaoConstantine/dspy-go/pkg/core"
@@ -155,4 +156,32 @@ func escapeXMLContent(content string) string {
 	content = strings.ReplaceAll(content, "\"", "&quot;")
 	content = strings.ReplaceAll(content, "'", "&apos;")
 	return content
+}
+
+func escapeCodeContent(content string) string {
+	return fmt.Sprintf("<![CDATA[%s]]>", content)
+}
+
+func CreateStoragePath(owner, repo string) (string, error) {
+	// Get the user's home directory - this is the proper way to handle "~"
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("failed to get home directory: %w", err)
+	}
+
+	// Construct the full path for the .maestro directory
+	maestroDir := filepath.Join(homeDir, ".maestro")
+
+	// Create the directory with appropriate permissions (0755 gives read/execute to all, write to owner)
+	if err := os.MkdirAll(maestroDir, 0755); err != nil {
+		return "", fmt.Errorf("failed to create directory %s: %w", maestroDir, err)
+	}
+
+	// Create the database filename - using underscore instead of dash for better compatibility
+	dbName := fmt.Sprintf("%s_%s.db", owner, repo)
+
+	// Construct the full path to the database file
+	dbPath := filepath.Join(maestroDir, dbName)
+
+	return dbPath, nil
 }
