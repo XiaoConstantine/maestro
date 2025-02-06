@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"strconv"
 	"strings"
 	"time"
 
@@ -140,14 +139,14 @@ For needs_work responses, always provide specific action items
 	logger.Debug(ctx, "Processing response for comment thread with %d messages",
 		len(metadata.ThreadContext))
 
-	logger.Info(ctx, "Comment Processing response with line number: %d", metadata.LineNumber)
+	logger.Info(ctx, "Comment Processing response with line number: %v", metadata.LineRange)
 	// Process the response
 	result, err := predict.Process(ctx, map[string]interface{}{
 		"original_comment": metadata.OriginalComment,
 		"thread_context":   metadata.ThreadContext,
 		"file_content":     metadata.FileContent,
 		"review_history":   p.previousContext,
-		"line_number":      metadata.LineNumber,
+		"line_range":       metadata.LineRange,
 		"file_path":        metadata.FilePath,
 	})
 	if err != nil {
@@ -161,7 +160,7 @@ For needs_work responses, always provide specific action items
 	}
 	comment := PRReviewComment{
 		FilePath:   metadata.FilePath,
-		LineNumber: metadata.LineNumber,
+		LineNumber: metadata.LineRange.Start,
 		Content:    response.Response,
 		Severity:   deriveSeverity(response.ResolutionStatus),
 		Category:   "code-style",
@@ -201,34 +200,47 @@ type ResponseResult struct {
 // Extract metadata from the task context.
 func extractResponseMetadata(metadata map[string]interface{}) (*ResponseMetadata, error) {
 	rm := &ResponseMetadata{}
-	if lineNum, exists := metadata["line_number"]; exists {
-		switch v := lineNum.(type) {
-		case int:
-			rm.LineNumber = v
-		case float64:
-			rm.LineNumber = int(v)
-		case string:
-			if num, err := strconv.Atoi(v); err == nil {
-				rm.LineNumber = num
+	if rangeData, ok := metadata["line_range"].(map[string]interface{}); ok {
+		startLine, startOk := rangeData["start"].(int)
+		endLine, endOk := rangeData["end"].(int)
+
+		if !startOk || !endOk {
+			return nil, fmt.Errorf("invalid line range format: start and end must be integers")
+		}
+
+		rm.LineRange = LineRange{
+			Start: startLine,
+			End:   endLine,
+			File:  rm.FilePath,
+		}
+
+		if !rm.LineRange.IsValid() {
+			return nil, fmt.Errorf("invalid line range: %v", rm.LineRange)
+		}
+	} else {
+		// For backward compatibility, check for single line number
+		if line, ok := metadata["line_number"].(int); ok {
+			rm.LineRange = LineRange{
+				Start: line,
+				End:   line,
+				File:  rm.FilePath,
 			}
-		default:
-			// Log what type we actually received
-			logging.GetLogger().Warn(context.Background(),
-				"Unexpected line number type: %T with value: %v", lineNum, lineNum)
+		} else {
+			return nil, fmt.Errorf("missing or invalid line range information")
 		}
 	}
 
-	if rm.LineNumber == 0 {
-		// Try to recover line number from other metadata fields
-		if threadContext, ok := metadata["thread_context"].([]PRReviewComment); ok {
-			for _, comment := range threadContext {
-				if comment.LineNumber > 0 {
-					rm.LineNumber = comment.LineNumber
-					break
-				}
-			}
-		}
-	}
+	// if rm.LineNumber == 0 {
+	// 	// Try to recover line number from other metadata fields
+	// 	if threadContext, ok := metadata["thread_context"].([]PRReviewComment); ok {
+	// 		for _, comment := range threadContext {
+	// 			if comment.LineNumber > 0 {
+	// 				rm.LineNumber = comment.LineNumber
+	// 				break
+	// 			}
+	// 		}
+	// 	}
+	// }
 
 	// Get original comment details
 	if comment, ok := metadata["original_comment"].(string); ok {
@@ -252,11 +264,6 @@ func extractResponseMetadata(metadata map[string]interface{}) (*ResponseMetadata
 		rm.FilePath = path
 	}
 
-	// Get line number
-	if line, ok := metadata["line_number"].(int); ok {
-		rm.LineNumber = line
-	}
-
 	// Get thread identifiers
 	if threadID, exists := metadata["thread_id"]; exists {
 		switch v := threadID.(type) {
@@ -275,7 +282,7 @@ func extractResponseMetadata(metadata map[string]interface{}) (*ResponseMetadata
 	if category, ok := metadata["category"].(string); ok {
 		rm.Category = category
 	}
-	if rm.LineNumber == 0 {
+	if rm.LineRange.Start == 0 {
 		return nil, fmt.Errorf("failed to extract valid line number from metadata: %+v", metadata)
 	}
 
@@ -287,7 +294,7 @@ type ResponseMetadata struct {
 	ThreadContext   []PRReviewComment
 	FileContent     string
 	FilePath        string
-	LineNumber      int
+	LineRange       LineRange
 	ThreadID        *int64
 	InReplyTo       *int64
 	Category        string

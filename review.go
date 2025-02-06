@@ -66,6 +66,25 @@ type PRReviewComment struct {
 	MessageType MessageType
 }
 
+type LineRange struct {
+	Start int    // Starting line number (inclusive)
+	End   int    // Ending line number (inclusive)
+	File  string // File path this range refers to
+}
+
+// Add helper methods to make working with ranges easier.
+func (lr LineRange) Contains(line int) bool {
+	return line >= lr.Start && line <= lr.End
+}
+
+func (lr LineRange) IsValid() bool {
+	return lr.Start > 0 && lr.End >= lr.Start
+}
+
+func (lr LineRange) String() string {
+	return fmt.Sprintf("lines %d-%d in %s", lr.Start, lr.End, lr.File)
+}
+
 type MessageType string
 
 const (
