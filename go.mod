@@ -5,17 +5,18 @@ go 1.22.5
 require (
 	github.com/AlecAivazis/survey/v2 v2.3.7
 	github.com/XiaoConstantine/dspy-go v0.15.1
+	github.com/asg017/sqlite-vec-go-bindings v0.1.6
 	github.com/briandowns/spinner v1.23.2
 	github.com/google/go-github/v68 v68.0.0
 	github.com/logrusorgru/aurora v2.0.3+incompatible
 	github.com/mattn/go-isatty v0.0.20
+	github.com/mattn/go-sqlite3 v1.14.24
 	golang.org/x/oauth2 v0.25.0
 )
 
 require (
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/kballard/go-shellquote v0.0.0-20180428030007-95032a82bc51 // indirect
-	github.com/mattn/go-sqlite3 v1.14.24 // indirect
 	github.com/mgutz/ansi v0.0.0-20170206155736-9520e82c474b // indirect
 	github.com/spf13/pflag v1.0.5 // indirect
 	golang.org/x/text v0.21.0 // indirect

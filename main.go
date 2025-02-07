@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
+	"log"
 	"os"
 	"time"
 
@@ -10,6 +12,10 @@ import (
 	"github.com/XiaoConstantine/dspy-go/pkg/llms"
 	"github.com/XiaoConstantine/dspy-go/pkg/logging"
 	"github.com/spf13/cobra"
+
+	sqlite_vec "github.com/asg017/sqlite-vec-go-bindings/cgo"
+
+	_ "github.com/mattn/go-sqlite3"
 )
 
 type config struct {
@@ -33,6 +39,19 @@ const (
 
 func main() {
 	cfg := &config{}
+	sqlite_vec.Auto()
+	db, err := sql.Open("sqlite3", ":memory:")
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer db.Close()
+
+	var vecVersion string
+	err = db.QueryRow("select vec_version()").Scan(&vecVersion)
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Printf("vec_version=%s\n", vecVersion)
 
 	// Create root command
 	rootCmd := &cobra.Command{

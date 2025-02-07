@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -12,7 +13,6 @@ import (
 
 	"github.com/XiaoConstantine/dspy-go/pkg/agents"
 
-	"github.com/XiaoConstantine/dspy-go/pkg/agents/memory"
 	"github.com/XiaoConstantine/dspy-go/pkg/logging"
 	"github.com/google/go-github/v68/github"
 	"github.com/logrusorgru/aurora"
@@ -101,6 +101,7 @@ const (
 type PRReviewAgent struct {
 	orchestrator  *agents.FlexibleOrchestrator
 	memory        agents.Memory
+	rag           RAGStore
 	activeThreads map[int64]*ThreadTracker // Track active discussion threads
 	lastCheck     time.Time                // Last time we checked for new comments
 	// TODO: should align with dspy agent interface
@@ -345,11 +346,17 @@ func ExtractRelevantChanges(changes string, startline, endline int) string {
 
 // NewPRReviewAgent creates a new PR review agent.
 func NewPRReviewAgent(githubTool *GitHubTools, dbPath string) (*PRReviewAgent, error) {
-	memory, err := memory.NewSQLiteStore(dbPath)
+	db, err := sql.Open("sqlite3", dbPath)
 	if err != nil {
-		return nil, fmt.Errorf("failed to initialize memory store: %v", err)
+		return nil, fmt.Errorf("failed to initialize sqlite db: %v", err)
 	}
 
+	store, err := NewSQLiteRAGStore(db, logging.GetLogger())
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize rag store: %v", err)
+	}
+	defer store.Close()
+	memory := agents.NewInMemoryStore()
 	stopper := NewStopper()
 	analyzerConfig := agents.AnalyzerConfig{
 		BaseInstruction: `
@@ -405,6 +412,7 @@ func NewPRReviewAgent(githubTool *GitHubTools, dbPath string) (*PRReviewAgent, e
 	return &PRReviewAgent{
 		orchestrator: orchestrator,
 		memory:       memory,
+		rag:          store,
 		githubTools:  githubTool,
 		stopper:      stopper,
 	}, nil
