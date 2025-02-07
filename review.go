@@ -350,12 +350,16 @@ func NewPRReviewAgent(githubTool *GitHubTools, dbPath string) (*PRReviewAgent, e
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize sqlite db: %v", err)
 	}
-
 	store, err := NewSQLiteRAGStore(db, logging.GetLogger())
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize rag store: %v", err)
 	}
 	defer store.Close()
+
+	indexer := NewRepoIndexer(githubTool, store)
+	if err := indexer.IndexRepository(context.Background(), ""); err != nil {
+		return nil, fmt.Errorf("failed to index repository: %w", err)
+	}
 	memory := agents.NewInMemoryStore()
 	stopper := NewStopper()
 	analyzerConfig := agents.AnalyzerConfig{
