@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"log"
 	"os"
 	"strconv"
 	"strings"
@@ -44,19 +43,6 @@ const (
 func main() {
 	cfg := &config{}
 	sqlite_vec.Auto()
-	db, err := sql.Open("sqlite3", ":memory:")
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer db.Close()
-
-	var vecVersion string
-	err = db.QueryRow("select vec_version()").Scan(&vecVersion)
-	if err != nil {
-		log.Fatal(err)
-	}
-	fmt.Printf("vec_version=%s\n", vecVersion)
-
 	// Create root command
 	rootCmd := &cobra.Command{
 		Use:   "Maestro",
@@ -231,13 +217,15 @@ func runCLI(cfg *config) error {
 func runInteractiveMode(cfg *config) error {
 	ctx := core.WithExecutionState(context.Background())
 	output := logging.NewConsoleOutput(true, logging.WithColor(true))
+	logLevel := logging.INFO
 	logger := logging.NewLogger(logging.Config{
-		Severity: logging.INFO,
+		Severity: logLevel,
 		Outputs:  []logging.Output{output},
 	})
 	logging.SetLogger(logger)
-	console := NewConsole(os.Stdout, logger, nil)
 
+	console := NewConsole(os.Stdout, logger, nil)
+	llms.EnsureFactory()
 	// Prompt for required information
 	ownerPrompt := &survey.Input{
 		Message: "Enter repository owner:",
@@ -276,6 +264,11 @@ func runInteractiveMode(cfg *config) error {
 		cfg.modelProvider = provider
 		cfg.modelName = name
 		cfg.modelConfig = config
+	}
+	modelID := constructModelID(cfg)
+
+	if err := core.ConfigureDefaultLLM(cfg.apiKey, modelID); err != nil {
+		return fmt.Errorf("failed to configure LLM: %w", err)
 	}
 
 	verbosePrompt := &survey.Confirm{
@@ -352,7 +345,7 @@ func initializeAndAskQuestions(ctx context.Context, cfg *config, console *Consol
 	}
 	defer db.Close()
 
-	store, err := NewSQLiteRAGStore(db, logging.GetLogger())
+	store, err := NewSQLiteRAGStore(db, console.logger)
 	if err != nil {
 		return fmt.Errorf("failed to create RAG store: %w", err)
 	}
@@ -382,6 +375,7 @@ func initializeAndAskQuestions(ctx context.Context, cfg *config, console *Consol
 			},
 		}, nil)
 
+		console.printf("Result: %s", result)
 		if err != nil {
 			fmt.Printf("Error processing question: %v\n", err)
 			continue

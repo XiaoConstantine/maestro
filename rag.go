@@ -59,7 +59,7 @@ func (s *sqliteRAGStore) init() error {
 		// Vector virtual table (REQUIRED for sqlite-vec)
 		`CREATE VIRTUAL TABLE IF NOT EXISTS vec_items USING vec0(
 		rowid INTEGER PRIMARY KEY,
-		embedding float[768],  -- Match your embedding dimensions
+		embedding float[768] distance_metric=cosine,  -- Match your embedding dimensions
 		content_id TEXT PARTITION KEY  // Optimizes WHERE clause filtering
 		)`,
 	}
@@ -174,24 +174,15 @@ func (s *sqliteRAGStore) FindSimilar(ctx context.Context, embedding []float32, l
 		return nil, fmt.Errorf("store is closed")
 	}
 
-	// Serialize query embedding
-	queryEmbedding, err := serializeEmbedding(embedding)
-	if err != nil {
-		return nil, err
-	}
-
-	// Query using cosine similarity with sqlite-vec
+	blob, err := sqlite_vec.SerializeFloat32(embedding)
 	rows, err := s.db.QueryContext(ctx,
-		`WITH query AS (
-            SELECT vec_from_raw(?, 'float32') as vec
-        )
-        SELECT c.id, c.text, c.embedding, c.metadata,
-               vec_cosine_similarity(c.embedding, query.vec) as similarity
-        FROM contents c, query
-        ORDER BY similarity DESC
-        LIMIT ?`,
-		queryEmbedding, limit)
-
+		`SELECT c.id, c.text, c.metadata, 
+            vec_distance_cosine(v.embedding, ?) as distance
+     FROM vec_items v
+     JOIN contents c ON v.content_id = c.id
+     WHERE v.embedding MATCH ?  AND k = ?
+     ORDER BY distance ASC`,
+		blob, blob, limit)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query similar content: %w", err)
 	}
@@ -200,20 +191,13 @@ func (s *sqliteRAGStore) FindSimilar(ctx context.Context, embedding []float32, l
 	var results []*Content
 	for rows.Next() {
 		var (
-			content        Content
-			embeddingBytes []byte
-			metadataStr    string
-			similarity     float64
+			content     Content
+			metadataStr string
+			similarity  float64
 		)
 
-		if err := rows.Scan(&content.ID, &content.Text, &embeddingBytes, &metadataStr, &similarity); err != nil {
+		if err := rows.Scan(&content.ID, &content.Text, &metadataStr, &similarity); err != nil {
 			return nil, fmt.Errorf("failed to scan row: %w", err)
-		}
-
-		// Deserialize embedding
-		content.Embedding, err = deserializeEmbedding(embeddingBytes)
-		if err != nil {
-			return nil, err
 		}
 
 		// Parse metadata JSON
@@ -228,7 +212,8 @@ func (s *sqliteRAGStore) FindSimilar(ctx context.Context, embedding []float32, l
 		return nil, fmt.Errorf("error iterating results: %w", err)
 	}
 
-	s.log.Debug(ctx, "Found %d similar contents", len(results))
+	s.log.Info(ctx, "Found %d similar contents", len(results))
+
 	return results, nil
 }
 
