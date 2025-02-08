@@ -50,11 +50,6 @@ func main() {
 		Long: `Maestro is an AI-powered code assistant that helps you review PR
 and impl changes through interactive learning sessions.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if cmd.Flags().NFlag() == 0 {
-				return runInteractiveMode(cfg)
-			}
-
-			// Traditional CLI mode
 			if cmd.Flags().Changed("model") {
 				modelStr, _ := cmd.Flags().GetString("model")
 				provider, name, config := parseModelString(modelStr)
@@ -67,6 +62,11 @@ and impl changes through interactive learning sessions.`,
 				if config != "" {
 					cfg.modelConfig = config
 				}
+			}
+
+			interactive, _ := cmd.Flags().GetBool("interactive")
+			if interactive || cmd.Flags().NFlag() == 0 {
+				return runInteractiveMode(cfg)
 			}
 			return runCLI(cfg)
 		},
@@ -81,6 +81,8 @@ and impl changes through interactive learning sessions.`,
 	rootCmd.PersistentFlags().IntVar(&cfg.prNumber, "pr", 0, "Pull request number")
 	rootCmd.PersistentFlags().BoolVar(&cfg.verbose, "verbose", false, "Enable verbose logging")
 	rootCmd.PersistentFlags().BoolVar(&cfg.verifyOnly, "verify-only", false, "Only verify token permissions")
+
+	rootCmd.PersistentFlags().BoolP("interactive", "i", false, "Run in interactive mode")
 
 	rootCmd.PersistentFlags().StringP("model", "m", "", `Full model specification (e.g. "ollama:mistral:q4", "llamacpp:", "anthropic:claude-3")`)
 	rootCmd.PersistentFlags().StringVar(&cfg.modelProvider, "provider", DefaultModelProvider, "Model provider (llamacpp, ollama, anthropic)")
@@ -226,45 +228,88 @@ func runInteractiveMode(cfg *config) error {
 
 	console := NewConsole(os.Stdout, logger, nil)
 	llms.EnsureFactory()
-	// Prompt for required information
-	ownerPrompt := &survey.Input{
-		Message: "Enter repository owner:",
-	}
-	if err := survey.AskOne(ownerPrompt, &cfg.owner); err != nil {
-		return fmt.Errorf("failed to get owner: %w", err)
+	if cfg.owner == "" {
+		ownerPrompt := &survey.Input{
+			Message: "Enter repository owner:",
+		}
+		if err := survey.AskOne(ownerPrompt, &cfg.owner); err != nil {
+			return fmt.Errorf("failed to get owner: %w", err)
+		}
 	}
 
-	repoPrompt := &survey.Input{
-		Message: "Enter repository name:",
+	// Only prompt for repo if not provided
+	if cfg.repo == "" {
+		repoPrompt := &survey.Input{
+			Message: "Enter repository name:",
+		}
+		if err := survey.AskOne(repoPrompt, &cfg.repo); err != nil {
+			return fmt.Errorf("failed to get repo: %w", err)
+		}
 	}
-	if err := survey.AskOne(repoPrompt, &cfg.repo); err != nil {
-		return fmt.Errorf("failed to get repo: %w", err)
-	}
+	// // Prompt for required information
+	// ownerPrompt := &survey.Input{
+	// 	Message: "Enter repository owner:",
+	// }
+	// if err := survey.AskOne(ownerPrompt, &cfg.owner); err != nil {
+	// 	return fmt.Errorf("failed to get owner: %w", err)
+	// }
+	//
+	// repoPrompt := &survey.Input{
+	// 	Message: "Enter repository name:",
+	// }
+	// if err := survey.AskOne(repoPrompt, &cfg.repo); err != nil {
+	// 	return fmt.Errorf("failed to get repo: %w", err)
+	// }
 
 	// Optional settings
-	var useCustomModel bool
-	modelPrompt := &survey.Confirm{
-		Message: "Would you like to use a custom model?",
-		Default: false,
-	}
-	if err := survey.AskOne(modelPrompt, &useCustomModel); err != nil {
-		return fmt.Errorf("failed to get model preference: %w", err)
-	}
+	if cfg.modelProvider == DefaultModelProvider && cfg.modelName == DefaultModelName {
+		var useCustomModel bool
+		modelPrompt := &survey.Confirm{
+			Message: "Would you like to use a custom model?",
+			Default: false,
+		}
+		if err := survey.AskOne(modelPrompt, &useCustomModel); err != nil {
+			return fmt.Errorf("failed to get model preference: %w", err)
+		}
 
-	if useCustomModel {
-		modelStrPrompt := &survey.Input{
-			Message: "Enter model specification (e.g., ollama:mistral:q4, anthropic:claude-3):",
-			Default: DefaultModelProvider,
+		if useCustomModel {
+			modelStrPrompt := &survey.Input{
+				Message: "Enter model specification (e.g., ollama:mistral:q4, anthropic:claude-3):",
+				Default: DefaultModelProvider,
+			}
+			var modelStr string
+			if err := survey.AskOne(modelStrPrompt, &modelStr); err != nil {
+				return fmt.Errorf("failed to get model specification: %w", err)
+			}
+			provider, name, config := parseModelString(modelStr)
+			cfg.modelProvider = provider
+			cfg.modelName = name
+			cfg.modelConfig = config
 		}
-		var modelStr string
-		if err := survey.AskOne(modelStrPrompt, &modelStr); err != nil {
-			return fmt.Errorf("failed to get model specification: %w", err)
-		}
-		provider, name, config := parseModelString(modelStr)
-		cfg.modelProvider = provider
-		cfg.modelName = name
-		cfg.modelConfig = config
 	}
+	// var useCustomModel bool
+	// modelPrompt := &survey.Confirm{
+	// 	Message: "Would you like to use a custom model?",
+	// 	Default: false,
+	// }
+	// if err := survey.AskOne(modelPrompt, &useCustomModel); err != nil {
+	// 	return fmt.Errorf("failed to get model preference: %w", err)
+	// }
+	//
+	// if useCustomModel {
+	// 	modelStrPrompt := &survey.Input{
+	// 		Message: "Enter model specification (e.g., ollama:mistral:q4, anthropic:claude-3):",
+	// 		Default: DefaultModelProvider,
+	// 	}
+	// 	var modelStr string
+	// 	if err := survey.AskOne(modelStrPrompt, &modelStr); err != nil {
+	// 		return fmt.Errorf("failed to get model specification: %w", err)
+	// 	}
+	// 	provider, name, config := parseModelString(modelStr)
+	// 	cfg.modelProvider = provider
+	// 	cfg.modelName = name
+	// 	cfg.modelConfig = config
+	// }
 	modelID := constructModelID(cfg)
 
 	if err := core.ConfigureDefaultLLM(cfg.apiKey, modelID); err != nil {
