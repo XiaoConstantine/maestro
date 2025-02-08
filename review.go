@@ -363,10 +363,10 @@ func NewPRReviewAgent(githubTool *GitHubTools, dbPath string) (*PRReviewAgent, e
 	memory := agents.NewInMemoryStore()
 	stopper := NewStopper()
 	analyzerConfig := agents.AnalyzerConfig{
-		BaseInstruction: `
-        Analyze the input and determine the appropriate task type:
-        - If responding to existing comments, create a comment_response task
-        - If reviewing new code, create a code_review task
+		BaseInstruction: `Analyze the input and determine the appropriate task type:
+		- If responding to existing comments, create a comment_response task
+		- If reviewing new code, create a code_review task
+		- If answering questions about the repository, create a repo_qa task
 
 		IMPORTANT FORMAT RULES:
 		1. Start fields exactly with 'analysis:' or 'tasks:' (no markdown formatting)
@@ -396,6 +396,8 @@ func NewPRReviewAgent(githubTool *GitHubTools, dbPath string) (*PRReviewAgent, e
 	   </tasks>`,
 	}
 
+	qaProcessor := NewRepoQAProcessor(store)
+
 	config := agents.OrchestrationConfig{
 		MaxConcurrent:  5,
 		TaskParser:     &agents.XMLTaskParser{},
@@ -408,6 +410,7 @@ func NewPRReviewAgent(githubTool *GitHubTools, dbPath string) (*PRReviewAgent, e
 		CustomProcessors: map[string]agents.TaskProcessor{
 			"code_review":      &CodeReviewProcessor{},
 			"comment_response": &CommentResponseProcessor{},
+			"repo_qa":          qaProcessor,
 		},
 	}
 
