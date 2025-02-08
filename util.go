@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -162,7 +163,7 @@ func escapeCodeContent(content string) string {
 	return fmt.Sprintf("<![CDATA[%s]]>", content)
 }
 
-func CreateStoragePath(owner, repo string) (string, error) {
+func CreateStoragePath(owner, repo, commitSHA string) (string, error) {
 	// Get the user's home directory - this is the proper way to handle "~"
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
@@ -178,10 +179,46 @@ func CreateStoragePath(owner, repo string) (string, error) {
 	}
 
 	// Create the database filename - using underscore instead of dash for better compatibility
-	dbName := fmt.Sprintf("%s_%s.db", owner, repo)
-
+	dbName := fmt.Sprintf("%s_%s_%s.db", owner, repo, commitSHA[:8])
 	// Construct the full path to the database file
 	dbPath := filepath.Join(maestroDir, dbName)
 
 	return dbPath, nil
+}
+
+func extractSHAFromPath(path string) string {
+	base := filepath.Base(path)
+	parts := strings.Split(base, "_")
+	if len(parts) >= 3 {
+		return strings.TrimSuffix(parts[2], ".db")
+	}
+	return ""
+}
+
+func copyFile(src, dst string) error {
+	// Open the source file
+	sourceFile, err := os.Open(src)
+	if err != nil {
+		return fmt.Errorf("failed to open source file: %w", err)
+	}
+	defer sourceFile.Close()
+
+	// Create the destination file
+	destFile, err := os.Create(dst)
+	if err != nil {
+		return fmt.Errorf("failed to create destination file: %w", err)
+	}
+	defer destFile.Close()
+
+	// Copy the contents
+	if _, err := io.Copy(destFile, sourceFile); err != nil {
+		return fmt.Errorf("failed to copy file contents: %w", err)
+	}
+
+	// Sync to ensure write is complete
+	if err := destFile.Sync(); err != nil {
+		return fmt.Errorf("failed to sync destination file: %w", err)
+	}
+
+	return nil
 }

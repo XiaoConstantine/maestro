@@ -3,7 +3,9 @@ package main
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 
 	"github.com/XiaoConstantine/dspy-go/pkg/core"
@@ -29,7 +31,52 @@ func NewRepoIndexer(githubTools *GitHubTools, ragStore RAGStore) *RepoIndexer {
 
 // IndexRepository indexes the entire repository content into the RAG store.
 func (ri *RepoIndexer) IndexRepository(ctx context.Context, branch string) error {
-	// Get repository content
+	logger := logging.GetLogger()
+	latestSHA, err := ri.githubTools.GetLatestCommitSHA(ctx, branch)
+	if err != nil {
+		return fmt.Errorf("failed to get latest commit SHA: %w", err)
+	}
+
+	// Generate the expected database path for this SHA
+	dbPath, err := CreateStoragePath(ri.githubTools.owner, ri.githubTools.repo, latestSHA)
+	if err != nil {
+		return fmt.Errorf("failed to create storage path: %w", err)
+	}
+
+	// Check if we already have an index for this commit
+	if _, err := os.Stat(dbPath); err == nil {
+		logger.Info(ctx, "Index already exists for commit %s, skipping indexing", latestSHA[:8])
+		return nil
+	}
+
+	pattern := fmt.Sprintf("%s_%s_*.db", ri.githubTools.owner, ri.githubTools.repo)
+	existingDBs, err := filepath.Glob(filepath.Join(filepath.Dir(dbPath), pattern))
+	if err != nil {
+		return fmt.Errorf("failed to list existing databases: %w", err)
+	}
+	if len(existingDBs) > 0 {
+		// Extract the SHA from the most recent database
+		sort.Strings(existingDBs) // Sort to get the latest version
+		currentDB := existingDBs[len(existingDBs)-1]
+		currentSHA := extractSHAFromPath(currentDB)
+
+		logger.Info(ctx, "Found existing index for commit %s, performing incremental update", currentSHA)
+
+		// Get the changes between commits
+		changes, err := ri.getCommitDifferences(ctx, currentSHA, latestSHA)
+		if err != nil {
+			return fmt.Errorf("failed to get commit differences: %w", err)
+		}
+
+		// Create new database by copying the existing one
+		if err := copyFile(currentDB, dbPath); err != nil {
+			return fmt.Errorf("failed to copy database: %w", err)
+		}
+
+		// Process only the changed files
+		return ri.processChangedFiles(ctx, changes, dbPath)
+	}
+	// No existing index found, proceed full index
 	_, directoryContent, _, err := ri.githubTools.client.Repositories.GetContents(
 		ctx,
 		ri.githubTools.owner,
@@ -195,4 +242,122 @@ func (ri *RepoIndexer) SearchSimilarCode(ctx context.Context, query string, limi
 	}
 
 	return similar, nil
+}
+
+func (ri *RepoIndexer) getCommitDifferences(ctx context.Context, oldSHA, newSHA string) ([]*github.CommitFile, error) {
+	comparison, _, err := ri.githubTools.client.Repositories.CompareCommits(
+		ctx,
+		ri.githubTools.owner,
+		ri.githubTools.repo,
+		oldSHA,
+		newSHA,
+		nil,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to compare commits: %w", err)
+	}
+
+	return comparison.Files, nil
+}
+
+func (ri *RepoIndexer) processChangedFiles(ctx context.Context, changes []*github.CommitFile, dbPath string) error {
+	logger := logging.GetLogger()
+
+	for _, file := range changes {
+		if shouldSkipFile(file.GetFilename()) {
+			continue
+		}
+
+		logger.Debug(ctx, "Processing changed file: %s", file.GetFilename())
+
+		// Process the file and update the index
+		if err := ri.processChangedFile(ctx, file, dbPath); err != nil {
+			return fmt.Errorf("failed to process file %s: %w", file.GetFilename(), err)
+		}
+	}
+
+	return nil
+}
+
+func (ri *RepoIndexer) cleanupOldIndices(ctx context.Context, baseDir string, keepCount int) error {
+	pattern := fmt.Sprintf("%s_%s_*.db", ri.githubTools.owner, ri.githubTools.repo)
+	dbs, err := filepath.Glob(filepath.Join(baseDir, pattern))
+	if err != nil {
+		return err
+	}
+
+	if len(dbs) <= keepCount {
+		return nil
+	}
+
+	// Sort by modification time
+	sort.Slice(dbs, func(i, j int) bool {
+		iInfo, _ := os.Stat(dbs[i])
+		jInfo, _ := os.Stat(dbs[j])
+		return iInfo.ModTime().After(jInfo.ModTime())
+	})
+
+	// Remove older files
+	for _, db := range dbs[keepCount:] {
+		if err := os.Remove(db); err != nil {
+			logging.GetLogger().Warn(ctx, "Failed to remove old index: %v", err)
+		}
+	}
+
+	return nil
+}
+
+// Add this to indexer.go.
+func (ri *RepoIndexer) processChangedFile(ctx context.Context, file *github.CommitFile, dbPath string) error {
+	// Get the file content
+	content, err := ri.githubTools.GetFileContent(ctx, file.GetFilename())
+	if err != nil {
+		return fmt.Errorf("failed to get file content: %w", err)
+	}
+
+	// Configure chunking
+	config := NewChunkConfig()
+	config.fileMetadata = map[string]interface{}{
+		"file_path": file.GetFilename(),
+		"file_type": filepath.Ext(file.GetFilename()),
+		"package":   filepath.Base(filepath.Dir(file.GetFilename())),
+	}
+
+	// Chunk the file content
+	chunks, err := chunkfile(ctx, content, "", config)
+	if err != nil {
+		return fmt.Errorf("failed to chunk file: %w", err)
+	}
+
+	// Process each chunk
+	for i, chunk := range chunks {
+		chunkID := fmt.Sprintf("%s:chunk_%d", file.GetFilename(), i+1)
+		metadata := map[string]string{
+			"file_path":    file.GetFilename(),
+			"chunk_number": fmt.Sprintf("%d", i+1),
+			"total_chunks": fmt.Sprintf("%d", len(chunks)),
+			"start_line":   fmt.Sprintf("%d", chunk.startline),
+			"end_line":     fmt.Sprintf("%d", chunk.endline),
+		}
+
+		// Generate embedding for the chunk
+		llm := core.GetDefaultLLM()
+		embedding, err := llm.CreateEmbedding(ctx, chunk.content)
+		if err != nil {
+			return fmt.Errorf("failed to create embedding: %w", err)
+		}
+
+		// Store the chunk in RAG store
+		err = ri.ragStore.StoreContent(ctx, &Content{
+			ID:        chunkID,
+			Text:      chunk.content,
+			Embedding: embedding.Vector,
+			Metadata:  metadata,
+		})
+		if err != nil {
+			return fmt.Errorf("failed to store content: %w", err)
+		}
+	}
+
+	return nil
 }

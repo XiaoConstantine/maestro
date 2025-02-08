@@ -246,6 +246,22 @@ func (g *GitHubTools) GetFileContent(ctx context.Context, filePath string) (stri
 	return fileContent, nil
 }
 
+func (g *GitHubTools) GetLatestCommitSHA(ctx context.Context, branch string) (string, error) {
+
+	if branch == "" {
+		repo, _, err := g.client.Repositories.Get(ctx, g.owner, g.repo)
+		if err != nil {
+			return "", fmt.Errorf("failed to get repository info: %w", err)
+		}
+		branch = repo.GetDefaultBranch()
+	}
+	ref, _, err := g.client.Git.GetRef(ctx, g.owner, g.repo, fmt.Sprintf("refs/heads/%s", branch))
+	if err != nil {
+		return "", fmt.Errorf("failed to get ref for branch %s: %w", branch, err)
+	}
+	return ref.Object.GetSHA(), nil
+}
+
 type fileFilterRules struct {
 	// Simple path contains matches - fastest check
 	pathContains []string

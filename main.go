@@ -145,7 +145,12 @@ func runCLI(cfg *config) error {
 
 	githubTools := NewGitHubTools(cfg.githubToken, cfg.owner, cfg.repo)
 
-	dbPath, err := CreateStoragePath(cfg.owner, cfg.repo)
+	latestSHA, err := githubTools.GetLatestCommitSHA(ctx, "main")
+	if err != nil {
+		return fmt.Errorf("failed to get latest commit SHA: %w", err)
+	}
+
+	dbPath, err := CreateStoragePath(cfg.owner, cfg.repo, latestSHA)
 	if err != nil {
 		panic(err)
 	}
