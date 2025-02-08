@@ -160,7 +160,6 @@ func (ri *RepoIndexer) processFile(ctx context.Context, file *github.RepositoryC
 		if err != nil {
 			return fmt.Errorf("failed to create embedding: %w", err)
 		}
-		fmt.Printf("got response: %v", embedding)
 
 		// Store the chunk in RAG store
 		err = ri.ragStore.StoreContent(ctx, &Content{

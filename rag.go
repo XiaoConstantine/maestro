@@ -9,6 +9,10 @@ import (
 	"fmt"
 	"sync"
 
+	sqlite_vec "github.com/asg017/sqlite-vec-go-bindings/cgo"
+
+	_ "github.com/mattn/go-sqlite3"
+
 	"github.com/XiaoConstantine/dspy-go/pkg/logging"
 )
 
@@ -44,15 +48,20 @@ type sqliteRAGStore struct {
 
 func (s *sqliteRAGStore) init() error {
 	queries := []string{
+		// Original metadata table
 		`CREATE TABLE IF NOT EXISTS contents (
-            id TEXT PRIMARY KEY,
-            text TEXT NOT NULL,
-            embedding BLOB NOT NULL, -- Store embeddings as serialized bytes
-            metadata TEXT, -- JSON encoded metadata
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )`,
-		// Index for faster lookups
-		`CREATE INDEX IF NOT EXISTS idx_contents_created ON contents(created_at)`,
+		id TEXT PRIMARY KEY,
+		text TEXT NOT NULL,
+		metadata TEXT,
+		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+		)`,
+
+		// Vector virtual table (REQUIRED for sqlite-vec)
+		`CREATE VIRTUAL TABLE IF NOT EXISTS vec_items USING vec0(
+		rowid INTEGER PRIMARY KEY,
+		embedding float[768],  -- Match your embedding dimensions
+		content_id TEXT PARTITION KEY  // Optimizes WHERE clause filtering
+		)`,
 	}
 
 	for _, q := range queries {
@@ -103,6 +112,7 @@ func deserializeEmbedding(data []byte) ([]float32, error) {
 
 // StoreContent implements RAGStore interface.
 func (s *sqliteRAGStore) StoreContent(ctx context.Context, content *Content) error {
+	s.log.Debug(ctx, "Starting StoreContent for ID: %s", content.ID)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -110,6 +120,7 @@ func (s *sqliteRAGStore) StoreContent(ctx context.Context, content *Content) err
 		return fmt.Errorf("store is closed")
 	}
 
+	s.log.Debug(ctx, "Beginning transaction for content ID: %s", content.ID)
 	// Start a transaction
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -121,36 +132,35 @@ func (s *sqliteRAGStore) StoreContent(ctx context.Context, content *Content) err
 		}
 	}()
 
-	// Serialize embedding
-	embedding, err := serializeEmbedding(content.Embedding)
-	if err != nil {
-		return err
-	}
-
 	// Convert metadata to JSON
+	s.log.Debug(ctx, "Marshaling metadata for content ID: %s", content.ID)
 	metadata, err := json.Marshal(content.Metadata)
 	if err != nil {
 		return fmt.Errorf("failed to marshal metadata: %w", err)
 	}
 
-	// Create vector from embedding using sqlite-vec
-	_, err = tx.ExecContext(ctx,
-		`WITH vector AS (
-            SELECT vec_from_raw(?, 'float32') as vec
-        )
-        INSERT OR REPLACE INTO contents (id, text, embedding, metadata)
-        SELECT ?, ?, vec, ?
-        FROM vector`,
-		embedding, content.ID, content.Text, string(metadata))
+	s.log.Debug(ctx, "Executing SQLite insert/replace for content ID: %s", content.ID)
 
+	_, err = tx.ExecContext(ctx,
+		`INSERT OR REPLACE INTO contents (id, text, metadata)
+     VALUES (?, ?, ?)`,
+		content.ID, content.Text, string(metadata))
+
+	blob, err := sqlite_vec.SerializeFloat32(content.Embedding)
+	_, err = tx.ExecContext(ctx,
+		`INSERT OR REPLACE INTO vec_items (embedding, content_id)
+     VALUES (?, ?)`, // Directly use serialized blob
+		blob, content.ID)
 	if err != nil {
 		return fmt.Errorf("failed to store content: %w", err)
 	}
 
+	s.log.Debug(ctx, "Committing transaction for content ID: %s", content.ID)
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("failed to commit transaction: %w", err)
 	}
 
+	s.log.Debug(ctx, "Successfully stored content ID: %s", content.ID)
 	s.log.Debug(ctx, "Stored content with ID: %s", content.ID)
 	return nil
 }
