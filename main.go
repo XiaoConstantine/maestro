@@ -6,8 +6,12 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strconv"
+	"strings"
 	"time"
 
+	"github.com/AlecAivazis/survey/v2"
+	"github.com/XiaoConstantine/dspy-go/pkg/agents"
 	"github.com/XiaoConstantine/dspy-go/pkg/core"
 	"github.com/XiaoConstantine/dspy-go/pkg/llms"
 	"github.com/XiaoConstantine/dspy-go/pkg/logging"
@@ -60,6 +64,11 @@ func main() {
 		Long: `Maestro is an AI-powered code assistant that helps you review PR
 and impl changes through interactive learning sessions.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if cmd.Flags().NFlag() == 0 {
+				return runInteractiveMode(cfg)
+			}
+
+			// Traditional CLI mode
 			if cmd.Flags().Changed("model") {
 				modelStr, _ := cmd.Flags().GetString("model")
 				provider, name, config := parseModelString(modelStr)
@@ -217,4 +226,177 @@ func runCLI(cfg *config) error {
 	}
 	console.ReviewComplete()
 	return nil
+}
+
+func runInteractiveMode(cfg *config) error {
+	ctx := core.WithExecutionState(context.Background())
+	output := logging.NewConsoleOutput(true, logging.WithColor(true))
+	logger := logging.NewLogger(logging.Config{
+		Severity: logging.INFO,
+		Outputs:  []logging.Output{output},
+	})
+	logging.SetLogger(logger)
+	console := NewConsole(os.Stdout, logger, nil)
+
+	// Prompt for required information
+	ownerPrompt := &survey.Input{
+		Message: "Enter repository owner:",
+	}
+	if err := survey.AskOne(ownerPrompt, &cfg.owner); err != nil {
+		return fmt.Errorf("failed to get owner: %w", err)
+	}
+
+	repoPrompt := &survey.Input{
+		Message: "Enter repository name:",
+	}
+	if err := survey.AskOne(repoPrompt, &cfg.repo); err != nil {
+		return fmt.Errorf("failed to get repo: %w", err)
+	}
+
+	// Optional settings
+	var useCustomModel bool
+	modelPrompt := &survey.Confirm{
+		Message: "Would you like to use a custom model?",
+		Default: false,
+	}
+	if err := survey.AskOne(modelPrompt, &useCustomModel); err != nil {
+		return fmt.Errorf("failed to get model preference: %w", err)
+	}
+
+	if useCustomModel {
+		modelStrPrompt := &survey.Input{
+			Message: "Enter model specification (e.g., ollama:mistral:q4, anthropic:claude-3):",
+			Default: DefaultModelProvider,
+		}
+		var modelStr string
+		if err := survey.AskOne(modelStrPrompt, &modelStr); err != nil {
+			return fmt.Errorf("failed to get model specification: %w", err)
+		}
+		provider, name, config := parseModelString(modelStr)
+		cfg.modelProvider = provider
+		cfg.modelName = name
+		cfg.modelConfig = config
+	}
+
+	verbosePrompt := &survey.Confirm{
+		Message: "Enable verbose logging?",
+		Default: false,
+	}
+	if err := survey.AskOne(verbosePrompt, &cfg.verbose); err != nil {
+		return fmt.Errorf("failed to get verbose preference: %w", err)
+	}
+
+	// Prompt for action
+	actionPrompt := &survey.Select{
+		Message: "What would you like to do?",
+		Options: []string{
+			"Review a Pull Request",
+			"Ask questions about the repository",
+			"Exit",
+		},
+	}
+
+	for {
+		var action string
+		if err := survey.AskOne(actionPrompt, &action); err != nil {
+			return fmt.Errorf("failed to get action: %w", err)
+		}
+
+		switch action {
+		case "Review a Pull Request":
+			var prNumber string
+			prPrompt := &survey.Input{
+				Message: "Enter PR number:",
+			}
+			if err := survey.AskOne(prPrompt, &prNumber); err != nil {
+				return fmt.Errorf("failed to get PR number: %w", err)
+			}
+			var err error
+			cfg.prNumber, err = strconv.Atoi(prNumber)
+			if err != nil {
+				return fmt.Errorf("invalid PR number: %w", err)
+			}
+			if err := runCLI(cfg); err != nil {
+				fmt.Printf("Error reviewing PR: %v\n", err)
+			}
+
+		case "Ask questions about the repository":
+			// Initialize necessary components for repository Q&A
+			if err := initializeAndAskQuestions(ctx, cfg, console); err != nil {
+				fmt.Printf("Error during Q&A session: %v\n", err)
+			}
+
+		case "Exit":
+			return nil
+		}
+	}
+}
+
+func initializeAndAskQuestions(ctx context.Context, cfg *config, console *Console) error {
+	// Initialize GitHub tools and other necessary components
+	githubTools := NewGitHubTools(cfg.githubToken, cfg.owner, cfg.repo)
+
+	latestSHA, err := githubTools.GetLatestCommitSHA(ctx, "main")
+	if err != nil {
+		return fmt.Errorf("failed to get latest commit SHA: %w", err)
+	}
+
+	dbPath, err := CreateStoragePath(cfg.owner, cfg.repo, latestSHA)
+	if err != nil {
+		return fmt.Errorf("failed to create storage path: %w", err)
+	}
+
+	db, err := sql.Open("sqlite3", dbPath)
+	if err != nil {
+		return fmt.Errorf("failed to open database: %w", err)
+	}
+	defer db.Close()
+
+	store, err := NewSQLiteRAGStore(db, logging.GetLogger())
+	if err != nil {
+		return fmt.Errorf("failed to create RAG store: %w", err)
+	}
+	defer store.Close()
+
+	qaProcessor := NewRepoQAProcessor(store)
+
+	// Interactive question loop
+	for {
+		var question string
+		questionPrompt := &survey.Input{
+			Message: "Ask a question about the repository (or type 'exit' to return to main menu):",
+		}
+		if err := survey.AskOne(questionPrompt, &question); err != nil {
+			return fmt.Errorf("failed to get question: %w", err)
+		}
+
+		if strings.ToLower(question) == "exit" {
+			return nil
+		}
+
+		// Process the question
+		result, err := qaProcessor.Process(ctx, agents.Task{
+			ID: "qa",
+			Metadata: map[string]interface{}{
+				"question": question,
+			},
+		}, nil)
+
+		if err != nil {
+			fmt.Printf("Error processing question: %v\n", err)
+			continue
+		}
+
+		// Display the answer
+		if response, ok := result.(*QAResponse); ok {
+			fmt.Printf("\nAnswer: %s\n", response.Answer)
+			if len(response.SourceFiles) > 0 {
+				fmt.Printf("\nRelevant files:\n")
+				for _, file := range response.SourceFiles {
+					fmt.Printf("- %s\n", file)
+				}
+			}
+			fmt.Println()
+		}
+	}
 }
