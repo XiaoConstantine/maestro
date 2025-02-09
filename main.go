@@ -153,7 +153,7 @@ func runCLI(cfg *config) error {
 	if err != nil {
 		panic(err)
 	}
-	console.printf("Need full index: %v", needFullIndex)
+	console.printf("\nNeed full index: %v", needFullIndex)
 	agent, err := NewPRReviewAgent(githubTools, dbPath, needFullIndex)
 	if err != nil {
 		panic(err)

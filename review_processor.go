@@ -164,6 +164,7 @@ func extractComments(result interface{}, filePath string) ([]PRReviewComment, er
 
 	return parseReviewComments(filePath, commentsStr)
 }
+
 func extractReviewMetadata(metadata map[string]interface{}) (*ReviewMetadata, error) {
 	rm := &ReviewMetadata{}
 

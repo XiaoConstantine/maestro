@@ -180,7 +180,6 @@ func CreateStoragePath(owner, repo, commitSHA string) (string, bool, error) {
 	logger.Info(context.Background(), "existing dbs: %v", existingDBs)
 
 	if len(existingDBs) == 0 {
-		logger.Info(context.Background(), "====================")
 		return newDBPath, true, nil
 	}
 	sort.Strings(existingDBs)
@@ -189,7 +188,8 @@ func CreateStoragePath(owner, repo, commitSHA string) (string, bool, error) {
 	// Extract the commit SHA from the most recent database filename
 	parts := strings.Split(filepath.Base(mostRecentDB), "_")
 	if len(parts) >= 3 {
-		existingCommit := parts[2] // The third part is the commit SHA
+		existingCommit, _ := strings.CutSuffix(parts[2], ".db") // The third part is the commit SHA
+		logger.Debug(context.Background(), "existing commit: %s, latest commit: %s", existingCommit, commitSHA[:8])
 
 		// If the commit hasn't changed, we can use the existing database
 		if existingCommit == commitSHA[:8] {

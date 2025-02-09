@@ -477,8 +477,6 @@ func (a *PRReviewAgent) ReviewPR(ctx context.Context, prNumber int, tasks []PRRe
 		}
 	}
 
-	console.println(aurora.Cyan("\nProcessing replies to existing comments..."))
-
 	for _, thread := range newThreadsByOthers {
 		console.printf("Generating response to new thread %d (file: %s)\n",
 			thread.ThreadID, thread.LastComment.FilePath)
@@ -509,6 +507,10 @@ func (a *PRReviewAgent) ReviewPR(ctx context.Context, prNumber int, tasks []PRRe
 			}
 		}
 		allComments = comments
+	}
+
+	if len(allComments) == 0 {
+		console.println(aurora.Cyan("\nNo valid comments found need to reply"))
 	}
 	return allComments, nil
 }
@@ -623,7 +625,7 @@ func (a *PRReviewAgent) performInitialReview(ctx context.Context, tasks []PRRevi
 
 func (a *PRReviewAgent) processExistingComments(ctx context.Context, prNumber int, console *Console) error {
 	logger := logging.GetLogger()
-	console.println(aurora.Cyan("\nprocess existing comments..."))
+	console.println(aurora.Cyan("\nProcess existing comments..."))
 	githubTools := a.GetGitHubTools()
 
 	changes, err := githubTools.GetPullRequestChanges(ctx, prNumber)
