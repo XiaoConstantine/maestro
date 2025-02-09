@@ -142,7 +142,7 @@ type ChunkConfig struct {
 
 func NewChunkConfig() ChunkConfig {
 	return ChunkConfig{
-		maxtokens:    4000,                         // Reserve space for model response
+		maxtokens:    1000,                         // Reserve space for model response
 		contextlines: 10,                           // Lines of surrounding context
 		overlaplines: 5,                            // Overlapping lines between chunks
 		fileMetadata: make(map[string]interface{}), // Initialize empty metadata map
@@ -344,23 +344,37 @@ func ExtractRelevantChanges(changes string, startline, endline int) string {
 }
 
 // NewPRReviewAgent creates a new PR review agent.
-func NewPRReviewAgent(githubTool *GitHubTools, dbPath string, needFullIndex bool) (*PRReviewAgent, error) {
+func NewPRReviewAgent(ctx context.Context, githubTool *GitHubTools, dbPath string, needFullIndex bool) (*PRReviewAgent, error) {
+	logger := logging.GetLogger()
+
+	logger.Debug(ctx, "Starting agent initialization with dbPath: %s", dbPath)
 	db, err := sql.Open("sqlite3", dbPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize sqlite db: %v", err)
 	}
+
+	logger.Debug(ctx, "Successfully opened database")
 	store, err := NewSQLiteRAGStore(db, logging.GetLogger())
 	if err != nil {
+		db.Close()
 		return nil, fmt.Errorf("failed to initialize rag store: %v", err)
 	}
-	defer store.Close()
 
+	logger.Debug(ctx, "Successfully created RAG store")
 	indexer := NewRepoIndexer(githubTool, store)
-	if err := indexer.IndexRepository(context.Background(), "", dbPath, needFullIndex); err != nil {
+
+	logger.Debug(ctx, "Starting repository indexing")
+	if err := indexer.IndexRepository(ctx, "", dbPath, needFullIndex); err != nil {
+		store.Close()
+
 		return nil, fmt.Errorf("failed to index repository: %w", err)
 	}
+
+	logger.Debug(ctx, "Successfully indexed repository")
 	memory := agents.NewInMemoryStore()
 	stopper := NewStopper()
+
+	logger.Debug(ctx, "Creating orchestrator configuration")
 	analyzerConfig := agents.AnalyzerConfig{
 		BaseInstruction: `Analyze the input and determine the appropriate task type:
 		- If responding to existing comments, create a comment_response task
@@ -415,6 +429,7 @@ func NewPRReviewAgent(githubTool *GitHubTools, dbPath string, needFullIndex bool
 
 	orchestrator := agents.NewFlexibleOrchestrator(memory, config)
 
+	logger.Debug(ctx, "Successfully created orchestrator")
 	return &PRReviewAgent{
 		orchestrator: orchestrator,
 		memory:       memory,
@@ -429,6 +444,22 @@ func (a *PRReviewAgent) GetGitHubTools() *GitHubTools {
 		panic("GitHub tools not initialized")
 	}
 	return a.githubTools
+}
+
+func (a *PRReviewAgent) GetOrchestrator() *agents.FlexibleOrchestrator {
+	if a.orchestrator == nil {
+		panic("Agent orchestrator not initialized")
+	}
+	return a.orchestrator
+
+}
+
+func (a *PRReviewAgent) Close() error {
+	if a.rag != nil {
+		return a.rag.Close()
+	}
+	return nil
+
 }
 
 // ReviewPR reviews a complete pull request.

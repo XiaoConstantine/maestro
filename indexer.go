@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 
 	"github.com/XiaoConstantine/dspy-go/pkg/core"
@@ -68,8 +69,25 @@ func (ri *RepoIndexer) IndexRepository(ctx context.Context, branch, dbPath strin
 
 		return nil
 	}
+	logger.Debug(ctx, "Indexing repository with config:")
+	logger.Debug(ctx, "  Owner: %s", ri.githubTools.owner)
+	logger.Debug(ctx, "  Repo: %s", ri.githubTools.repo)
+	logger.Debug(ctx, "  Branch: %s", branch)
+	logger.Debug(ctx, "  Token set: %v", ri.githubTools.client != nil)
+	logger.Debug(ctx, "=======================")
+	if branch == "" {
+		// Get repository information to find default branch
+		repo, _, err := ri.githubTools.client.Repositories.Get(ctx, ri.githubTools.owner, ri.githubTools.repo)
+		if err != nil {
+			return fmt.Errorf("failed to get repository info: %w", err)
+		}
+		branch = repo.GetDefaultBranch()
+		logger.Debug(ctx, "  Using default branch: %s", branch)
+	} else {
+		logger.Debug(ctx, "  Using specified branch: %s", branch)
+	}
 	// No existing index found, proceed full index
-	_, directoryContent, _, err := ri.githubTools.client.Repositories.GetContents(
+	_, directoryContent, resp, err := ri.githubTools.client.Repositories.GetContents(
 		ctx,
 		ri.githubTools.owner,
 		ri.githubTools.repo,
@@ -79,47 +97,74 @@ func (ri *RepoIndexer) IndexRepository(ctx context.Context, branch, dbPath strin
 		},
 	)
 	if err != nil {
+		if resp != nil {
+			logger.Debug(ctx, "GitHub API response status: %d", resp.StatusCode)
+		}
+
+		logger.Debug(ctx, "GitHub API response error: %v", err)
 		return fmt.Errorf("failed to get repository contents: %w", err)
 	}
 
 	// Process files concurrently with a worker pool
 	const maxWorkers = 5
 	filesChan := make(chan *github.RepositoryContent)
-	var wg sync.WaitGroup
 	errChan := make(chan error, maxWorkers)
+	workerCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	var walkWg sync.WaitGroup
+	walkWg.Add(1)
+	go func() {
+		defer walkWg.Done()
+		defer close(filesChan) // Ensure channel gets closed
 
+		if err := ri.walkDirectory(workerCtx, directoryContent, branch, filesChan); err != nil {
+			logger.Error(ctx, "Error during directory walk: %v", err)
+			errChan <- err
+			cancel()
+		}
+	}()
+
+	var workerWg sync.WaitGroup
 	// Start workers
 	for i := 0; i < maxWorkers; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		workerWg.Add(1)
+		go func(workerNum int) {
+			defer workerWg.Done()
 			for file := range filesChan {
+				select {
+				case <-workerCtx.Done():
+					return
+				default:
+				}
 				if err := ri.processFile(ctx, file, branch); err != nil {
-					errChan <- fmt.Errorf("failed to process %s: %w", file.GetPath(), err)
+					logger.Error(workerCtx, "Worker %d failed to process %s: %v",
+						workerNum, file.GetPath(), err)
+					errChan <- err
+					cancel()
 					return
 				}
 			}
-		}()
+		}(i)
 	}
 
-	// Walk through repository content recursively
-	err = ri.walkDirectory(ctx, directoryContent, branch, filesChan)
-	if err != nil {
-		return err
-	}
-
-	close(filesChan)
-
-	// Wait for all workers to finish
-	wg.Wait()
+	walkWg.Wait()   // Wait for directory walk to complete
+	workerWg.Wait() // Wait for workers to finish
 	close(errChan)
 
-	// Check for any errors
+	var errors []error
 	for err := range errChan {
-		if err != nil {
-			return err
-		}
+		errors = append(errors, err)
 	}
+
+	if len(errors) > 0 {
+		// Combine all errors into one message
+		var errMsgs []string
+		for _, err := range errors {
+			errMsgs = append(errMsgs, err.Error())
+		}
+		return fmt.Errorf("indexing failed with errors: %s", strings.Join(errMsgs, "; "))
+	}
+	logger.Debug(ctx, "============ finish indexing =============")
 
 	return nil
 }
@@ -132,6 +177,11 @@ func (ri *RepoIndexer) walkDirectory(
 	filesChan chan<- *github.RepositoryContent,
 ) error {
 	for _, content := range contents {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
 		if content.GetType() == "dir" {
 			// Get contents of subdirectory
 			_, subContents, _, err := ri.githubTools.client.Repositories.GetContents(
@@ -161,6 +211,7 @@ func (ri *RepoIndexer) walkDirectory(
 // processFile handles the indexing of a single file.
 func (ri *RepoIndexer) processFile(ctx context.Context, file *github.RepositoryContent, branch string) error {
 	content, err := ri.githubTools.GetFileContent(ctx, file.GetPath())
+
 	if err != nil {
 		return fmt.Errorf("failed to get file content: %w", err)
 	}
@@ -211,9 +262,10 @@ func (ri *RepoIndexer) processFile(ctx context.Context, file *github.RepositoryC
 			return fmt.Errorf("failed to store content: %w", err)
 		}
 
-		ri.logger.Debug(ctx, "Indexed chunk %d/%d for file %s",
+		ri.logger.Info(ctx, "Indexed chunk %d/%d for file %s",
 			i+1, len(chunks), file.GetPath())
 	}
+	ri.logger.Info(ctx, "Finish index file: %s", file.GetPath())
 
 	return nil
 }

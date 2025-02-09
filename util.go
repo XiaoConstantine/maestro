@@ -154,7 +154,7 @@ func abs(x int) int {
 	return x
 }
 
-func CreateStoragePath(owner, repo, commitSHA string) (string, bool, error) {
+func CreateStoragePath(ctx context.Context, owner, repo, commitSHA string) (string, bool, error) {
 	logger := logging.GetLogger()
 	// Get the user's home directory - this is the proper way to handle "~"
 	homeDir, err := os.UserHomeDir()
@@ -177,7 +177,7 @@ func CreateStoragePath(owner, repo, commitSHA string) (string, bool, error) {
 
 	newDBName := fmt.Sprintf("%s_%s_%s.db", owner, repo, commitSHA[:8])
 	newDBPath := filepath.Join(maestroDir, newDBName)
-	logger.Info(context.Background(), "existing dbs: %v", existingDBs)
+	logger.Debug(ctx, "existing dbs: %v", existingDBs)
 
 	if len(existingDBs) == 0 {
 		return newDBPath, true, nil
@@ -189,7 +189,7 @@ func CreateStoragePath(owner, repo, commitSHA string) (string, bool, error) {
 	parts := strings.Split(filepath.Base(mostRecentDB), "_")
 	if len(parts) >= 3 {
 		existingCommit, _ := strings.CutSuffix(parts[2], ".db") // The third part is the commit SHA
-		logger.Debug(context.Background(), "existing commit: %s, latest commit: %s", existingCommit, commitSHA[:8])
+		logger.Debug(ctx, "existing commit: %s, latest commit: %s", existingCommit, commitSHA[:8])
 
 		// If the commit hasn't changed, we can use the existing database
 		if existingCommit == commitSHA[:8] {

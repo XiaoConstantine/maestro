@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"os"
 	"strconv"
@@ -148,13 +147,13 @@ func runCLI(cfg *config) error {
 		return fmt.Errorf("failed to get latest commit SHA: %w", err)
 	}
 
-	dbPath, needFullIndex, err := CreateStoragePath(cfg.owner, cfg.repo, latestSHA)
+	dbPath, needFullIndex, err := CreateStoragePath(ctx, cfg.owner, cfg.repo, latestSHA)
 	// Check if we already have an index for this commit
 	if err != nil {
 		panic(err)
 	}
 	console.printf("\nNeed full index: %v", needFullIndex)
-	agent, err := NewPRReviewAgent(githubTools, dbPath, needFullIndex)
+	agent, err := NewPRReviewAgent(ctx, githubTools, dbPath, needFullIndex)
 	if err != nil {
 		panic(err)
 	}
@@ -338,33 +337,29 @@ func runInteractiveMode(cfg *config) error {
 }
 
 func initializeAndAskQuestions(ctx context.Context, cfg *config, console *Console) error {
+	if cfg.githubToken == "" {
+		return fmt.Errorf("GitHub token is required")
+	}
 	// Initialize GitHub tools and other necessary components
 	githubTools := NewGitHubTools(cfg.githubToken, cfg.owner, cfg.repo)
-
+	if githubTools == nil || githubTools.client == nil {
+		return fmt.Errorf("failed to initialize GitHub client")
+	}
 	latestSHA, err := githubTools.GetLatestCommitSHA(ctx, "main")
 	if err != nil {
 		return fmt.Errorf("failed to get latest commit SHA: %w", err)
 	}
 
-	dbPath, _, err := CreateStoragePath(cfg.owner, cfg.repo, latestSHA)
+	dbPath, needFullIndex, err := CreateStoragePath(ctx, cfg.owner, cfg.repo, latestSHA)
 	if err != nil {
 		return fmt.Errorf("failed to create storage path: %w", err)
 	}
-
-	db, err := sql.Open("sqlite3", dbPath)
+	agent, err := NewPRReviewAgent(ctx, githubTools, dbPath, needFullIndex)
 	if err != nil {
-		return fmt.Errorf("failed to open database: %w", err)
+		return fmt.Errorf("Failed to initiliaze agent due to : %v", err)
 	}
-	defer db.Close()
 
-	store, err := NewSQLiteRAGStore(db, console.logger)
-	if err != nil {
-		return fmt.Errorf("failed to create RAG store: %w", err)
-	}
-	defer store.Close()
-
-	qaProcessor := NewRepoQAProcessor(store)
-
+	qaProcessor, _ := agent.GetOrchestrator().GetProcessor("repo_qa")
 	// Interactive question loop
 	for {
 		var question string
