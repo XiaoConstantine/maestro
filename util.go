@@ -11,6 +11,7 @@ import (
 
 	"github.com/XiaoConstantine/dspy-go/pkg/core"
 	"github.com/XiaoConstantine/dspy-go/pkg/logging"
+	"github.com/logrusorgru/aurora"
 )
 
 func parseModelString(modelStr string) (provider, name, config string) {
@@ -235,4 +236,72 @@ func copyFile(src, dst string) error {
 	}
 
 	return nil
+}
+
+func formatStructuredAnswer(answer string) string {
+	if !strings.Contains(answer, "\n") {
+		// For single-line answers, keep it simple
+		return fmt.Sprintf("\n%s %s\n",
+			aurora.Green("Answer:").Bold().String(),
+			answer)
+	}
+
+	// For multi-line answers, add structure
+	sections := strings.Split(answer, "\n\n")
+	var formatted strings.Builder
+
+	for i, section := range sections {
+		if i == 0 {
+			// First section gets special treatment as main answer
+			formatted.WriteString(fmt.Sprintf("\n%s\n%s\n",
+				aurora.Green("Answer:").Bold().String(),
+				section))
+		} else {
+			// Additional sections get indentation and formatting
+			formatted.WriteString(fmt.Sprintf("\n%s\n",
+				indent(section, 2)))
+		}
+	}
+
+	return formatted.String()
+}
+
+func groupFilesByDirectory(files []string) map[string][]string {
+	groups := make(map[string][]string)
+	for _, file := range files {
+		dir := filepath.Dir(file)
+		groups[dir] = append(groups[dir], filepath.Base(file))
+	}
+	return groups
+}
+
+// Helper function to print file tree.
+func printFileTree(console *Console, filesByDir map[string][]string) {
+	// Sort directories for consistent output
+	dirs := make([]string, 0, len(filesByDir))
+	for dir := range filesByDir {
+		dirs = append(dirs, dir)
+	}
+	sort.Strings(dirs)
+
+	for _, dir := range dirs {
+		files := filesByDir[dir]
+		if console.color {
+			console.printf("📁 %s\n", aurora.Blue(dir).String())
+		} else {
+			console.printf("📁 %s\n", dir)
+		}
+
+		for i, file := range files {
+			prefix := "   ├── "
+			if i == len(files)-1 {
+				prefix = "   └── "
+			}
+			if console.color {
+				console.printf("%s%s\n", prefix, aurora.Cyan(file).String())
+			} else {
+				console.printf("%s%s\n", prefix, file)
+			}
+		}
+	}
 }

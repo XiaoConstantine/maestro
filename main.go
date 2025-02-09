@@ -14,6 +14,7 @@ import (
 	"github.com/XiaoConstantine/dspy-go/pkg/core"
 	"github.com/XiaoConstantine/dspy-go/pkg/llms"
 	"github.com/XiaoConstantine/dspy-go/pkg/logging"
+	"github.com/logrusorgru/aurora"
 	"github.com/spf13/cobra"
 
 	sqlite_vec "github.com/asg017/sqlite-vec-go-bindings/cgo"
@@ -422,22 +423,33 @@ func initializeAndAskQuestions(ctx context.Context, cfg *config, console *Consol
 			},
 		}, nil)
 
-		console.printf("Result: %s", result)
 		if err != nil {
 			fmt.Printf("Error processing question: %v\n", err)
 			continue
 		}
-
-		// Display the answer
 		if response, ok := result.(*QAResponse); ok {
-			fmt.Printf("\nAnswer: %s\n", response.Answer)
+			// Print a separator line for visual clarity
+			console.println("\n" + strings.Repeat("─", 80))
+
+			// Format and print the main answer using structured sections
+			formattedAnswer := formatStructuredAnswer(response.Answer)
+			console.println(formattedAnswer)
+
+			// Print source files in a tree-like structure if available
 			if len(response.SourceFiles) > 0 {
-				fmt.Printf("\nRelevant files:\n")
-				for _, file := range response.SourceFiles {
-					fmt.Printf("- %s\n", file)
+				if console.color {
+					console.println("\n" + aurora.Blue("Source Files:").String())
+				} else {
+					console.println("\nSource Files:")
 				}
+
+				// Group files by directory for better organization
+				filesByDir := groupFilesByDirectory(response.SourceFiles)
+				printFileTree(console, filesByDir)
 			}
-			fmt.Println()
+
+			// Print final separator
+			console.println("\n" + strings.Repeat("─", 80) + "\n")
 		}
 	}
 }
