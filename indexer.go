@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"os"
 	"path/filepath"
 	"sort"
 	"sync"
@@ -30,51 +29,44 @@ func NewRepoIndexer(githubTools *GitHubTools, ragStore RAGStore) *RepoIndexer {
 }
 
 // IndexRepository indexes the entire repository content into the RAG store.
-func (ri *RepoIndexer) IndexRepository(ctx context.Context, branch string) error {
+func (ri *RepoIndexer) IndexRepository(ctx context.Context, branch, dbPath string, needFullIndex bool) error {
 	logger := logging.GetLogger()
 	latestSHA, err := ri.githubTools.GetLatestCommitSHA(ctx, branch)
 	if err != nil {
 		return fmt.Errorf("failed to get latest commit SHA: %w", err)
 	}
 
-	// Generate the expected database path for this SHA
-	dbPath, err := CreateStoragePath(ri.githubTools.owner, ri.githubTools.repo, latestSHA)
-	if err != nil {
-		return fmt.Errorf("failed to create storage path: %w", err)
-	}
-
-	// Check if we already have an index for this commit
-	if _, err := os.Stat(dbPath); err == nil {
-		logger.Info(ctx, "Index already exists for commit %s, skipping indexing", latestSHA[:8])
-		return nil
-	}
-
-	pattern := fmt.Sprintf("%s_%s_*.db", ri.githubTools.owner, ri.githubTools.repo)
-	existingDBs, err := filepath.Glob(filepath.Join(filepath.Dir(dbPath), pattern))
-	if err != nil {
-		return fmt.Errorf("failed to list existing databases: %w", err)
-	}
-	if len(existingDBs) > 0 {
-		// Extract the SHA from the most recent database
-		sort.Strings(existingDBs) // Sort to get the latest version
-		currentDB := existingDBs[len(existingDBs)-1]
-		currentSHA := extractSHAFromPath(currentDB)
-
-		logger.Info(ctx, "Found existing index for commit %s, performing incremental update", currentSHA)
-
-		// Get the changes between commits
-		changes, err := ri.getCommitDifferences(ctx, currentSHA, latestSHA)
+	if !needFullIndex {
+		logger.Info(ctx, "Found recent index for commit %s, skipping indexing", latestSHA[:8])
+		pattern := fmt.Sprintf("%s_%s_*.db", ri.githubTools.owner, ri.githubTools.repo)
+		existingDBs, err := filepath.Glob(filepath.Join(filepath.Dir(dbPath), pattern))
 		if err != nil {
-			return fmt.Errorf("failed to get commit differences: %w", err)
+			return fmt.Errorf("failed to list existing databases: %w", err)
+		}
+		if len(existingDBs) > 0 {
+			// Extract the SHA from the most recent database
+			sort.Strings(existingDBs) // Sort to get the latest version
+			currentDB := existingDBs[len(existingDBs)-1]
+			currentSHA := extractSHAFromPath(currentDB)
+
+			logger.Info(ctx, "Found existing index for commit %s, performing incremental update", currentSHA)
+
+			// Get the changes between commits
+			changes, err := ri.getCommitDifferences(ctx, currentSHA, latestSHA)
+			if err != nil {
+				return fmt.Errorf("failed to get commit differences: %w", err)
+			}
+
+			// Create new database by copying the existing one
+			if err := copyFile(currentDB, dbPath); err != nil {
+				return fmt.Errorf("failed to copy database: %w", err)
+			}
+
+			// Process only the changed files
+			return ri.processChangedFiles(ctx, changes, dbPath)
 		}
 
-		// Create new database by copying the existing one
-		if err := copyFile(currentDB, dbPath); err != nil {
-			return fmt.Errorf("failed to copy database: %w", err)
-		}
-
-		// Process only the changed files
-		return ri.processChangedFiles(ctx, changes, dbPath)
+		return nil
 	}
 	// No existing index found, proceed full index
 	_, directoryContent, _, err := ri.githubTools.client.Repositories.GetContents(
@@ -273,34 +265,6 @@ func (ri *RepoIndexer) processChangedFiles(ctx context.Context, changes []*githu
 		// Process the file and update the index
 		if err := ri.processChangedFile(ctx, file, dbPath); err != nil {
 			return fmt.Errorf("failed to process file %s: %w", file.GetFilename(), err)
-		}
-	}
-
-	return nil
-}
-
-func (ri *RepoIndexer) cleanupOldIndices(ctx context.Context, baseDir string, keepCount int) error {
-	pattern := fmt.Sprintf("%s_%s_*.db", ri.githubTools.owner, ri.githubTools.repo)
-	dbs, err := filepath.Glob(filepath.Join(baseDir, pattern))
-	if err != nil {
-		return err
-	}
-
-	if len(dbs) <= keepCount {
-		return nil
-	}
-
-	// Sort by modification time
-	sort.Slice(dbs, func(i, j int) bool {
-		iInfo, _ := os.Stat(dbs[i])
-		jInfo, _ := os.Stat(dbs[j])
-		return iInfo.ModTime().After(jInfo.ModTime())
-	})
-
-	// Remove older files
-	for _, db := range dbs[keepCount:] {
-		if err := os.Remove(db); err != nil {
-			logging.GetLogger().Warn(ctx, "Failed to remove old index: %v", err)
 		}
 	}
 

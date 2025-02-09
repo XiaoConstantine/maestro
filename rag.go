@@ -1,10 +1,8 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"database/sql"
-	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"sync"
@@ -87,29 +85,6 @@ func NewSQLiteRAGStore(db *sql.DB, logger *logging.Logger) (*sqliteRAGStore, err
 	return store, nil
 }
 
-// serializeEmbedding converts a float32 slice to bytes for storage.
-func serializeEmbedding(embedding []float32) ([]byte, error) {
-	buf := new(bytes.Buffer)
-	for _, f := range embedding {
-		err := binary.Write(buf, binary.LittleEndian, f)
-		if err != nil {
-			return nil, fmt.Errorf("failed to serialize embedding: %w", err)
-		}
-	}
-	return buf.Bytes(), nil
-}
-
-// deserializeEmbedding converts stored bytes back to float32 slice.
-func deserializeEmbedding(data []byte) ([]float32, error) {
-	embedding := make([]float32, len(data)/4)
-	buf := bytes.NewReader(data)
-	err := binary.Read(buf, binary.LittleEndian, embedding)
-	if err != nil {
-		return nil, fmt.Errorf("failed to deserialize embedding: %w", err)
-	}
-	return embedding, nil
-}
-
 // StoreContent implements RAGStore interface.
 func (s *sqliteRAGStore) StoreContent(ctx context.Context, content *Content) error {
 	s.log.Debug(ctx, "Starting StoreContent for ID: %s", content.ID)
@@ -145,8 +120,14 @@ func (s *sqliteRAGStore) StoreContent(ctx context.Context, content *Content) err
 		`INSERT OR REPLACE INTO contents (id, text, metadata)
      VALUES (?, ?, ?)`,
 		content.ID, content.Text, string(metadata))
+	if err != nil {
+		return fmt.Errorf("failed to store content metadata: %w", err)
+	}
 
 	blob, err := sqlite_vec.SerializeFloat32(content.Embedding)
+	if err != nil {
+		return fmt.Errorf("failed to serialize embedding: %w", err)
+	}
 	_, err = tx.ExecContext(ctx,
 		`INSERT OR REPLACE INTO vec_items (embedding, content_id)
      VALUES (?, ?)`, // Directly use serialized blob
@@ -161,7 +142,6 @@ func (s *sqliteRAGStore) StoreContent(ctx context.Context, content *Content) err
 	}
 
 	s.log.Debug(ctx, "Successfully stored content ID: %s", content.ID)
-	s.log.Debug(ctx, "Stored content with ID: %s", content.ID)
 	return nil
 }
 
@@ -175,6 +155,10 @@ func (s *sqliteRAGStore) FindSimilar(ctx context.Context, embedding []float32, l
 	}
 
 	blob, err := sqlite_vec.SerializeFloat32(embedding)
+	if err != nil {
+		return nil, fmt.Errorf("failed to serialize embedding: %w", err)
+	}
+
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT c.id, c.text, c.metadata, 
             vec_distance_cosine(v.embedding, ?) as distance

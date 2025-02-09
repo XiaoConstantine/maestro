@@ -103,7 +103,6 @@ type PRReviewAgent struct {
 	memory        agents.Memory
 	rag           RAGStore
 	activeThreads map[int64]*ThreadTracker // Track active discussion threads
-	lastCheck     time.Time                // Last time we checked for new comments
 	// TODO: should align with dspy agent interface
 	githubTools *GitHubTools // Add this field
 	stopper     *Stopper
@@ -345,7 +344,7 @@ func ExtractRelevantChanges(changes string, startline, endline int) string {
 }
 
 // NewPRReviewAgent creates a new PR review agent.
-func NewPRReviewAgent(githubTool *GitHubTools, dbPath string) (*PRReviewAgent, error) {
+func NewPRReviewAgent(githubTool *GitHubTools, dbPath string, needFullIndex bool) (*PRReviewAgent, error) {
 	db, err := sql.Open("sqlite3", dbPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize sqlite db: %v", err)
@@ -357,7 +356,7 @@ func NewPRReviewAgent(githubTool *GitHubTools, dbPath string) (*PRReviewAgent, e
 	defer store.Close()
 
 	indexer := NewRepoIndexer(githubTool, store)
-	if err := indexer.IndexRepository(context.Background(), ""); err != nil {
+	if err := indexer.IndexRepository(context.Background(), "", dbPath, needFullIndex); err != nil {
 		return nil, fmt.Errorf("failed to index repository: %w", err)
 	}
 	memory := agents.NewInMemoryStore()
@@ -460,7 +459,6 @@ func (a *PRReviewAgent) ReviewPR(ctx context.Context, prNumber int, tasks []PRRe
 		myOpenThreads      []*ThreadTracker // Threads I started that need follow-up
 		repliestoMe        []*ThreadTracker // Replies to my comments
 		newThreadsByOthers []*ThreadTracker // New threads started by others
-		allResponses       []PRReviewComment
 	)
 	var allComments []PRReviewComment
 	for _, thread := range a.activeThreads {
@@ -485,14 +483,11 @@ func (a *PRReviewAgent) ReviewPR(ctx context.Context, prNumber int, tasks []PRRe
 		console.printf("Generating response to new thread %d (file: %s)\n",
 			thread.ThreadID, thread.LastComment.FilePath)
 
-		response, err := a.generateResponse(ctx, thread, console)
+		_, err := a.generateResponse(ctx, thread, console)
 		if err != nil {
 			console.FileError(thread.LastComment.FilePath,
 				fmt.Errorf("failed to generate response: %w", err))
 			continue
-		}
-		if response != nil {
-			allResponses = append(allResponses, *response)
 		}
 	}
 	if len(myOpenThreads) == 0 && len(repliestoMe) == 0 {
@@ -881,25 +876,6 @@ func (a *PRReviewAgent) refreshThreadContent(ctx context.Context, thread *Thread
 			thread.LastComment.FilePath)
 	}
 	return nil
-}
-
-func determineThreadStatus(comment *PRReviewComment) ThreadStatus {
-	if comment.Resolved {
-		return ThreadResolved
-	}
-
-	// Check comment content for indicators of progress
-	content := strings.ToLower(comment.Content)
-	if strings.Contains(content, "working") || strings.Contains(content, "in progress") {
-		return ThreadInProgress
-	}
-
-	// Check for staleness based on time
-	if time.Since(comment.Timestamp) > 7*24*time.Hour {
-		return ThreadStale
-	}
-
-	return ThreadOpen
 }
 
 // findRelevantChunks locates the code chunks that are relevant to a specific comment.

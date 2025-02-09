@@ -1,13 +1,16 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/XiaoConstantine/dspy-go/pkg/core"
+	"github.com/XiaoConstantine/dspy-go/pkg/logging"
 )
 
 func parseModelString(modelStr string) (provider, name, config string) {
@@ -150,40 +153,51 @@ func abs(x int) int {
 	return x
 }
 
-func escapeXMLContent(content string) string {
-	content = strings.ReplaceAll(content, "&", "&amp;")
-	content = strings.ReplaceAll(content, "<", "&lt;")
-	content = strings.ReplaceAll(content, ">", "&gt;")
-	content = strings.ReplaceAll(content, "\"", "&quot;")
-	content = strings.ReplaceAll(content, "'", "&apos;")
-	return content
-}
-
-func escapeCodeContent(content string) string {
-	return fmt.Sprintf("<![CDATA[%s]]>", content)
-}
-
-func CreateStoragePath(owner, repo, commitSHA string) (string, error) {
+func CreateStoragePath(owner, repo, commitSHA string) (string, bool, error) {
+	logger := logging.GetLogger()
 	// Get the user's home directory - this is the proper way to handle "~"
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
-		return "", fmt.Errorf("failed to get home directory: %w", err)
+		return "", false, fmt.Errorf("failed to get home directory: %w", err)
 	}
-
 	// Construct the full path for the .maestro directory
 	maestroDir := filepath.Join(homeDir, ".maestro")
 
 	// Create the directory with appropriate permissions (0755 gives read/execute to all, write to owner)
 	if err := os.MkdirAll(maestroDir, 0755); err != nil {
-		return "", fmt.Errorf("failed to create directory %s: %w", maestroDir, err)
+		return "", false, fmt.Errorf("failed to create directory %s: %w", maestroDir, err)
 	}
 
-	// Create the database filename - using underscore instead of dash for better compatibility
-	dbName := fmt.Sprintf("%s_%s_%s.db", owner, repo, commitSHA[:8])
-	// Construct the full path to the database file
-	dbPath := filepath.Join(maestroDir, dbName)
+	pattern := fmt.Sprintf("%s_%s_*.db", owner, repo)
+	existingDBs, err := filepath.Glob(filepath.Join(maestroDir, pattern))
+	if err != nil {
+		return "", false, fmt.Errorf("failed to list existing databases: %w", err)
+	}
 
-	return dbPath, nil
+	newDBName := fmt.Sprintf("%s_%s_%s.db", owner, repo, commitSHA[:8])
+	newDBPath := filepath.Join(maestroDir, newDBName)
+	logger.Info(context.Background(), "existing dbs: %v", existingDBs)
+
+	if len(existingDBs) == 0 {
+		logger.Info(context.Background(), "====================")
+		return newDBPath, true, nil
+	}
+	sort.Strings(existingDBs)
+	mostRecentDB := existingDBs[len(existingDBs)-1]
+
+	// Extract the commit SHA from the most recent database filename
+	parts := strings.Split(filepath.Base(mostRecentDB), "_")
+	if len(parts) >= 3 {
+		existingCommit := parts[2] // The third part is the commit SHA
+
+		// If the commit hasn't changed, we can use the existing database
+		if existingCommit == commitSHA[:8] {
+			return mostRecentDB, false, nil
+		}
+	}
+
+	// We have a different commit SHA, so we need full indexing with the new path
+	return newDBPath, true, nil
 }
 
 func extractSHAFromPath(path string) string {

@@ -9,12 +9,10 @@ import (
 	"github.com/XiaoConstantine/dspy-go/pkg/core"
 	"github.com/XiaoConstantine/dspy-go/pkg/logging"
 	"github.com/XiaoConstantine/dspy-go/pkg/modules"
-	"github.com/google/go-github/v68/github"
 )
 
 type RepoQAProcessor struct {
 	ragStore RAGStore
-	client   *github.Client
 }
 
 type QAResponse struct {

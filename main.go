@@ -147,11 +147,13 @@ func runCLI(cfg *config) error {
 		return fmt.Errorf("failed to get latest commit SHA: %w", err)
 	}
 
-	dbPath, err := CreateStoragePath(cfg.owner, cfg.repo, latestSHA)
+	dbPath, needFullIndex, err := CreateStoragePath(cfg.owner, cfg.repo, latestSHA)
+	// Check if we already have an index for this commit
 	if err != nil {
 		panic(err)
 	}
-	agent, err := NewPRReviewAgent(githubTools, dbPath)
+	console.printf("Need full index: %v", needFullIndex)
+	agent, err := NewPRReviewAgent(githubTools, dbPath, needFullIndex)
 	if err != nil {
 		panic(err)
 	}
@@ -379,7 +381,7 @@ func initializeAndAskQuestions(ctx context.Context, cfg *config, console *Consol
 		return fmt.Errorf("failed to get latest commit SHA: %w", err)
 	}
 
-	dbPath, err := CreateStoragePath(cfg.owner, cfg.repo, latestSHA)
+	dbPath, _, err := CreateStoragePath(cfg.owner, cfg.repo, latestSHA)
 	if err != nil {
 		return fmt.Errorf("failed to create storage path: %w", err)
 	}
