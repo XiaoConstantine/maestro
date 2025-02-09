@@ -4,7 +4,7 @@ go 1.22.5
 
 require (
 	github.com/AlecAivazis/survey/v2 v2.3.7
-	github.com/XiaoConstantine/dspy-go v0.15.1
+	github.com/XiaoConstantine/dspy-go v0.16.1
 	github.com/asg017/sqlite-vec-go-bindings v0.1.6
 	github.com/briandowns/spinner v1.23.2
 	github.com/google/go-github/v68 v68.0.0
@@ -21,8 +21,6 @@ require (
 	github.com/spf13/pflag v1.0.5 // indirect
 	golang.org/x/text v0.21.0 // indirect
 )
-
-replace github.com/XiaoConstantine/dspy-go => /Users/xiao/development/github.com/XiaoConstantine/dspy-go
 
 require (
 	github.com/XiaoConstantine/anthropic-go v0.0.7 // indirect
