@@ -188,6 +188,7 @@ func (s *sqliteRAGStore) PopulateGuidelines(ctx context.Context, language string
 		}
 	}
 
+	s.log.Debug(ctx, "Finished fetch guidelines")
 	return nil
 }
 
@@ -199,30 +200,45 @@ func (s *sqliteRAGStore) FindSimilar(ctx context.Context, embedding []float32, l
 	if s.closed {
 		return nil, fmt.Errorf("store is closed")
 	}
-	query := `
-        SELECT c.id, c.text, c.metadata, vec_distance_cosine(v.embedding, ?) as distance
-        FROM vec_items v
-        JOIN contents c ON v.content_id = c.id
-        WHERE v.embedding MATCH ? AND k = ?
-    `
 
-	// Add content type filter if specified
-	if len(contentTypes) > 0 {
-		placeholder := make([]string, len(contentTypes))
-		for i := range contentTypes {
-			placeholder[i] = "?"
-		}
-		query += fmt.Sprintf(" AND c.content_type IN (%s)", strings.Join(placeholder, ","))
-	}
-
-	query += " ORDER BY distance ASC"
-
+	// First add the common arguments
 	blob, err := sqlite_vec.SerializeFloat32(embedding)
 	if err != nil {
 		return nil, fmt.Errorf("failed to serialize embedding: %w", err)
 	}
 
-	rows, err := s.db.QueryContext(ctx, query, blob, blob, limit)
+	baseQuery := `
+	SELECT c.id, c.text, c.metadata,
+	vec_distance_cosine(v.embedding, ?) as distance
+	FROM vec_items v
+	JOIN contents c ON v.content_id = c.id
+	WHERE v.embedding MATCH ?`
+
+	// Add content type filter if specified
+	var whereClauses []string
+	args := []interface{}{blob, blob} // Maintain parameter order
+
+	if len(contentTypes) > 0 {
+		placeholders := make([]string, len(contentTypes))
+		for i, ct := range contentTypes {
+			placeholders[i] = "?"
+			args = append(args, ct)
+		}
+		whereClauses = append(whereClauses,
+			fmt.Sprintf("c.content_type IN (%s)", strings.Join(placeholders, ",")))
+	}
+
+	// Add final k=? constraint
+	whereClauses = append(whereClauses, "k = ?")
+	args = append(args, limit)
+
+	// Build final query
+	finalQuery := baseQuery
+	if len(whereClauses) > 0 {
+		finalQuery += " AND " + strings.Join(whereClauses, " AND ")
+	}
+	finalQuery += " ORDER BY distance ASC"
+	rows, err := s.db.QueryContext(ctx, finalQuery, args...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query similar content: %w", err)
 	}
@@ -301,4 +317,33 @@ func (s *sqliteRAGStore) Close() error {
 
 	s.closed = true
 	return s.db.Close()
+}
+
+func splitContentForEmbedding(content string, maxBytes int) ([]string, error) {
+	if len(content) <= maxBytes {
+		return []string{content}, nil
+	}
+
+	var chunks []string
+	lines := strings.Split(content, "\n")
+	currentChunk := strings.Builder{}
+
+	for _, line := range lines {
+		if currentChunk.Len()+len(line)+1 > maxBytes {
+			// Current chunk would exceed limit, start a new one
+			if currentChunk.Len() > 0 {
+				chunks = append(chunks, currentChunk.String())
+				currentChunk.Reset()
+			}
+		}
+		currentChunk.WriteString(line)
+		currentChunk.WriteString("\n")
+	}
+
+	// Add final chunk if not empty
+	if currentChunk.Len() > 0 {
+		chunks = append(chunks, currentChunk.String())
+	}
+
+	return chunks, nil
 }

@@ -125,11 +125,13 @@ type ThreadTracker struct {
 }
 
 type ReviewMetadata struct {
-	FilePath    string
-	FileContent string
-	Changes     string
-	Category    string
-	ReviewType  string
+	FilePath       string
+	FileContent    string
+	Changes        string
+	Category       string
+	ReviewType     string
+	ReviewPatterns []*Content // Added for repository patterns
+	Guidelines     []*Content // Added for guidelines
 }
 
 // Chunkconfig holds configuration for code chunking.
@@ -580,24 +582,32 @@ func (a *PRReviewAgent) performInitialReview(ctx context.Context, tasks []PRRevi
 	for _, task := range tasks {
 		// Create embedding for the entire file to find similar patterns
 		llm := core.GetDefaultLLM()
-		fileEmbedding, err := llm.CreateEmbedding(ctx, task.FileContent)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create file embedding: %w", err)
-		}
-		// Find similar patterns in the repository
-		patterns, err := a.rag.FindSimilar(ctx, fileEmbedding.Vector, 5, "repository")
-		if err != nil {
-			console.FileError(task.FilePath, fmt.Errorf("failed to find similar patterns: %w", err))
-			continue
-		}
-		repoPatterns = append(repoPatterns, patterns...)
 
-		guidelineMatch, err := a.rag.FindSimilar(ctx, fileEmbedding.Vector, 3, "guideline")
+		chunks, err := splitContentForEmbedding(task.FileContent, 8000) // Keep under 10KB limit
 		if err != nil {
-			console.FileError(task.FilePath, fmt.Errorf("failed to find guideline matches: %w", err))
-			continue
+			return nil, fmt.Errorf("failed to split content for %s: %w", task.FilePath, err)
 		}
-		guidelineMatches = append(guidelineMatches, guidelineMatch...)
+		for _, chunk := range chunks {
+			fileEmbedding, err := llm.CreateEmbedding(ctx, chunk)
+			if err != nil {
+				return nil, fmt.Errorf("failed to create file embedding: %w", err)
+			}
+			// Find similar patterns in the repository
+			patterns, err := a.rag.FindSimilar(ctx, fileEmbedding.Vector, 5, "repository")
+			if err != nil {
+				console.FileError(task.FilePath, fmt.Errorf("failed to find similar patterns: %w", err))
+				continue
+			}
+			repoPatterns = append(repoPatterns, patterns...)
+
+			guidelineMatch, err := a.rag.FindSimilar(ctx, fileEmbedding.Vector, 3, "guideline")
+			if err != nil {
+				console.FileError(task.FilePath, fmt.Errorf("failed to find guideline matches: %w", err))
+				continue
+			}
+			guidelineMatches = append(guidelineMatches, guidelineMatch...)
+
+		}
 
 	}
 	// Create review context

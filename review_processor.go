@@ -75,8 +75,10 @@ Review for these specific issues:
 		task.ID, metadata.FilePath, len(metadata.FileContent))
 	// Process the review
 	result, err := predict.Process(ctx, map[string]interface{}{
-		"file_content": metadata.FileContent,
-		"changes":      metadata.Changes,
+		"file_content":  metadata.FileContent,
+		"changes":       metadata.Changes,
+		"guidelines":    metadata.Guidelines,
+		"repo_patterns": metadata.ReviewPatterns,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("prediction failed: %w", err)
@@ -206,6 +208,27 @@ func extractReviewMetadata(metadata map[string]interface{}) (*ReviewMetadata, er
 	if fileContent, ok := metadata["file_content"]; ok {
 		if str, ok := fileContent.(string); ok {
 			rm.FileContent = str
+		}
+	}
+
+	if patternsRaw, exists := metadata["repo_patterns"]; exists {
+		if patterns, ok := patternsRaw.([]*Content); ok {
+			rm.ReviewPatterns = patterns
+		} else {
+			// Log a warning but don't fail - patterns are optional
+			logging.GetLogger().Warn(context.Background(),
+				"Invalid repo_patterns type: %T, expected []*Content", patternsRaw)
+		}
+	}
+
+	// Extract guidelines for best practices checking
+	if guidelinesRaw, exists := metadata["guidelines"]; exists {
+		if guidelines, ok := guidelinesRaw.([]*Content); ok {
+			rm.Guidelines = guidelines
+		} else {
+			// Log a warning but don't fail - guidelines are optional
+			logging.GetLogger().Warn(context.Background(),
+				"Invalid guidelines type: %T, expected []*Content", guidelinesRaw)
 		}
 	}
 
