@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"path/filepath"
 	"sort"
@@ -36,151 +37,60 @@ func NewRepoIndexer(githubTools *GitHubTools, ragStore RAGStore) *RepoIndexer {
 }
 
 // IndexRepository indexes the entire repository content into the RAG store.
-func (ri *RepoIndexer) IndexRepository(ctx context.Context, branch, dbPath string, needFullIndex bool) error {
-	logger := logging.GetLogger()
+func (ri *RepoIndexer) IndexRepository(ctx context.Context, branch, dbPath string) error {
+	logger := ri.logger
 	latestSHA, err := ri.githubTools.GetLatestCommitSHA(ctx, branch)
 	if err != nil {
 		return fmt.Errorf("failed to get latest commit SHA: %w", err)
 	}
 
-	if !needFullIndex {
-		logger.Info(ctx, "Found recent index for commit %s, skipping indexing", latestSHA[:8])
-		pattern := fmt.Sprintf("%s_%s_*.db", ri.githubTools.owner, ri.githubTools.repo)
-		existingDBs, err := filepath.Glob(filepath.Join(filepath.Dir(dbPath), pattern))
-		if err != nil {
-			return fmt.Errorf("failed to list existing databases: %w", err)
+	needFullIndex := false
+	lastIndexedSHA, err := ri.getLastIndexedCommit(ctx)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			logger.Info(ctx, "No previous index found, requiring full index")
+			needFullIndex = true
+		} else {
+			return fmt.Errorf("failed to check last indexed commit: %w", err)
 		}
-		if len(existingDBs) > 0 {
-			// Extract the SHA from the most recent database
-			sort.Strings(existingDBs) // Sort to get the latest version
-			currentDB := existingDBs[len(existingDBs)-1]
-			currentSHA := extractSHAFromPath(currentDB)
-
-			logger.Info(ctx, "Found existing index for commit %s, performing incremental update", currentSHA)
-
-			// Get the changes between commits
-			changes, err := ri.getCommitDifferences(ctx, currentSHA, latestSHA)
+	}
+	if needFullIndex {
+		logger.Debug(ctx, "Indexing repository with config:")
+		logger.Debug(ctx, "  Owner: %s", ri.githubTools.owner)
+		logger.Debug(ctx, "  Repo: %s", ri.githubTools.repo)
+		logger.Debug(ctx, "  Branch: %s", branch)
+		logger.Debug(ctx, "  Token set: %v", ri.githubTools.client != nil)
+		logger.Debug(ctx, "=======================")
+		if branch == "" {
+			// Get repository information to find default branch
+			repo, _, err := ri.githubTools.client.Repositories.Get(ctx, ri.githubTools.owner, ri.githubTools.repo)
 			if err != nil {
-				return fmt.Errorf("failed to get commit differences: %w", err)
+				return fmt.Errorf("failed to get repository info: %w", err)
 			}
-
-			// Create new database by copying the existing one
-			if err := copyFile(currentDB, dbPath); err != nil {
-				return fmt.Errorf("failed to copy database: %w", err)
-			}
-
-			// Process only the changed files
-			return ri.processChangedFiles(ctx, changes, dbPath)
+			branch = repo.GetDefaultBranch()
+			logger.Debug(ctx, "  Using default branch: %s", branch)
+		} else {
+			logger.Debug(ctx, "  Using specified branch: %s", branch)
 		}
 
-		return nil
+		return ri.fullIndex(ctx, branch, latestSHA)
+
 	}
-	logger.Debug(ctx, "Indexing repository with config:")
-	logger.Debug(ctx, "  Owner: %s", ri.githubTools.owner)
-	logger.Debug(ctx, "  Repo: %s", ri.githubTools.repo)
-	logger.Debug(ctx, "  Branch: %s", branch)
-	logger.Debug(ctx, "  Token set: %v", ri.githubTools.client != nil)
-	logger.Debug(ctx, "=======================")
-	if branch == "" {
-		// Get repository information to find default branch
-		repo, _, err := ri.githubTools.client.Repositories.Get(ctx, ri.githubTools.owner, ri.githubTools.repo)
-		if err != nil {
-			return fmt.Errorf("failed to get repository info: %w", err)
-		}
-		branch = repo.GetDefaultBranch()
-		logger.Debug(ctx, "  Using default branch: %s", branch)
-	} else {
-		logger.Debug(ctx, "  Using specified branch: %s", branch)
-	}
-	// No existing index found, proceed full index
-	language, err := ri.detectRepositoryLanguage(ctx)
+	changes, err := ri.getCommitDifferences(ctx, lastIndexedSHA, latestSHA)
 	if err != nil {
-		logger.Warn(ctx, "Failed to detect language: %v, defaulting to Go", err)
-		language = "Go"
+		return fmt.Errorf("failed to get commit diff")
 	}
-	if err := ri.ragStore.PopulateGuidelines(ctx, language); err != nil {
-		return fmt.Errorf("failed to populate guidelines: %w", err)
-	}
-	_, directoryContent, resp, err := ri.githubTools.client.Repositories.GetContents(
-		ctx,
-		ri.githubTools.owner,
-		ri.githubTools.repo,
-		"", // Root directory
-		&github.RepositoryContentGetOptions{
-			Ref: branch,
-		},
-	)
+	// Process only the changed files
+	err = ri.processChangedFiles(ctx, changes, dbPath)
 	if err != nil {
-		if resp != nil {
-			logger.Debug(ctx, "GitHub API response status: %d", resp.StatusCode)
-		}
-
-		logger.Debug(ctx, "GitHub API response error: %v", err)
-		return fmt.Errorf("failed to get repository contents: %w", err)
+		return fmt.Errorf("failed to increment index")
 	}
-
-	// Process files concurrently with a worker pool
-	const maxWorkers = 5
-	filesChan := make(chan *github.RepositoryContent)
-	errChan := make(chan error, maxWorkers)
-	workerCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	var walkWg sync.WaitGroup
-	walkWg.Add(1)
-	go func() {
-		defer walkWg.Done()
-		defer close(filesChan) // Ensure channel gets closed
-
-		if err := ri.walkDirectory(workerCtx, directoryContent, branch, filesChan); err != nil {
-			logger.Error(ctx, "Error during directory walk: %v", err)
-			errChan <- err
-			cancel()
-		}
-	}()
-
-	var workerWg sync.WaitGroup
-	// Start workers
-	for i := 0; i < maxWorkers; i++ {
-		workerWg.Add(1)
-		go func(workerNum int) {
-			defer workerWg.Done()
-			for file := range filesChan {
-				select {
-				case <-workerCtx.Done():
-					return
-				default:
-				}
-				if err := ri.processFile(ctx, file, branch); err != nil {
-					logger.Error(workerCtx, "Worker %d failed to process %s: %v",
-						workerNum, file.GetPath(), err)
-					errChan <- err
-					cancel()
-					return
-				}
-			}
-		}(i)
+	if err := ri.updateLastIndexedCommit(ctx, latestSHA); err != nil {
+		return fmt.Errorf("failed to update last indexed commit: %w", err)
 	}
-
-	walkWg.Wait()   // Wait for directory walk to complete
-	workerWg.Wait() // Wait for workers to finish
-	close(errChan)
-
-	var errors []error
-	for err := range errChan {
-		errors = append(errors, err)
-	}
-
-	if len(errors) > 0 {
-		// Combine all errors into one message
-		var errMsgs []string
-		for _, err := range errors {
-			errMsgs = append(errMsgs, err.Error())
-		}
-		return fmt.Errorf("indexing failed with errors: %s", strings.Join(errMsgs, "; "))
-	}
-	logger.Debug(ctx, "============ finish indexing =============")
 
 	return nil
+
 }
 
 // walkDirectory recursively walks through repository directories.
@@ -258,9 +168,14 @@ func (ri *RepoIndexer) processFile(ctx context.Context, file *github.RepositoryC
 			"end_line":     fmt.Sprintf("%d", chunk.endline),
 		}
 
+		embeddingContent, err := preprocessForEmbedding(chunk.content)
+		if err != nil {
+			return fmt.Errorf("failed to preprocess chunk for embedding: %w", err)
+		}
 		// Generate embedding for the chunk using the default LLM
 		llm := core.GetDefaultLLM()
-		embedding, err := llm.CreateEmbedding(ctx, chunk.content)
+		embedding, err := llm.CreateEmbedding(ctx, embeddingContent)
+
 		if err != nil {
 			return fmt.Errorf("failed to create embedding: %w", err)
 		}
@@ -441,4 +356,108 @@ func (ri *RepoIndexer) detectRepositoryLanguage(ctx context.Context) (string, er
 	}
 
 	return primaryLang, nil
+}
+
+func (ri *RepoIndexer) getLastIndexedCommit(ctx context.Context) (string, error) {
+	return ri.ragStore.GetMetadata(ctx, "last_indexed_commit")
+}
+
+func (ri *RepoIndexer) updateLastIndexedCommit(ctx context.Context, sha string) error {
+	return ri.ragStore.SetMetadata(ctx, "last_indexed_commit", sha)
+}
+
+func (ri *RepoIndexer) fullIndex(ctx context.Context, branch, latestSHA string) error {
+	logger := ri.logger
+	language, err := ri.detectRepositoryLanguage(ctx)
+	if err != nil {
+		logger.Warn(ctx, "Failed to detect language: %v, defaulting to Go", err)
+		language = "Go"
+	}
+	if err := ri.ragStore.PopulateGuidelines(ctx, language); err != nil {
+		return fmt.Errorf("failed to populate guidelines: %w", err)
+	}
+	_, directoryContent, resp, err := ri.githubTools.client.Repositories.GetContents(
+		ctx,
+		ri.githubTools.owner,
+		ri.githubTools.repo,
+		"", // Root directory
+		&github.RepositoryContentGetOptions{
+			Ref: branch,
+		},
+	)
+	if err != nil {
+		if resp != nil {
+			logger.Debug(ctx, "GitHub API response status: %d", resp.StatusCode)
+		}
+
+		logger.Debug(ctx, "GitHub API response error: %v", err)
+		return fmt.Errorf("failed to get repository contents: %w", err)
+	}
+
+	// Process files concurrently with a worker pool
+	const maxWorkers = 5
+	filesChan := make(chan *github.RepositoryContent)
+	errChan := make(chan error, maxWorkers)
+	workerCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	var walkWg sync.WaitGroup
+	walkWg.Add(1)
+	go func() {
+		defer walkWg.Done()
+		defer close(filesChan) // Ensure channel gets closed
+
+		if err := ri.walkDirectory(workerCtx, directoryContent, branch, filesChan); err != nil {
+			logger.Error(ctx, "Error during directory walk: %v", err)
+			errChan <- err
+			cancel()
+		}
+	}()
+
+	var workerWg sync.WaitGroup
+	// Start workers
+	for i := 0; i < maxWorkers; i++ {
+		workerWg.Add(1)
+		go func(workerNum int) {
+			defer workerWg.Done()
+			for file := range filesChan {
+				select {
+				case <-workerCtx.Done():
+					return
+				default:
+				}
+				if err := ri.processFile(ctx, file, branch); err != nil {
+					logger.Error(workerCtx, "Worker %d failed to process %s: %v",
+						workerNum, file.GetPath(), err)
+					errChan <- err
+					cancel()
+					return
+				}
+			}
+		}(i)
+	}
+
+	walkWg.Wait()   // Wait for directory walk to complete
+	workerWg.Wait() // Wait for workers to finish
+	close(errChan)
+
+	var errors []error
+	for err := range errChan {
+		errors = append(errors, err)
+	}
+
+	if len(errors) > 0 {
+		// Combine all errors into one message
+		var errMsgs []string
+		for _, err := range errors {
+			errMsgs = append(errMsgs, err.Error())
+		}
+		return fmt.Errorf("indexing failed with errors: %s", strings.Join(errMsgs, "; "))
+	}
+	logger.Debug(ctx, "============ finish indexing =============")
+	if err := ri.updateLastIndexedCommit(ctx, latestSHA); err != nil {
+		return fmt.Errorf("failed to update last indexed commit: %w", err)
+	}
+
+	return nil
+
 }

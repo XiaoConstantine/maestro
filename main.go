@@ -142,18 +142,12 @@ func runCLI(cfg *config) error {
 
 	githubTools := NewGitHubTools(cfg.githubToken, cfg.owner, cfg.repo)
 
-	latestSHA, err := githubTools.GetLatestCommitSHA(ctx, "main")
-	if err != nil {
-		return fmt.Errorf("failed to get latest commit SHA: %w", err)
-	}
-
-	dbPath, needFullIndex, err := CreateStoragePath(ctx, cfg.owner, cfg.repo, latestSHA)
+	dbPath, err := CreateStoragePath(ctx, cfg.owner, cfg.repo)
 	// Check if we already have an index for this commit
 	if err != nil {
 		panic(err)
 	}
-	console.printf("\nNeed full index: %v", needFullIndex)
-	agent, err := NewPRReviewAgent(ctx, githubTools, dbPath, needFullIndex)
+	agent, err := NewPRReviewAgent(ctx, githubTools, dbPath)
 	if err != nil {
 		panic(err)
 	}
@@ -345,16 +339,12 @@ func initializeAndAskQuestions(ctx context.Context, cfg *config, console *Consol
 	if githubTools == nil || githubTools.client == nil {
 		return fmt.Errorf("failed to initialize GitHub client")
 	}
-	latestSHA, err := githubTools.GetLatestCommitSHA(ctx, "main")
-	if err != nil {
-		return fmt.Errorf("failed to get latest commit SHA: %w", err)
-	}
 
-	dbPath, needFullIndex, err := CreateStoragePath(ctx, cfg.owner, cfg.repo, latestSHA)
+	dbPath, err := CreateStoragePath(ctx, cfg.owner, cfg.repo)
 	if err != nil {
 		return fmt.Errorf("failed to create storage path: %w", err)
 	}
-	agent, err := NewPRReviewAgent(ctx, githubTools, dbPath, needFullIndex)
+	agent, err := NewPRReviewAgent(ctx, githubTools, dbPath)
 	if err != nil {
 		return fmt.Errorf("Failed to initiliaze agent due to : %v", err)
 	}

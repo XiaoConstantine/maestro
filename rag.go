@@ -39,6 +39,10 @@ type RAGStore interface {
 	// Populate style guide, best practices based on repo language
 	PopulateGuidelines(ctx context.Context, language string) error
 
+	// DB version control
+	GetMetadata(ctx context.Context, key string) (string, error)
+	SetMetadata(ctx context.Context, key, value string) error
+
 	Close() error
 }
 
@@ -51,6 +55,12 @@ type sqliteRAGStore struct {
 
 func (s *sqliteRAGStore) init() error {
 	queries := []string{
+		// db meta data table
+		`CREATE TABLE IF NOT EXISTS db_metadata (
+		key TEXT PRIMARY KEY,
+		value TEXT NOT NULL,
+		updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+		)`,
 		// Original metadata table
 		`CREATE TABLE IF NOT EXISTS contents (
 		id TEXT PRIMARY KEY,
@@ -66,6 +76,8 @@ func (s *sqliteRAGStore) init() error {
 		embedding float[768] distance_metric=cosine,  -- Match your embedding dimensions
 		content_id TEXT PARTITION KEY  // Optimizes WHERE clause filtering
 		)`,
+
+		`CREATE INDEX IF NOT EXISTS idx_metadata_key ON db_metadata(key)`,
 	}
 
 	for _, q := range queries {
@@ -303,6 +315,44 @@ func (s *sqliteRAGStore) DeleteContent(ctx context.Context, id string) error {
 	}
 
 	s.log.Debug(ctx, "Deleted content with ID: %s", id)
+	return nil
+}
+
+func (s *sqliteRAGStore) GetMetadata(ctx context.Context, key string) (string, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var value string
+	err := s.db.QueryRowContext(ctx,
+		"SELECT value FROM db_metadata WHERE key = ?",
+		key).Scan(&value)
+
+	if err == sql.ErrNoRows {
+		return "", err
+	}
+	if err != nil {
+		return "", fmt.Errorf("failed to get metadata: %w", err)
+	}
+
+	return value, nil
+}
+
+func (s *sqliteRAGStore) SetMetadata(ctx context.Context, key, value string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	_, err := s.db.ExecContext(ctx, `
+        INSERT INTO db_metadata (key, value, updated_at)
+        VALUES (?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(key) DO UPDATE SET
+            value = excluded.value,
+            updated_at = CURRENT_TIMESTAMP`,
+		key, value)
+
+	if err != nil {
+		return fmt.Errorf("failed to set metadata: %w", err)
+	}
+
 	return nil
 }
 

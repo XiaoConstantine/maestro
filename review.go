@@ -347,7 +347,7 @@ func ExtractRelevantChanges(changes string, startline, endline int) string {
 }
 
 // NewPRReviewAgent creates a new PR review agent.
-func NewPRReviewAgent(ctx context.Context, githubTool *GitHubTools, dbPath string, needFullIndex bool) (*PRReviewAgent, error) {
+func NewPRReviewAgent(ctx context.Context, githubTool *GitHubTools, dbPath string) (*PRReviewAgent, error) {
 	logger := logging.GetLogger()
 
 	logger.Debug(ctx, "Starting agent initialization with dbPath: %s", dbPath)
@@ -367,7 +367,7 @@ func NewPRReviewAgent(ctx context.Context, githubTool *GitHubTools, dbPath strin
 	indexer := NewRepoIndexer(githubTool, store)
 
 	logger.Debug(ctx, "Starting repository indexing")
-	if err := indexer.IndexRepository(ctx, "", dbPath, needFullIndex); err != nil {
+	if err := indexer.IndexRepository(ctx, "", dbPath); err != nil {
 		store.Close()
 
 		return nil, fmt.Errorf("failed to index repository: %w", err)
@@ -583,7 +583,7 @@ func (a *PRReviewAgent) performInitialReview(ctx context.Context, tasks []PRRevi
 		// Create embedding for the entire file to find similar patterns
 		llm := core.GetDefaultLLM()
 
-		chunks, err := splitContentForEmbedding(task.FileContent, 8000) // Keep under 10KB limit
+		chunks, err := splitContentForEmbedding(task.FileContent, 1024) // Keep under 10KB limit
 		if err != nil {
 			return nil, fmt.Errorf("failed to split content for %s: %w", task.FilePath, err)
 		}

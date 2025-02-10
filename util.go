@@ -3,14 +3,12 @@ package main
 import (
 	"context"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 
 	"github.com/XiaoConstantine/dspy-go/pkg/core"
-	"github.com/XiaoConstantine/dspy-go/pkg/logging"
 	"github.com/logrusorgru/aurora"
 )
 
@@ -154,88 +152,22 @@ func abs(x int) int {
 	return x
 }
 
-func CreateStoragePath(ctx context.Context, owner, repo, commitSHA string) (string, bool, error) {
-	logger := logging.GetLogger()
+func CreateStoragePath(ctx context.Context, owner, repo string) (string, error) {
 	// Get the user's home directory - this is the proper way to handle "~"
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
-		return "", false, fmt.Errorf("failed to get home directory: %w", err)
+		return "", fmt.Errorf("failed to get home directory: %w", err)
 	}
 	// Construct the full path for the .maestro directory
 	maestroDir := filepath.Join(homeDir, ".maestro")
 
 	// Create the directory with appropriate permissions (0755 gives read/execute to all, write to owner)
 	if err := os.MkdirAll(maestroDir, 0755); err != nil {
-		return "", false, fmt.Errorf("failed to create directory %s: %w", maestroDir, err)
+		return "", fmt.Errorf("failed to create directory %s: %w", maestroDir, err)
 	}
-
-	pattern := fmt.Sprintf("%s_%s_*.db", owner, repo)
-	existingDBs, err := filepath.Glob(filepath.Join(maestroDir, pattern))
-	if err != nil {
-		return "", false, fmt.Errorf("failed to list existing databases: %w", err)
-	}
-
-	newDBName := fmt.Sprintf("%s_%s_%s.db", owner, repo, commitSHA[:8])
-	newDBPath := filepath.Join(maestroDir, newDBName)
-	logger.Debug(ctx, "existing dbs: %v", existingDBs)
-
-	if len(existingDBs) == 0 {
-		return newDBPath, true, nil
-	}
-	sort.Strings(existingDBs)
-	mostRecentDB := existingDBs[len(existingDBs)-1]
-
-	// Extract the commit SHA from the most recent database filename
-	parts := strings.Split(filepath.Base(mostRecentDB), "_")
-	if len(parts) >= 3 {
-		existingCommit, _ := strings.CutSuffix(parts[2], ".db") // The third part is the commit SHA
-		logger.Debug(ctx, "existing commit: %s, latest commit: %s", existingCommit, commitSHA[:8])
-
-		// If the commit hasn't changed, we can use the existing database
-		if existingCommit == commitSHA[:8] {
-			return mostRecentDB, false, nil
-		}
-	}
-
-	// We have a different commit SHA, so we need full indexing with the new path
-	return newDBPath, true, nil
-}
-
-func extractSHAFromPath(path string) string {
-	base := filepath.Base(path)
-	parts := strings.Split(base, "_")
-	if len(parts) >= 3 {
-		return strings.TrimSuffix(parts[2], ".db")
-	}
-	return ""
-}
-
-func copyFile(src, dst string) error {
-	// Open the source file
-	sourceFile, err := os.Open(src)
-	if err != nil {
-		return fmt.Errorf("failed to open source file: %w", err)
-	}
-	defer sourceFile.Close()
-
-	// Create the destination file
-	destFile, err := os.Create(dst)
-	if err != nil {
-		return fmt.Errorf("failed to create destination file: %w", err)
-	}
-	defer destFile.Close()
-
-	// Copy the contents
-	if _, err := io.Copy(destFile, sourceFile); err != nil {
-		return fmt.Errorf("failed to copy file contents: %w", err)
-	}
-
-	// Sync to ensure write is complete
-	if err := destFile.Sync(); err != nil {
-		return fmt.Errorf("failed to sync destination file: %w", err)
-	}
-
-	return nil
+	// Use a single database file per repository
+	dbName := fmt.Sprintf("%s_%s.db", owner, repo)
+	return filepath.Join(maestroDir, dbName), nil
 }
 
 func formatStructuredAnswer(answer string) string {
@@ -304,4 +236,30 @@ func printFileTree(console *Console, filesByDir map[string][]string) {
 			}
 		}
 	}
+}
+
+func preprocessForEmbedding(content string) (string, error) {
+	// Break into smaller chunks suitable for embedding
+	const maxEmbeddingLength = 4000 // Characters, not tokens
+
+	if len(content) <= maxEmbeddingLength {
+		return content, nil
+	}
+
+	// Split on natural boundaries like paragraphs or functions
+	lines := strings.Split(content, "\n")
+	var chunk strings.Builder
+	currentLength := 0
+
+	for _, line := range lines {
+		lineLength := len(line) + 1 // +1 for newline
+		if currentLength+lineLength > maxEmbeddingLength {
+			break
+		}
+		chunk.WriteString(line)
+		chunk.WriteString("\n")
+		currentLength += lineLength
+	}
+
+	return chunk.String(), nil
 }
