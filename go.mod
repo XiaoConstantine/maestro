@@ -31,6 +31,6 @@ require (
 	github.com/spf13/cobra v1.8.1
 	go.uber.org/atomic v1.7.0 // indirect
 	go.uber.org/multierr v1.9.0 // indirect
-	golang.org/x/sys v0.28.0 // indirect
-	golang.org/x/term v0.1.0 // indirect
+	golang.org/x/sys v0.29.0 // indirect
+	golang.org/x/term v0.28.0 // indirect
 )

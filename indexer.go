@@ -20,6 +20,12 @@ type RepoIndexer struct {
 	logger      *logging.Logger
 }
 
+type LanguageStats struct {
+	Language string
+	Count    int
+	Bytes    int64
+}
+
 // NewRepoIndexer creates a new repository indexer.
 func NewRepoIndexer(githubTools *GitHubTools, ragStore RAGStore) *RepoIndexer {
 	return &RepoIndexer{
@@ -87,6 +93,14 @@ func (ri *RepoIndexer) IndexRepository(ctx context.Context, branch, dbPath strin
 		logger.Debug(ctx, "  Using specified branch: %s", branch)
 	}
 	// No existing index found, proceed full index
+	language, err := ri.detectRepositoryLanguage(ctx)
+	if err != nil {
+		logger.Warn(ctx, "Failed to detect language: %v, defaulting to Go", err)
+		language = "Go"
+	}
+	if err := ri.ragStore.PopulateGuidelines(ctx, language); err != nil {
+		return fmt.Errorf("failed to populate guidelines: %w", err)
+	}
 	_, directoryContent, resp, err := ri.githubTools.client.Repositories.GetContents(
 		ctx,
 		ri.githubTools.owner,
@@ -376,4 +390,55 @@ func (ri *RepoIndexer) processChangedFile(ctx context.Context, file *github.Comm
 	}
 
 	return nil
+}
+
+// detectRepositoryLanguage analyzes repository contents to determine the primary language.
+func (ri *RepoIndexer) detectRepositoryLanguage(ctx context.Context) (string, error) {
+	logger := logging.GetLogger()
+	logger.Debug(ctx, "Detecting repository primary language")
+
+	// Get repository language statistics from GitHub API
+	langs, _, err := ri.githubTools.client.Repositories.ListLanguages(
+		ctx,
+		ri.githubTools.owner,
+		ri.githubTools.repo,
+	)
+	if err != nil {
+		return "", fmt.Errorf("failed to get language statistics: %w", err)
+	}
+
+	// Convert map to slice for sorting
+	var stats []LanguageStats
+	for lang, bytes := range langs {
+		stats = append(stats, LanguageStats{
+			Language: lang,
+			Bytes:    int64(bytes),
+		})
+	}
+
+	// Sort by bytes in descending order
+	sort.Slice(stats, func(i, j int) bool {
+		return stats[i].Bytes > stats[j].Bytes
+	})
+
+	if len(stats) == 0 {
+		logger.Warn(ctx, "No language statistics found, defaulting to Go")
+		return "Go", nil
+	}
+
+	primaryLang := stats[0].Language
+	logger.Info(ctx, "Detected primary language: %s (%d bytes)",
+		primaryLang, stats[0].Bytes)
+
+	// Log secondary languages if present
+	if len(stats) > 1 {
+		var secondary []string
+		for _, stat := range stats[1:] {
+			secondary = append(secondary, fmt.Sprintf("%s (%d bytes)",
+				stat.Language, stat.Bytes))
+		}
+		logger.Debug(ctx, "Secondary languages: %s", strings.Join(secondary, ", "))
+	}
+
+	return primaryLang, nil
 }
