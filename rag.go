@@ -5,12 +5,14 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 
 	sqlite_vec "github.com/asg017/sqlite-vec-go-bindings/cgo"
 
 	_ "github.com/mattn/go-sqlite3"
 
+	"github.com/XiaoConstantine/dspy-go/pkg/core"
 	"github.com/XiaoConstantine/dspy-go/pkg/logging"
 )
 
@@ -26,13 +28,16 @@ type RAGStore interface {
 	StoreContent(ctx context.Context, content *Content) error
 
 	// FindSimilar finds the most similar content pieces to the given embedding
-	FindSimilar(ctx context.Context, embedding []float32, limit int) ([]*Content, error)
+	FindSimilar(ctx context.Context, embedding []float32, limit int, contentTypes ...string) ([]*Content, error)
 
 	// UpdateContent updates an existing content piece
 	UpdateContent(ctx context.Context, content *Content) error
 
 	// DeleteContent removes content by ID
 	DeleteContent(ctx context.Context, id string) error
+
+	// Populate style guide, best practices based on repo language
+	PopulateGuidelines(ctx context.Context, language string) error
 
 	Close() error
 }
@@ -51,6 +56,7 @@ func (s *sqliteRAGStore) init() error {
 		id TEXT PRIMARY KEY,
 		text TEXT NOT NULL,
 		metadata TEXT,
+		content_type TEXT, -- 'repository' or 'guideline',
 		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 		)`,
 
@@ -145,28 +151,78 @@ func (s *sqliteRAGStore) StoreContent(ctx context.Context, content *Content) err
 	return nil
 }
 
+// populate guidelines during database initialization.
+func (s *sqliteRAGStore) PopulateGuidelines(ctx context.Context, language string) error {
+	// Create a guideline fetcher
+	fetcher := NewGuidelineFetcher(s.log)
+
+	// Fetch guidelines for the specified language
+	guidelines, err := fetcher.FetchGuidelines(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to fetch guidelines: %w", err)
+	}
+
+	// Store guidelines in the same database
+	for _, guideline := range guidelines {
+		// Generate embedding for the guideline
+		llm := core.GetDefaultLLM()
+		content := formatGuidelineContent(guideline)
+		embedding, err := llm.CreateEmbedding(ctx, content)
+		if err != nil {
+			return fmt.Errorf("failed to create embedding: %w", err)
+		}
+
+		// Store in the database with content_type = 'guideline'
+		err = s.StoreContent(ctx, &Content{
+			ID:        "guideline_" + guideline.ID,
+			Text:      content,
+			Embedding: embedding.Vector,
+			Metadata: map[string]string{
+				"type":     "guideline",
+				"language": language,
+				"category": guideline.Category,
+			},
+		})
+		if err != nil {
+			return fmt.Errorf("failed to store guideline: %w", err)
+		}
+	}
+
+	return nil
+}
+
 // FindSimilar implements RAGStore interface.
-func (s *sqliteRAGStore) FindSimilar(ctx context.Context, embedding []float32, limit int) ([]*Content, error) {
+func (s *sqliteRAGStore) FindSimilar(ctx context.Context, embedding []float32, limit int, contentTypes ...string) ([]*Content, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
 	if s.closed {
 		return nil, fmt.Errorf("store is closed")
 	}
+	query := `
+        SELECT c.id, c.text, c.metadata, vec_distance_cosine(v.embedding, ?) as distance
+        FROM vec_items v
+        JOIN contents c ON v.content_id = c.id
+        WHERE v.embedding MATCH ? AND k = ?
+    `
+
+	// Add content type filter if specified
+	if len(contentTypes) > 0 {
+		placeholder := make([]string, len(contentTypes))
+		for i := range contentTypes {
+			placeholder[i] = "?"
+		}
+		query += fmt.Sprintf(" AND c.content_type IN (%s)", strings.Join(placeholder, ","))
+	}
+
+	query += " ORDER BY distance ASC"
 
 	blob, err := sqlite_vec.SerializeFloat32(embedding)
 	if err != nil {
 		return nil, fmt.Errorf("failed to serialize embedding: %w", err)
 	}
 
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT c.id, c.text, c.metadata, 
-            vec_distance_cosine(v.embedding, ?) as distance
-     FROM vec_items v
-     JOIN contents c ON v.content_id = c.id
-     WHERE v.embedding MATCH ?  AND k = ?
-     ORDER BY distance ASC`,
-		blob, blob, limit)
+	rows, err := s.db.QueryContext(ctx, query, blob, blob, limit)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query similar content: %w", err)
 	}

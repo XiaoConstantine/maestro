@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/XiaoConstantine/dspy-go/pkg/agents"
+	"github.com/XiaoConstantine/dspy-go/pkg/core"
 
 	"github.com/XiaoConstantine/dspy-go/pkg/logging"
 	"github.com/google/go-github/v68/github"
@@ -573,6 +574,32 @@ func (a *PRReviewAgent) Stop(ctx context.Context) {
 
 func (a *PRReviewAgent) performInitialReview(ctx context.Context, tasks []PRReviewTask, console *Console) ([]PRReviewComment, error) {
 	var allComments []PRReviewComment
+
+	var repoPatterns []*Content
+	var guidelineMatches []*Content
+	for _, task := range tasks {
+		// Create embedding for the entire file to find similar patterns
+		llm := core.GetDefaultLLM()
+		fileEmbedding, err := llm.CreateEmbedding(ctx, task.FileContent)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create file embedding: %w", err)
+		}
+		// Find similar patterns in the repository
+		patterns, err := a.rag.FindSimilar(ctx, fileEmbedding.Vector, 5, "repository")
+		if err != nil {
+			console.FileError(task.FilePath, fmt.Errorf("failed to find similar patterns: %w", err))
+			continue
+		}
+		repoPatterns = append(repoPatterns, patterns...)
+
+		guidelineMatch, err := a.rag.FindSimilar(ctx, fileEmbedding.Vector, 3, "guideline")
+		if err != nil {
+			console.FileError(task.FilePath, fmt.Errorf("failed to find guideline matches: %w", err))
+			continue
+		}
+		guidelineMatches = append(guidelineMatches, guidelineMatch...)
+
+	}
 	// Create review context
 	fileData := make(map[string]map[string]interface{})
 	for i := range tasks {
@@ -614,7 +641,9 @@ func (a *PRReviewAgent) performInitialReview(ctx context.Context, tasks []PRRevi
 					"start": chunk.startline,
 					"end":   chunk.endline,
 				},
-				"review_type": "chunk_review",
+				"review_type":   "chunk_review",
+				"repo_patterns": repoPatterns,
+				"guidelines":    guidelineMatches,
 			}
 
 			console.ReviewingFile(task.FilePath, i+1, len(task.Changes))

@@ -21,12 +21,15 @@ func (p *CodeReviewProcessor) Process(ctx context.Context, task agents.Task, con
 		[]core.InputField{
 			{Field: core.Field{Name: "file_content"}},
 			{Field: core.Field{Name: "changes"}},
+			{Field: core.Field{Name: "guidelines"}},    // Added for best practices
+			{Field: core.Field{Name: "repo_patterns"}}, // Added for consistency
 		},
 		[]core.OutputField{
 			{Field: core.NewField("comments")},
 			{Field: core.NewField("summary")},
 		},
 	).WithInstruction(`Review the code changes and provide specific, actionable feedback.
+Consider both best practices from guidelines and consistency with existing patterns.
 For each issue found, output in following format:
 
 comments:
