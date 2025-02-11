@@ -226,9 +226,6 @@ func extractReviewMetadata(metadata map[string]interface{}) (*ReviewMetadata, er
 		rm.TotalChunks = totalChunks
 	}
 
-	logging.GetLogger().Info(context.Background(), "meta: %v", metadata)
-	logging.GetLogger().Info(context.Background(), "line range: %v", rm.LineRange)
-
 	if rangeData, ok := metadata["line_range"].(map[string]interface{}); ok {
 		startLine, startOk := getIntFromMetadata(rangeData, "start")
 		endLine, endOk := getIntFromMetadata(rangeData, "end")
