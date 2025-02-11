@@ -23,6 +23,11 @@ type Content struct {
 	Metadata  map[string]string // Additional info like file path, line numbers
 }
 
+const (
+	ContentTypeRepository = "repository"
+	ContentTypeGuideline  = "guideline"
+)
+
 type RAGStore interface {
 	// StoreContent saves a content piece with its embedding
 	StoreContent(ctx context.Context, content *Content) error
@@ -113,6 +118,15 @@ func (s *sqliteRAGStore) StoreContent(ctx context.Context, content *Content) err
 		return fmt.Errorf("store is closed")
 	}
 
+	contentType, exists := content.Metadata["content_type"]
+	if !exists {
+		return fmt.Errorf("content_type must be specified in metadata")
+	}
+
+	if contentType != ContentTypeRepository && contentType != ContentTypeGuideline {
+		return fmt.Errorf("invalid content_type: %s", contentType)
+	}
+
 	s.log.Debug(ctx, "Beginning transaction for content ID: %s", content.ID)
 	// Start a transaction
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -135,9 +149,9 @@ func (s *sqliteRAGStore) StoreContent(ctx context.Context, content *Content) err
 	s.log.Debug(ctx, "Executing SQLite insert/replace for content ID: %s", content.ID)
 
 	_, err = tx.ExecContext(ctx,
-		`INSERT OR REPLACE INTO contents (id, text, metadata)
-     VALUES (?, ?, ?)`,
-		content.ID, content.Text, string(metadata))
+		`INSERT OR REPLACE INTO contents (id, text, metadata, content_type)
+     VALUES (?, ?, ?, ?)`,
+		content.ID, content.Text, string(metadata), contentType)
 	if err != nil {
 		return fmt.Errorf("failed to store content metadata: %w", err)
 	}
@@ -165,15 +179,18 @@ func (s *sqliteRAGStore) StoreContent(ctx context.Context, content *Content) err
 
 // populate guidelines during database initialization.
 func (s *sqliteRAGStore) PopulateGuidelines(ctx context.Context, language string) error {
-	// Create a guideline fetcher
+
+	s.log.Info(ctx, "Starting guideline population for language: %s", language)
 	fetcher := NewGuidelineFetcher(s.log)
 
 	// Fetch guidelines for the specified language
 	guidelines, err := fetcher.FetchGuidelines(ctx)
 	if err != nil {
+		s.log.Info(ctx, "failed to fetch gl: %v", err)
 		return fmt.Errorf("failed to fetch guidelines: %w", err)
 	}
 
+	s.log.Info(ctx, "Fetched %d guidelines", len(guidelines))
 	// Store guidelines in the same database
 	for _, guideline := range guidelines {
 		// Generate embedding for the guideline
@@ -190,9 +207,9 @@ func (s *sqliteRAGStore) PopulateGuidelines(ctx context.Context, language string
 			Text:      content,
 			Embedding: embedding.Vector,
 			Metadata: map[string]string{
-				"type":     "guideline",
-				"language": language,
-				"category": guideline.Category,
+				"content_type": ContentTypeGuideline,
+				"language":     language,
+				"category":     guideline.Category,
 			},
 		})
 		if err != nil {
@@ -206,6 +223,7 @@ func (s *sqliteRAGStore) PopulateGuidelines(ctx context.Context, language string
 
 // FindSimilar implements RAGStore interface.
 func (s *sqliteRAGStore) FindSimilar(ctx context.Context, embedding []float32, limit int, contentTypes ...string) ([]*Content, error) {
+	logger := s.log
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -250,6 +268,7 @@ func (s *sqliteRAGStore) FindSimilar(ctx context.Context, embedding []float32, l
 		finalQuery += " AND " + strings.Join(whereClauses, " AND ")
 	}
 	finalQuery += " ORDER BY distance ASC"
+	logger.Debug(ctx, "final query: %s", formatQuery(finalQuery, args))
 	rows, err := s.db.QueryContext(ctx, finalQuery, args...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query similar content: %w", err)
@@ -270,6 +289,7 @@ func (s *sqliteRAGStore) FindSimilar(ctx context.Context, embedding []float32, l
 
 		// Parse metadata JSON
 		if err := json.Unmarshal([]byte(metadataStr), &content.Metadata); err != nil {
+
 			return nil, fmt.Errorf("failed to unmarshal metadata: %w", err)
 		}
 
@@ -280,7 +300,7 @@ func (s *sqliteRAGStore) FindSimilar(ctx context.Context, embedding []float32, l
 		return nil, fmt.Errorf("error iterating results: %w", err)
 	}
 
-	s.log.Info(ctx, "Found %d similar contents", len(results))
+	s.log.Debug(ctx, "Found %d similar contents in content_type: %s", len(results), contentTypes)
 
 	return results, nil
 }
@@ -396,4 +416,33 @@ func splitContentForEmbedding(content string, maxBytes int) ([]string, error) {
 	}
 
 	return chunks, nil
+}
+
+func formatQuery(query string, args []interface{}) string {
+	// Make a copy of the query so we don't modify the original
+	formattedQuery := query
+
+	// For each argument, replace the first ? with its string representation
+	for _, arg := range args {
+		// Handle different argument types appropriately
+		var argStr string
+		switch v := arg.(type) {
+		case string:
+			// Strings need to be quoted
+			argStr = fmt.Sprintf("'%s'", v)
+		case []byte:
+			// For blob data (like embeddings), show length instead of content
+			argStr = fmt.Sprintf("<blob:%d bytes>", len(v))
+		case nil:
+			argStr = "NULL"
+		default:
+			// For numbers, booleans, etc. use standard string conversion
+			argStr = fmt.Sprintf("%v", v)
+		}
+
+		// Replace first ? with the argument
+		formattedQuery = strings.Replace(formattedQuery, "?", argStr, 1)
+	}
+
+	return formattedQuery
 }

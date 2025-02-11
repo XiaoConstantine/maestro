@@ -166,6 +166,7 @@ func (ri *RepoIndexer) processFile(ctx context.Context, file *github.RepositoryC
 			"total_chunks": fmt.Sprintf("%d", len(chunks)),
 			"start_line":   fmt.Sprintf("%d", chunk.startline),
 			"end_line":     fmt.Sprintf("%d", chunk.endline),
+			"content_type": ContentTypeRepository,
 		}
 
 		embeddingContent, err := preprocessForEmbedding(chunk.content)
@@ -374,6 +375,7 @@ func (ri *RepoIndexer) fullIndex(ctx context.Context, branch, latestSHA string) 
 		language = "Go"
 	}
 	if err := ri.ragStore.PopulateGuidelines(ctx, language); err != nil {
+		logger.Info(ctx, "failed to populate guidelines: %v", err)
 		return fmt.Errorf("failed to populate guidelines: %w", err)
 	}
 	_, directoryContent, resp, err := ri.githubTools.client.Repositories.GetContents(

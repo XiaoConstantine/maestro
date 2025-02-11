@@ -435,6 +435,10 @@ func NewPRReviewAgent(ctx context.Context, githubTool *GitHubTools, dbPath strin
 			"comment_response": &CommentResponseProcessor{},
 			"repo_qa":          qaProcessor,
 		},
+		Options: core.WithGenerateOptions(
+			core.WithTemperature(0.2),
+			core.WithMaxTokens(8192),
+		),
 	}
 
 	orchestrator := agents.NewFlexibleOrchestrator(memory, config)
@@ -586,7 +590,9 @@ func (a *PRReviewAgent) performInitialReview(ctx context.Context, tasks []PRRevi
 
 	var repoPatterns []*Content
 	var guidelineMatches []*Content
+
 	for _, task := range tasks {
+
 		// Create embedding for the entire file to find similar patterns
 		llm := core.GetDefaultLLM()
 
@@ -594,28 +600,52 @@ func (a *PRReviewAgent) performInitialReview(ctx context.Context, tasks []PRRevi
 		if err != nil {
 			return nil, fmt.Errorf("failed to split content for %s: %w", task.FilePath, err)
 		}
-		for _, chunk := range chunks {
-			fileEmbedding, err := llm.CreateEmbedding(ctx, chunk)
-			if err != nil {
-				return nil, fmt.Errorf("failed to create file embedding: %w", err)
-			}
-			// Find similar patterns in the repository
-			patterns, err := a.rag.FindSimilar(ctx, fileEmbedding.Vector, 5, "repository")
-			if err != nil {
-				console.FileError(task.FilePath, fmt.Errorf("failed to find similar patterns: %w", err))
-				continue
-			}
-			repoPatterns = append(repoPatterns, patterns...)
+		message := fmt.Sprintf("Analyzing %s (%d chunks)...", filepath.Base(task.FilePath), len(chunks))
 
-			guidelineMatch, err := a.rag.FindSimilar(ctx, fileEmbedding.Vector, 3, "guideline")
-			if err != nil {
-				console.FileError(task.FilePath, fmt.Errorf("failed to find guideline matches: %w", err))
-				continue
-			}
-			guidelineMatches = append(guidelineMatches, guidelineMatch...)
+		var totalRepoMatches, totalGuidelineMatches int
+		err = console.WithSpinner(ctx, message, func() error {
+			for i, chunk := range chunks {
 
+				console.spinner.Suffix = fmt.Sprintf(" (chunk %d/%d) of %s", i+1, len(chunks), task.FilePath)
+				fileEmbedding, err := llm.CreateEmbedding(ctx, chunk)
+				if err != nil {
+					return fmt.Errorf("failed to create file embedding: %w", err)
+				}
+				// Find similar patterns in the repository
+				patterns, err := a.rag.FindSimilar(ctx, fileEmbedding.Vector, 5, "repository")
+				if err != nil {
+					console.FileError(task.FilePath, fmt.Errorf("failed to find similar patterns: %w", err))
+					continue
+				}
+				repoPatterns = append(repoPatterns, patterns...)
+
+				totalRepoMatches += len(patterns)
+				guidelineMatch, err := a.rag.FindSimilar(ctx, fileEmbedding.Vector, 3, "guideline")
+				if err != nil {
+					console.FileError(task.FilePath, fmt.Errorf("failed to find guideline matches: %w", err))
+					continue
+				}
+				guidelineMatches = append(guidelineMatches, guidelineMatch...)
+
+				totalGuidelineMatches += len(guidelineMatch)
+
+			}
+			return nil
+		})
+
+		if err != nil {
+			console.FileError(task.FilePath, fmt.Errorf("failed to analyze patterns: %w", err))
+			continue
 		}
-
+		console.printf("\n%s\n",
+			aurora.Cyan(fmt.Sprintf(
+				"Analysis complete for %s: found %d repository patterns and %d guideline matches across %d chunks",
+				filepath.Base(task.FilePath),
+				totalRepoMatches,
+				totalGuidelineMatches,
+				len(chunks),
+			)),
+		)
 	}
 	// Create review context
 	fileData := make(map[string]map[string]interface{})

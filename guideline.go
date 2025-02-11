@@ -135,6 +135,8 @@ func (f *GuidelineFetcher) fetchContent(ctx context.Context, url string) ([]byte
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch content: %w", err)
 	}
+
+	f.logger.Debug(ctx, "Received response status: %s", resp.Status)
 	defer resp.Body.Close()
 
 	// Check status code
@@ -147,65 +149,101 @@ func (f *GuidelineFetcher) fetchContent(ctx context.Context, url string) ([]byte
 	if err != nil {
 		return nil, fmt.Errorf("failed to read response body: %w", err)
 	}
+	f.logger.Debug(ctx, "Successfully fetched %d bytes of content", len(content))
 
 	return content, nil
 }
 
-// Markdown parser specifically for Go style guides.
 func parseMarkdownGuidelines(content []byte) ([]GuidelineContent, error) {
 	var guidelines []GuidelineContent
+	logger := logging.GetLogger()
 
-	// Split content into sections
-	sections := bytes.Split(content, []byte("##"))
+	sections := bytes.Split(content, []byte("## "))
+	logger.Debug(context.Background(), "Split content into %d sections", len(sections))
 
 	for _, section := range sections {
-		// Parse each section to extract guidelines
-		guidelines = append(guidelines, extractGuidelinesFromSection(section)...)
-	}
+		if len(bytes.TrimSpace(section)) == 0 {
+			continue
+		}
 
-	return guidelines, nil
-}
+		lines := bytes.Split(section, []byte("\n"))
+		if len(lines) == 0 {
+			continue
+		}
 
-func extractGuidelinesFromSection(section []byte) []GuidelineContent {
-	var guidelines []GuidelineContent
+		sectionTitle := string(bytes.TrimSpace(lines[0]))
+		logger.Debug(context.Background(), "Processing section: %s", sectionTitle)
 
-	// Use regular expressions to identify guideline patterns
-	// For example, looking for patterns like:
-	// ### Guideline Name
-	// Description
-	// Bad:
-	// ```go
-	// code
-	// ```
-	// Good:
-	// ```go
-	// code
-	// ```
+		var examples []CodeExample
+		var currentExample CodeExample
+		var parsingState string // Tracks what we're currently parsing: "bad", "good", or ""
+		var explanation strings.Builder
 
-	re := regexp.MustCompile(`(?ms)### (.+?)\n(.+?)\nBad:\n` +
-		"```go\n(.+?)\n```\nGood:\n```go\n(.+?)\n```")
+		for i := 1; i < len(lines); i++ {
+			line := string(bytes.TrimSpace(lines[i]))
 
-	matches := re.FindAllSubmatch(section, -1)
+			switch {
+			case strings.HasPrefix(line, "Bad:"):
+				// Start a new example when we see "Bad:"
+				parsingState = "bad"
+				currentExample = CodeExample{} // Reset the current example
+				var badCode strings.Builder
+				i++ // Skip the "Bad:" line
+				for ; i < len(lines); i++ {
+					line = string(lines[i])
+					if strings.HasPrefix(line, "Good:") {
+						i-- // Back up so we catch "Good:" in next iteration
+						break
+					}
+					badCode.WriteString(line + "\n")
+				}
+				currentExample.Bad = strings.TrimSpace(badCode.String())
 
-	for _, match := range matches {
-		if len(match) >= 5 {
+			case strings.HasPrefix(line, "Good:"):
+				// Only process "Good:" if we were previously parsing a bad example
+				if parsingState == "bad" {
+					var goodCode strings.Builder
+					i++ // Skip the "Good:" line
+					for ; i < len(lines); i++ {
+						line = string(lines[i])
+						if strings.HasPrefix(line, "```") && goodCode.Len() > 0 {
+							break
+						}
+						goodCode.WriteString(line + "\n")
+					}
+					currentExample.Good = strings.TrimSpace(goodCode.String())
+
+					// If we have both bad and good examples, add to our collection
+					if currentExample.Bad != "" && currentExample.Good != "" {
+						examples = append(examples, currentExample)
+						logger.Debug(context.Background(), "Added example pair to section %s", sectionTitle)
+					}
+				}
+				parsingState = "" // Reset state after processing a complete example
+
+			default:
+				// If we're not parsing an example, collect explanation text
+				if parsingState == "" && len(line) > 0 {
+					explanation.WriteString(line + "\n")
+				}
+			}
+		}
+
+		// Create a guideline if we have either examples or explanation text
+		if len(examples) > 0 || explanation.Len() > 0 {
 			guideline := GuidelineContent{
-				ID:   generateID(string(match[1])),
-				Text: strings.TrimSpace(string(match[2])),
-				Examples: []CodeExample{
-					{
-						Bad:         strings.TrimSpace(string(match[3])),
-						Good:        strings.TrimSpace(string(match[4])),
-						Explanation: extractExplanation(section, match[1]),
-					},
-				},
-				Category: extractCategory(section),
+				ID:       generateID(sectionTitle),
+				Text:     explanation.String(),
+				Category: sectionTitle,
+				Examples: examples,
+				Language: "Go",
 			}
 			guidelines = append(guidelines, guideline)
+			logger.Debug(context.Background(), "Added guideline: %s with %d examples",
+				guideline.ID, len(guideline.Examples))
 		}
 	}
-
-	return guidelines
+	return guidelines, nil
 }
 
 // generateID creates a unique identifier for a guideline.
@@ -219,40 +257,6 @@ func generateID(title string) string {
 
 	// Add a timestamp to ensure uniqueness
 	return fmt.Sprintf("%s-%d", id, time.Now().Unix())
-}
-
-// extractExplanation gets the explanation text for a guideline.
-func extractExplanation(section []byte, title []byte) string {
-	// Look for explanation text between the title and examples
-	re := regexp.MustCompile(fmt.Sprintf(`(?ms)%s\n(.+?)\n(Bad|Good):`,
-		regexp.QuoteMeta(string(title))))
-
-	matches := re.FindSubmatch(section)
-	if len(matches) >= 2 {
-		return strings.TrimSpace(string(matches[1]))
-	}
-	return ""
-}
-
-// extractCategory determines the category of a guideline section.
-func extractCategory(section []byte) string {
-	// Look for category indicators in the section header
-	categoryPatterns := map[string]string{
-		"Error":      "Error Handling",
-		"Interface":  "Interface Design",
-		"Concurrent": "Concurrency",
-		"Package":    "Package Design",
-		"Testing":    "Testing",
-	}
-
-	sectionText := string(section)
-	for pattern, category := range categoryPatterns {
-		if strings.Contains(sectionText, pattern) {
-			return category
-		}
-	}
-
-	return "General"
 }
 
 // formatGuidelineContent creates a rich text representation of a guideline.

@@ -314,8 +314,6 @@ func isValidComment(comment PRReviewComment) bool {
 
 func getIntFromMetadata(metadata map[string]interface{}, key string) (int, bool) {
 	if val, exists := metadata[key]; exists {
-		logging.GetLogger().Info(context.Background(), "key: %s, val type: %T", key, val)
-
 		switch v := val.(type) {
 		case int:
 			return v, true
