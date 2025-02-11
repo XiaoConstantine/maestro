@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
@@ -210,7 +211,48 @@ func extractReviewMetadata(metadata map[string]interface{}) (*ReviewMetadata, er
 			rm.FileContent = str
 		}
 	}
+	if start, ok := getIntFromMetadata(metadata, "chunk_start"); ok {
+		rm.LineRange.Start = start
+	}
 
+	if end, ok := getIntFromMetadata(metadata, "chunk_end"); ok {
+		rm.LineRange.End = end
+	}
+
+	if chunkNum, ok := getIntFromMetadata(metadata, "chunk_number"); ok {
+		rm.ChunkNumber = chunkNum
+	}
+	if totalChunks, ok := getIntFromMetadata(metadata, "total_chunks"); ok {
+		rm.TotalChunks = totalChunks
+	}
+
+	logging.GetLogger().Info(context.Background(), "meta: %v", metadata)
+	logging.GetLogger().Info(context.Background(), "line range: %v", rm.LineRange)
+
+	if rangeData, ok := metadata["line_range"].(map[string]interface{}); ok {
+		startLine, startOk := getIntFromMetadata(rangeData, "start")
+		endLine, endOk := getIntFromMetadata(rangeData, "end")
+		if !startOk || !endOk {
+			return nil, fmt.Errorf("invalid line range format: start and end must be integers")
+		}
+
+		rm.LineRange = LineRange{
+			Start: startLine,
+			End:   endLine,
+			File:  rm.FilePath,
+		}
+
+		if !rm.LineRange.IsValid() {
+			return nil, fmt.Errorf("invalid line range: %v", rm.LineRange)
+		}
+	}
+	// Validate chunk information
+	if rm.LineRange.Start == 0 || rm.LineRange.End == 0 {
+		return nil, fmt.Errorf("missing or invalid chunk line range")
+	}
+	if rm.ChunkNumber == 0 || rm.TotalChunks == 0 {
+		return nil, fmt.Errorf("missing or invalid chunk numbering")
+	}
 	if patternsRaw, exists := metadata["repo_patterns"]; exists {
 		if patterns, ok := patternsRaw.([]*Content); ok {
 			rm.ReviewPatterns = patterns
@@ -265,9 +307,32 @@ func validateCategory(category string) string {
 	}
 	return "code-style" // Default category
 }
+
 func isValidComment(comment PRReviewComment) bool {
 	return comment.LineNumber > 0 &&
 		comment.Content != "" &&
 		comment.Severity != "" &&
 		comment.Category != ""
+}
+
+func getIntFromMetadata(metadata map[string]interface{}, key string) (int, bool) {
+	if val, exists := metadata[key]; exists {
+		logging.GetLogger().Info(context.Background(), "key: %s, val type: %T", key, val)
+
+		switch v := val.(type) {
+		case int:
+			return v, true
+		case float64:
+			return int(v), true
+		case string:
+			if num, err := strconv.Atoi(v); err == nil {
+				return num, true
+			}
+		case json.Number:
+			if i, err := v.Int64(); err == nil {
+				return int(i), true
+			}
+		}
+	}
+	return 0, false
 }

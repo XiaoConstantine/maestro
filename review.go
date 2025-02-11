@@ -129,6 +129,9 @@ type ReviewMetadata struct {
 	FileContent    string
 	Changes        string
 	Category       string
+	LineRange      LineRange
+	ChunkNumber    int
+	TotalChunks    int
 	ReviewType     string
 	ReviewPatterns []*Content // Added for repository patterns
 	Guidelines     []*Content // Added for guidelines
@@ -391,7 +394,7 @@ func NewPRReviewAgent(ctx context.Context, githubTool *GitHubTools, dbPath strin
 		4. Ensure proper indentation and structure in the XML
 		5. When thread_id is present in the context, always create a comment_response task.
 		6 FOR TASK FIELD 'file_content':
-		- Before inserting it into the XML, replace every '<' with '&lt; and every '>' with '&gt;'.**  
+		- Before inserting it into the XML, replace every '<' with '&lt; and every '>' with '&gt;', every & with &amp.
 	        - For example, '<reasoning>' should become '&lt;reasoning&gt;' and '<answer>' should become '&lt;answer&gt;'.
 		`,
 
@@ -407,6 +410,10 @@ func NewPRReviewAgent(ctx context.Context, githubTool *GitHubTools, dbPath strin
                        <item key="original_comment">{original_comment}</item>
                        <item key="thread_id">{thread_id}</item>
 		       <item key="line_range">{line_range}</item>
+		       <item key="chunk_start">{chunk_start}</item>
+		       <item key="chunk_end">{chunk_end}</item>
+                       <item key="chunk_number">{chunk_number}</item>
+                       <item key="total_chunks">{total_chunks}</item>
 	           </metadata>
 	       </task>
 	   </tasks>`,
@@ -646,7 +653,11 @@ func (a *PRReviewAgent) performInitialReview(ctx context.Context, tasks []PRRevi
 					"leading":  chunk.leadingcontext,
 					"trailing": chunk.trailingcontext,
 				},
-				"changes": chunk.changes,
+				"changes":      chunk.changes,
+				"chunk_start":  chunk.startline,
+				"chunk_end":    chunk.endline,
+				"chunk_number": i + 1,
+				"total_chunks": len(task.Chunks),
 				"line_range": map[string]int{
 					"start": chunk.startline,
 					"end":   chunk.endline,
