@@ -283,6 +283,7 @@ func (ri *RepoIndexer) processChangedFile(ctx context.Context, file *github.Comm
 			"total_chunks": fmt.Sprintf("%d", len(chunks)),
 			"start_line":   fmt.Sprintf("%d", chunk.startline),
 			"end_line":     fmt.Sprintf("%d", chunk.endline),
+			"content_type": ContentTypeRepository,
 		}
 
 		// Generate embedding for the chunk
