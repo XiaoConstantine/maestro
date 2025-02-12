@@ -15,6 +15,8 @@ import (
 	"github.com/XiaoConstantine/dspy-go/pkg/logging"
 	"github.com/logrusorgru/aurora"
 	"github.com/spf13/cobra"
+	"golang.org/x/text/cases"
+	"golang.org/x/text/language"
 
 	sqlite_vec "github.com/asg017/sqlite-vec-go-bindings/cgo"
 
@@ -39,6 +41,165 @@ const (
 	DefaultModelProvider = "llamacpp:"
 	DefaultModelName     = ""
 )
+
+type ModelChoice struct {
+	ID          core.ModelID
+	Provider    string
+	DisplayName string
+	Description string
+}
+
+func getModelChoices() []ModelChoice {
+	// Let's first create a description map for our providers
+	providerDescriptions := map[string]string{
+		"anthropic": "Cloud-based models with strong performance across various tasks",
+		"google":    "Google's latest language models with diverse capabilities",
+		"ollama":    "Run any supported model locally through Ollama - includes Llama, Mistral, and more",
+		"llamacpp":  "Run models locally using LLaMA.cpp backend - supports various model formats",
+	}
+
+	// Create model-specific descriptions
+	modelDescriptions := map[core.ModelID]string{
+		core.ModelAnthropicHaiku:            "Fastest Claude model, optimized for quick tasks and real-time interactions",
+		core.ModelAnthropicSonnet:           "Balanced performance model suitable for most tasks",
+		core.ModelAnthropicOpus:             "Most powerful Claude model for complex reasoning and analysis",
+		core.ModelGoogleGeminiFlash:         "Fast Google model focused on quick response times",
+		core.ModelGoogleGeminiPro:           "Advanced Google model for sophisticated tasks",
+		core.ModelGoogleGeminiFlashThinking: "Enhanced reasoning capabilities with rapid response times",
+	}
+
+	var choices []ModelChoice
+
+	// Define the order in which we want to present providers
+	providerOrder := []string{"llamacpp", "ollama", "anthropic", "google"}
+
+	titleCaser := cases.Title(language.English)
+	// Iterate through providers in our desired order
+	for _, provider := range providerOrder {
+		models, exists := core.ProviderModels[provider]
+		if !exists {
+			continue
+		}
+
+		// Handle local providers (ollama and llamacpp) specially
+		if provider == "ollama" || provider == "llamacpp" {
+			// Create a single entry for each local provider
+			choices = append(choices, ModelChoice{
+				ID:          core.ModelID(provider + ":"), // Creates "ollama:" or "llamacpp:"
+				Provider:    provider,
+				DisplayName: titleCaser.String(provider), // Capitalizes first letter
+				Description: providerDescriptions[provider],
+			})
+			continue
+		}
+
+		// For cloud providers, add each specific model
+		for _, modelID := range models {
+			displayName := formatDisplayName(string(modelID))
+			description := modelDescriptions[modelID]
+
+			choices = append(choices, ModelChoice{
+				ID:          modelID,
+				Provider:    provider,
+				DisplayName: displayName,
+				Description: description,
+			})
+		}
+	}
+
+	return choices
+}
+
+func formatDisplayName(modelID string) string {
+	titleCaser := cases.Title(language.English)
+
+	// Remove provider prefixes if present
+	name := strings.TrimPrefix(modelID, "anthropic:")
+	name = strings.TrimPrefix(name, "google:")
+
+	// Convert hyphens to spaces and title case each word
+	words := strings.Split(name, "-")
+	for i, word := range words {
+		// Special handling for version numbers and abbreviations
+		if !strings.ContainsAny(word, "0123456789") {
+			words[i] = titleCaser.String(word)
+		}
+	}
+
+	return strings.Join(words, " ")
+}
+
+func findSelectedChoice(selectedOption string, choices []ModelChoice, options []string) *ModelChoice {
+	// Skip empty selections
+	if selectedOption == "" {
+		return nil
+	}
+
+	// Skip section headers
+	if strings.HasPrefix(selectedOption, "===") {
+		return nil
+	}
+
+	// Find the index of the selected option in our display list
+	optionIndex := -1
+	for i, opt := range options {
+		if opt == selectedOption {
+			optionIndex = i
+			break
+		}
+	}
+
+	if optionIndex == -1 {
+		return nil
+	}
+
+	// Count non-header options to find the corresponding choice
+	modelIndex := 0
+	for _, opt := range options[:optionIndex] {
+		if !strings.HasPrefix(opt, "===") {
+			modelIndex++
+		}
+	}
+
+	// Ensure we don't exceed our choices slice bounds
+	if modelIndex >= len(choices) {
+		return nil
+	}
+
+	return &choices[modelIndex]
+}
+
+func handleAPIKeySetup(cfg *config, choice *ModelChoice) error {
+	// First try to get the API key from environment variables
+	key, err := checkProviderAPIKey(choice.Provider, "")
+	if err == nil {
+		// Found a valid key in environment variables
+		cfg.apiKey = key
+		return nil
+	}
+
+	// If no environment variable is found, prompt the user
+	var apiKey string
+	apiKeyPrompt := &survey.Password{
+		Message: fmt.Sprintf("Enter API key for %s:", choice.DisplayName),
+		Help: fmt.Sprintf(`Required for %s models. 
+You can also set this via environment variables:
+- Anthropic: ANTHROPIC_API_KEY or CLAUDE_API_KEY
+- Google: GOOGLE_API_KEY or GEMINI_API_KEY`, choice.Provider),
+	}
+
+	if err := survey.AskOne(apiKeyPrompt, &apiKey); err != nil {
+		return fmt.Errorf("failed to get API key: %w", err)
+	}
+
+	// Basic validation of the provided key
+	if strings.TrimSpace(apiKey) == "" {
+		return fmt.Errorf("API key cannot be empty")
+	}
+
+	cfg.apiKey = apiKey
+	return nil
+}
 
 func main() {
 	cfg := &config{}
@@ -245,9 +406,10 @@ func runInteractiveMode(cfg *config) error {
 
 	// Optional settings
 	if cfg.modelProvider == DefaultModelProvider && cfg.modelName == DefaultModelName {
+
 		var useCustomModel bool
 		modelPrompt := &survey.Confirm{
-			Message: "Would you like to use a custom model?",
+			Message: "Default to models with llamacpp, Would you like to use a custom model?",
 			Default: false,
 		}
 		if err := survey.AskOne(modelPrompt, &useCustomModel); err != nil {
@@ -255,18 +417,96 @@ func runInteractiveMode(cfg *config) error {
 		}
 
 		if useCustomModel {
-			modelStrPrompt := &survey.Input{
-				Message: "Enter model specification (e.g., ollama:mistral:q4, anthropic:claude-3):",
-				Default: DefaultModelProvider,
+
+			titleCaser := cases.Title(language.English)
+			choices := getModelChoices()
+
+			// Create formatted options for the survey
+			var options []string
+			var sections = map[string]bool{} // Track where we need section headers
+			currentProvider := ""
+
+			for _, choice := range choices {
+				// Add section header if we're switching providers
+				if choice.Provider != currentProvider {
+					currentProvider = choice.Provider
+					if !sections[currentProvider] {
+						sections[currentProvider] = true
+						options = append(options, fmt.Sprintf("=== %s Models ===",
+							titleCaser.String(currentProvider)))
+					}
+				}
+
+				option := fmt.Sprintf("%-30s - %s", choice.DisplayName, choice.Description)
+				options = append(options, option)
 			}
-			var modelStr string
-			if err := survey.AskOne(modelStrPrompt, &modelStr); err != nil {
-				return fmt.Errorf("failed to get model specification: %w", err)
+			var selectedOption string
+			selectPrompt := &survey.Select{
+				Message: "Choose a model:",
+				Options: options,
+				Default: options[1], // Skip the first section header
+				Help: `Use ↑↓ to navigate, Enter to select
+
+Local Models (Ollama, LLaMA.cpp):
+- Run locally on your machine
+- No API keys required
+- Support various model formats
+
+Cloud Models (Anthropic, Google):
+- Require API keys
+- Hosted solutions with consistent performance
+- Regular updates and improvements`,
 			}
-			provider, name, config := parseModelString(modelStr)
-			cfg.modelProvider = provider
-			cfg.modelName = name
-			cfg.modelConfig = config
+			if err := survey.AskOne(selectPrompt, &selectedOption, survey.WithPageSize(15)); err != nil {
+				return fmt.Errorf("failed to get model selection: %w", err)
+			}
+
+			// Find the selected model and update configuration
+			if selectedChoice := findSelectedChoice(selectedOption, choices, options); selectedChoice != nil {
+				console.printf("Select choice: %s", selectedChoice)
+				// Update configuration based on selection
+				cfg.modelProvider = selectedChoice.Provider
+				cfg.modelName = string(selectedChoice.ID)
+
+				if cfg.modelProvider == "ollama" {
+					// Prompt user for specific Ollama model
+					var ollamaModel string
+					modelPrompt := &survey.Input{
+						Message: "Enter Ollama model (e.g., mistral:q4, llama2:13b):",
+						Help: `Format: modelname[:tag]
+Examples:
+- mistral:q4    (Mistral with 4-bit quantization)
+- llama2:13b    (LLaMA 2 13B model)
+- codellama     (default CodeLLaMA model)`,
+					}
+
+					if err := survey.AskOne(modelPrompt, &ollamaModel); err != nil {
+						return fmt.Errorf("failed to get Ollama model: %w", err)
+					}
+
+					// Parse the Ollama model string
+					if strings.Contains(ollamaModel, ":") {
+						// If user provided model:tag format
+						parts := strings.SplitN(ollamaModel, ":", 2)
+						cfg.modelName = parts[0]
+						cfg.modelConfig = parts[1]
+					} else {
+						// If user provided just the model name
+						cfg.modelName = ollamaModel
+					}
+				}
+
+				// Handle API key requirements for cloud providers
+				if selectedChoice.Provider != "ollama" &&
+					selectedChoice.Provider != "llamacpp" &&
+					cfg.apiKey == "" {
+					if err := handleAPIKeySetup(cfg, selectedChoice); err != nil {
+						console.printf("got error verify key: %v", err)
+
+						return err
+					}
+				}
+			}
 		}
 	}
 
