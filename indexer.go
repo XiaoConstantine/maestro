@@ -74,7 +74,6 @@ func (ri *RepoIndexer) IndexRepository(ctx context.Context, branch, dbPath strin
 		}
 
 		return ri.fullIndex(ctx, branch, latestSHA)
-
 	}
 	changes, err := ri.getCommitDifferences(ctx, lastIndexedSHA, latestSHA)
 	if err != nil {

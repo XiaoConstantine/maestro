@@ -436,7 +436,7 @@ func NewPRReviewAgent(ctx context.Context, githubTool *GitHubTools, dbPath strin
 			"repo_qa":          qaProcessor,
 		},
 		Options: core.WithGenerateOptions(
-			core.WithTemperature(0.2),
+			core.WithTemperature(0.3),
 			core.WithMaxTokens(8192),
 		),
 	}
@@ -600,7 +600,7 @@ func (a *PRReviewAgent) performInitialReview(ctx context.Context, tasks []PRRevi
 		if err != nil {
 			return nil, fmt.Errorf("failed to split content for %s: %w", task.FilePath, err)
 		}
-		message := fmt.Sprintf("Analyzing %s (%d chunks)...", filepath.Base(task.FilePath), len(chunks))
+		message := fmt.Sprintf("Processing %s (%d chunks)...", filepath.Base(task.FilePath), len(chunks))
 
 		var totalRepoMatches, totalGuidelineMatches int
 		err = console.WithSpinner(ctx, message, func() error {
@@ -638,7 +638,7 @@ func (a *PRReviewAgent) performInitialReview(ctx context.Context, tasks []PRRevi
 			continue
 		}
 		console.printf("\n%s\n",
-			aurora.Cyan(fmt.Sprintf(
+			aurora.Green(fmt.Sprintf(
 				"Analysis complete for %s: found %d repository patterns and %d guideline matches across %d chunks",
 				filepath.Base(task.FilePath),
 				totalRepoMatches,
