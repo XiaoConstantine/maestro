@@ -66,6 +66,7 @@ const (
 
 type CommentResponseProcessor struct {
 	previousContext string
+	metrics         *BusinessMetrics
 }
 
 func (p *CommentResponseProcessor) Process(ctx context.Context, task agents.Task, context map[string]interface{}) (interface{}, error) {
@@ -158,6 +159,11 @@ For needs_work responses, always provide specific action items
 	response, err := parseResponseResult(result)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	if metadata.ThreadID != nil {
+		resolution := mapResponseStatusToResolution(response.ResolutionStatus)
+		p.metrics.TrackCommentResolution(ctx, *metadata.ThreadID, resolution)
 	}
 	comment := PRReviewComment{
 		FilePath:   metadata.FilePath,
@@ -394,4 +400,19 @@ func formatActionItems(items []string) string {
 		sb.WriteString(fmt.Sprintf("- %s\n", item))
 	}
 	return sb.String()
+}
+
+func mapResponseStatusToResolution(status string) ResolutionOutcome {
+	switch strings.ToLower(status) {
+	case "resolved":
+		return ResolutionAccepted
+	case "needs_work":
+		return ResolutionNeedsWork
+	case "needs_clarification":
+		return ResolutionInconclusive
+	case "acknowledged":
+		return ResolutionInProgress
+	default:
+		return ResolutionInProgress
+	}
 }
