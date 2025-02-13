@@ -242,7 +242,7 @@ func (s *sqliteRAGStore) FindSimilar(ctx context.Context, embedding []float32, l
 	vec_distance_cosine(v.embedding, ?) as distance
 	FROM vec_items v
 	JOIN contents c ON v.content_id = c.id
-	WHERE v.embedding MATCH ?`
+	WHERE v.embedding MATCH(?, 0.8)`
 
 	// Add content type filter if specified
 	var whereClauses []string

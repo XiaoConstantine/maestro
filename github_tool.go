@@ -52,6 +52,18 @@ type PRChanges struct {
 	Files []PRFileChange
 }
 
+type ChangeHunk struct {
+	FilePath  string
+	StartLine int
+	EndLine   int
+	Content   string
+	Context   struct {
+		Before string
+		After  string
+	}
+	Position int // Position in the diff for GitHub API
+}
+
 // PRFileChange represents changes to a single file.
 type PRFileChange struct {
 	FilePath    string
@@ -59,6 +71,7 @@ type PRFileChange struct {
 	Patch       string // The diff/patch content
 	Additions   int
 	Deletions   int
+	Hunks       []ChangeHunk
 }
 
 // GetPullRequestChanges retrieves the changes from a pull request.
@@ -85,44 +98,71 @@ func (g *GitHubTools) GetPullRequestChanges(ctx context.Context, prNumber int) (
 
 			continue
 		}
-		var fileContent string
-
-		if file.GetStatus() != "removed" {
-			opts := &github.RepositoryContentGetOptions{
-				Ref: fmt.Sprintf("pull/%d/head", prNumber), // This is crucial!
-			}
-			// Get the file content
-			content, _, resp, err := g.client.Repositories.GetContents(
-				ctx,
-				g.owner,
-				g.repo,
-				file.GetFilename(),
-				opts,
-			)
-
-			if err != nil {
-				if resp != nil && resp.StatusCode == 404 {
-					// File might have been deleted or moved
-					continue
-				}
-				// For other errors, log but continue
-				fileContent = fmt.Sprintf("Error getting content: %v", err)
-			} else if content != nil {
-				// Only try to get content if the content object is not nil
-				if fc, err := content.GetContent(); err == nil {
-					fileContent = fc
-				}
-			}
-
+		fileChange := PRFileChange{
+			FilePath:  file.GetFilename(),
+			Patch:     file.GetPatch(),
+			Additions: file.GetAdditions(),
+			Deletions: file.GetDeletions(),
 		}
 
-		changes.Files = append(changes.Files, PRFileChange{
-			FilePath:    file.GetFilename(),
-			FileContent: fileContent,
-			Patch:       file.GetPatch(),
-			Additions:   file.GetAdditions(),
-			Deletions:   file.GetDeletions(),
-		})
+		// Parse hunks for this file
+		hunks, err := parseHunks(file.GetPatch(), file.GetFilename())
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse hunks for %s: %w",
+				file.GetFilename(), err)
+		}
+		fileChange.Hunks = hunks
+
+		// Get file content if needed
+		if file.GetStatus() != "removed" {
+			content, err := g.GetFileContent(ctx, file.GetFilename())
+			if err != nil {
+				return nil, fmt.Errorf("failed to get content for %s: %w",
+					file.GetFilename(), err)
+			}
+			fileChange.FileContent = content
+		}
+
+		// var fileContent string
+		//
+		// if file.GetStatus() != "removed" {
+		// 	opts := &github.RepositoryContentGetOptions{
+		// 		Ref: fmt.Sprintf("pull/%d/head", prNumber), // This is crucial!
+		// 	}
+		// 	// Get the file content
+		// 	content, _, resp, err := g.client.Repositories.GetContents(
+		// 		ctx,
+		// 		g.owner,
+		// 		g.repo,
+		// 		file.GetFilename(),
+		// 		opts,
+		// 	)
+		//
+		// 	if err != nil {
+		// 		if resp != nil && resp.StatusCode == 404 {
+		// 			// File might have been deleted or moved
+		// 			continue
+		// 		}
+		// 		// For other errors, log but continue
+		// 		fileContent = fmt.Sprintf("Error getting content: %v", err)
+		// 	} else if content != nil {
+		// 		// Only try to get content if the content object is not nil
+		// 		if fc, err := content.GetContent(); err == nil {
+		// 			fileContent = fc
+		// 		}
+		// 	}
+		//
+		// }
+		//
+		// changes.Files = append(changes.Files, PRFileChange{
+		// 	FilePath:    file.GetFilename(),
+		// 	FileContent: fileContent,
+		// 	Patch:       file.GetPatch(),
+		// 	Additions:   file.GetAdditions(),
+		// 	Deletions:   file.GetDeletions(),
+		// })
+
+		changes.Files = append(changes.Files, fileChange)
 	}
 
 	if len(changes.Files) == 0 {
@@ -138,42 +178,98 @@ func (g *GitHubTools) CreateReviewComments(ctx context.Context, prNumber int, co
 		return fmt.Errorf("Failed to get changes for: %d", prNumber)
 	}
 	// Convert our comments into GitHub review comments
-	ghComments := make([]*github.DraftReviewComment, 0, len(comments))
+	// ghComments := make([]*github.DraftReviewComment, 0, len(comments))
+	//
+	// for _, comment := range comments {
+	//
+	// 	commentCopy := comment
+	// 	if err := findReviewPosition(changes.Files, &commentCopy); err != nil {
+	// 		logger := logging.GetLogger()
+	// 		logger.Warn(ctx, "Skipping comment due to position error: %v", err)
+	// 		continue
+	// 	}
+	//
+	// 	body := formatCommentBody(commentCopy)
+	// 	ghComments = append(ghComments, &github.DraftReviewComment{
+	// 		Path:     &commentCopy.FilePath,
+	// 		Position: github.Ptr(commentCopy.LineNumber),
+	// 		Body:     &body,
+	// 	})
+	// }
+	// if len(ghComments) == 0 {
+	// 	return fmt.Errorf("no valid comments to create")
+	// }
+	//
+	// // Create the review
+	// review := &github.PullRequestReviewRequest{
+	// 	CommitID: nil, // Will use the latest commit
+	// 	Body:     github.Ptr("Code Review Comments"),
+	// 	Event:    github.Ptr("COMMENT"),
+	// 	Comments: ghComments,
+	// }
+	//
+	// _, _, err = g.client.PullRequests.CreateReview(ctx, g.owner, g.repo, prNumber, review)
+	// if err != nil {
+	// 	return fmt.Errorf("failed to create review: %w", err)
+	// }
+	//
+	// return nil
+	// Map file paths to their hunks for quick lookup
+	hunksByFile := make(map[string][]ChangeHunk)
+	for _, file := range changes.Files {
+		hunksByFile[file.FilePath] = file.Hunks
+	}
+
+	var validComments []*github.DraftReviewComment
 
 	for _, comment := range comments {
-
-		commentCopy := comment
-		if err := findReviewPosition(changes.Files, &commentCopy); err != nil {
-			logger := logging.GetLogger()
-			logger.Warn(ctx, "Skipping comment due to position error: %v", err)
+		// Find hunks for this file
+		hunks, exists := hunksByFile[comment.FilePath]
+		if !exists {
 			continue
 		}
 
-		body := formatCommentBody(commentCopy)
-		ghComments = append(ghComments, &github.DraftReviewComment{
-			Path:     &commentCopy.FilePath,
-			Position: github.Ptr(commentCopy.LineNumber),
+		// Find the hunk containing this line
+		var targetHunk *ChangeHunk
+		for i := range hunks {
+			if comment.LineNumber >= hunks[i].StartLine &&
+				comment.LineNumber <= hunks[i].EndLine {
+				targetHunk = &hunks[i]
+				break
+			}
+		}
+
+		if targetHunk == nil {
+			logging.GetLogger().Warn(ctx,
+				"Skipping comment - line %d not in any change hunk for %s",
+				comment.LineNumber, comment.FilePath)
+			continue
+		}
+
+		// Create GitHub comment using hunk's position
+		body := formatCommentBody(comment)
+		validComments = append(validComments, &github.DraftReviewComment{
+			Path:     &comment.FilePath,
+			Position: github.Int(targetHunk.Position),
 			Body:     &body,
 		})
 	}
-	if len(ghComments) == 0 {
+
+	if len(validComments) == 0 {
 		return fmt.Errorf("no valid comments to create")
 	}
 
 	// Create the review
 	review := &github.PullRequestReviewRequest{
-		CommitID: nil, // Will use the latest commit
-		Body:     github.Ptr("Code Review Comments"),
-		Event:    github.Ptr("COMMENT"),
-		Comments: ghComments,
+		CommitID: nil,
+		Body:     github.String("Code Review Comments"),
+		Event:    github.String("COMMENT"),
+		Comments: validComments,
 	}
 
-	_, _, err = g.client.PullRequests.CreateReview(ctx, g.owner, g.repo, prNumber, review)
-	if err != nil {
-		return fmt.Errorf("failed to create review: %w", err)
-	}
-
-	return nil
+	_, _, err = g.client.PullRequests.CreateReview(ctx, g.owner, g.repo,
+		prNumber, review)
+	return err
 }
 
 func (g *GitHubTools) MonitorPRComments(ctx context.Context, prNumber int, callback func(comment *github.PullRequestComment)) error {
@@ -426,7 +522,9 @@ func calculateDiffPositions(patch string) (map[int]int, error) {
 		// Parse hunk headers
 		if strings.HasPrefix(line, "@@") {
 			// Parse the new file line number from hunk header
-			matches := regexp.MustCompile(`\+(\d+)`).FindStringSubmatch(line)
+			//		matches := regexp.MustCompile(`\+(\d+)`).FindStringSubmatch(line)
+
+			matches := regexp.MustCompile(`@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@`).FindStringSubmatch(line)
 			if len(matches) >= 2 {
 				lineNum, _ := strconv.Atoi(matches[1])
 				currentLine = lineNum - 1
@@ -448,6 +546,11 @@ func calculateDiffPositions(patch string) (map[int]int, error) {
 
 // findReviewPosition determines the correct position for a review comment.
 func findReviewPosition(fileChanges []PRFileChange, comment *PRReviewComment) error {
+	logger := logging.GetLogger()
+	logger.Info(context.Background(),
+		"Finding position for comment on %s line %d",
+		comment.FilePath,
+		comment.LineNumber)
 	// Find the corresponding file change
 	var targetFile *PRFileChange
 	for i := range fileChanges {
@@ -463,6 +566,14 @@ func findReviewPosition(fileChanges []PRFileChange, comment *PRReviewComment) er
 
 	if targetFile.Patch == "" {
 		return fmt.Errorf("no changes found in file: %s", comment.FilePath)
+	}
+	// Validate line exists in actual file content
+	if targetFile.FileContent != "" {
+		lines := strings.Split(targetFile.FileContent, "\n")
+		if comment.LineNumber > len(lines) {
+			return fmt.Errorf("line number %d exceeds file length %d",
+				comment.LineNumber, len(lines))
+		}
 	}
 	// Calculate valid positions from the diff
 	positions, err := calculateDiffPositions(targetFile.Patch)
@@ -482,7 +593,10 @@ func findReviewPosition(fileChanges []PRFileChange, comment *PRReviewComment) er
 		return fmt.Errorf("no valid position found near line %d in file %s",
 			comment.LineNumber, comment.FilePath)
 	}
-
+	logger.Info(context.Background(),
+		"Found position %d for line %d",
+		position,
+		comment.LineNumber)
 	comment.LineNumber = position
 	return nil
 }
@@ -660,10 +774,49 @@ func (g *GitHubTools) PreviewReview(ctx context.Context, console *Console, prNum
 	if err != nil {
 		return false, fmt.Errorf("failed to get PR changes: %w", err)
 	}
+	var validComments []PRReviewComment
 
+	var skippedComments []PRReviewComment
+	// for _, comment := range comments {
+	// 	if isCommentInChanges(changes, comment) {
+	// 		validComments = append(validComments, comment)
+	// 	} else {
+	// 		console.printf("Note: Comment on %s line %d will be skipped (unchanged line)\n",
+	// 			comment.FilePath, comment.LineNumber)
+	// 	}
+	// }
+	for _, comment := range comments {
+		isValid := false
+		for _, file := range changes.Files {
+			if file.FilePath != comment.FilePath {
+				continue
+			}
+
+			// Check if comment is in any hunk
+			for _, hunk := range file.Hunks {
+				if comment.LineNumber >= hunk.StartLine &&
+					comment.LineNumber <= hunk.EndLine {
+					isValid = true
+					break
+				}
+			}
+		}
+
+		if isValid {
+			validComments = append(validComments, comment)
+		} else {
+			skippedComments = append(skippedComments, comment)
+			console.printf("\nNote: Comment on %s line %d will be skipped (unchanged line)\n",
+				comment.FilePath, comment.LineNumber)
+		}
+	}
+	if len(validComments) == 0 {
+		console.println("\nNo comments can be posted - all comments are on unchanged lines")
+		return false, nil
+	}
 	// Group comments by file
 	commentsByFile := make(map[string][]PRReviewComment)
-	for _, comment := range comments {
+	for _, comment := range validComments {
 		if comment.LineNumber <= 0 {
 			logging.GetLogger().Warn(ctx,
 				"Skipping comment with invalid line number %d for file %s",
@@ -814,6 +967,26 @@ func (g *GitHubTools) PreviewReview(ctx context.Context, console *Console, prNum
 	return true, nil
 }
 
+func isCommentInChanges(changes *PRChanges, comment PRReviewComment) bool {
+	for _, file := range changes.Files {
+		if file.FilePath != comment.FilePath {
+			continue
+		}
+
+		// Parse diff to get changed line ranges
+		positions, err := calculateDiffPositions(file.Patch)
+		if err != nil {
+			return false
+		}
+
+		// Check if comment line is in changed ranges
+		if _, exists := positions[comment.LineNumber]; exists {
+			return true
+		}
+	}
+	return false
+}
+
 // CodeContext represents lines of code around a specific line.
 type CodeContext struct {
 	StartLine int
@@ -840,4 +1013,61 @@ func extractContext(content string, line int, contextLines int) (*CodeContext, e
 	}
 
 	return context, nil
+}
+
+func parseHunks(patch string, filePath string) ([]ChangeHunk, error) {
+	var hunks []ChangeHunk
+	var currentHunk *ChangeHunk
+
+	lines := strings.Split(patch, "\n")
+	position := 0 // Track position in diff for GitHub API
+
+	for _, line := range lines {
+		position++
+
+		switch {
+		case strings.HasPrefix(line, "@@"):
+			// Parse hunk header like @@ -1,5 +2,6 @@
+			matches := regexp.MustCompile(`\+(\d+),?(\d+)?`).FindStringSubmatch(line)
+			if len(matches) >= 2 {
+				start, _ := strconv.Atoi(matches[1])
+
+				// If we were building a hunk, append it
+				if currentHunk != nil {
+					hunks = append(hunks, *currentHunk)
+				}
+
+				currentHunk = &ChangeHunk{
+					FilePath:  filePath,
+					StartLine: start,
+					Position:  position,
+				}
+			}
+
+		case strings.HasPrefix(line, "+"):
+			// This is new or modified code
+			if currentHunk != nil {
+				currentHunk.Content += line[1:] + "\n"
+				currentHunk.EndLine = currentHunk.StartLine +
+					strings.Count(currentHunk.Content, "\n")
+			}
+
+		case strings.HasPrefix(line, " "):
+			// Context line - store in Before/After based on position
+			if currentHunk != nil {
+				if currentHunk.Content == "" {
+					currentHunk.Context.Before += line[1:] + "\n"
+				} else {
+					currentHunk.Context.After += line[1:] + "\n"
+				}
+			}
+		}
+	}
+
+	// Don't forget the last hunk
+	if currentHunk != nil {
+		hunks = append(hunks, *currentHunk)
+	}
+
+	return hunks, nil
 }
