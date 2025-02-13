@@ -74,6 +74,36 @@ type PRFileChange struct {
 	Hunks       []ChangeHunk
 }
 
+type PreviewOptions struct {
+	ShowColors      bool   // Use ANSI colors for formatting
+	ContextLines    int    // Number of context lines around changes
+	FilePathStyle   string // How to display file paths (full, relative, basename)
+	ShowLineNumbers bool   // Whether to show line numbers
+}
+
+type DiffPosition struct {
+	Path     string // File path
+	Line     int    // Line number in the new file
+	Position int    // Position in the diff (required by GitHub API)
+}
+
+// CodeContext represents lines of code around a specific line.
+type CodeContext struct {
+	StartLine int
+	Lines     []string
+}
+
+type fileFilterRules struct {
+	// Simple path contains matches - fastest check
+	pathContains []string
+
+	// File extension matches - very fast check
+	extensions []string
+
+	// Regex patterns for complex matches
+	regexPatterns []*regexp.Regexp
+}
+
 // GetPullRequestChanges retrieves the changes from a pull request.
 func (g *GitHubTools) GetPullRequestChanges(ctx context.Context, prNumber int) (*PRChanges, error) {
 	// Get the list of files changed in the PR
@@ -250,7 +280,7 @@ func (g *GitHubTools) CreateReviewComments(ctx context.Context, prNumber int, co
 		body := formatCommentBody(comment)
 		validComments = append(validComments, &github.DraftReviewComment{
 			Path:     &comment.FilePath,
-			Position: github.Int(targetHunk.Position),
+			Position: github.Ptr(targetHunk.Position),
 			Body:     &body,
 		})
 	}
@@ -262,8 +292,8 @@ func (g *GitHubTools) CreateReviewComments(ctx context.Context, prNumber int, co
 	// Create the review
 	review := &github.PullRequestReviewRequest{
 		CommitID: nil,
-		Body:     github.String("Code Review Comments"),
-		Event:    github.String("COMMENT"),
+		Body:     github.Ptr("Code Review Comments"),
+		Event:    github.Ptr("COMMENT"),
 		Comments: validComments,
 	}
 
@@ -358,411 +388,6 @@ func (g *GitHubTools) GetLatestCommitSHA(ctx context.Context, branch string) (st
 	return ref.Object.GetSHA(), nil
 }
 
-type fileFilterRules struct {
-	// Simple path contains matches - fastest check
-	pathContains []string
-
-	// File extension matches - very fast check
-	extensions []string
-
-	// Regex patterns for complex matches
-	regexPatterns []*regexp.Regexp
-}
-
-func newFileFilterRules() *fileFilterRules {
-	// Simple contains matches for common paths
-	pathContains := []string{
-		"vendor/",
-		"generated/",
-		"node_modules/",
-		".git",
-		"dist/",
-		"build/",
-	}
-
-	// Direct extension matches
-	extensions := []string{
-		".pb.go",   // Generated protobuf
-		".gen.go",  // Other generated files
-		".md",      // Documentation
-		".txt",     // Text files
-		".yaml",    // Config files
-		".yml",     // Config files
-		".json",    // Config files
-		".lock",    // Lock files
-		".sum",     // Checksum files
-		".min.js",  // Minified JavaScript
-		".min.css", // Minified CSS
-	}
-
-	// Complex patterns that need regex
-	patterns := []string{
-		// Generated code patterns
-		`\.generated\..*$`,
-		`_generated\..*$`,
-
-		// IDE and system files
-		`\.idea/.*$`,
-		`\.vscode/.*$`,
-		`\.DS_Store$`,
-
-		// Test fixtures and data files
-		`testdata/.*$`,
-		`fixtures/.*$`,
-
-		// Build artifacts
-		`\.exe$`,
-		`\.dll$`,
-		`\.so$`,
-		`\.dylib$`,
-	}
-
-	// Compile all regex patterns
-	regexPatterns := make([]*regexp.Regexp, 0, len(patterns))
-	for _, pattern := range patterns {
-		regex := regexp.MustCompile(pattern)
-		regexPatterns = append(regexPatterns, regex)
-	}
-
-	return &fileFilterRules{
-		pathContains:  pathContains,
-		extensions:    extensions,
-		regexPatterns: regexPatterns,
-	}
-}
-
-var (
-	filterRules     *fileFilterRules
-	filterRulesOnce sync.Once
-)
-
-// getFilterRules returns the singleton instance of filter rules.
-func getFilterRules() *fileFilterRules {
-	filterRulesOnce.Do(func() {
-		filterRules = newFileFilterRules()
-	})
-	return filterRules
-}
-
-// Helper functions.
-func shouldSkipFile(filename string) bool {
-	// Use a singleton instance of filter rules
-	rules := getFilterRules()
-
-	// 1. Check specific filenames first (fastest)
-	specificFiles := map[string]bool{
-		"go.mod":            true,
-		"go.sum":            true,
-		"package-lock.json": true,
-		"yarn.lock":         true,
-		"Cargo.lock":        true,
-		// TODO: figure out xml related issue
-		// "pkg/agents/common.go":            true,
-		// "pkg/agents/orchestrator.go":      true,
-		// "pkg/agents/orchestrator_test.go": true,
-	}
-	if specificFiles[filename] {
-		return true
-	}
-
-	// 2. Check path contains (very fast)
-	for _, path := range rules.pathContains {
-		if strings.Contains(filename, path) {
-			return true
-		}
-	}
-
-	// 3. Check file extensions (fast)
-	ext := filepath.Ext(filename)
-	for _, skipExt := range rules.extensions {
-		if ext == skipExt || strings.HasSuffix(filename, skipExt) {
-			return true
-		}
-	}
-
-	// 4. Check regex patterns (slower but handles complex cases)
-	for _, pattern := range rules.regexPatterns {
-		if pattern.MatchString(filename) {
-			return true
-		}
-	}
-
-	return false
-}
-
-type DiffPosition struct {
-	Path     string // File path
-	Line     int    // Line number in the new file
-	Position int    // Position in the diff (required by GitHub API)
-}
-
-// calculateDiffPositions parses a git diff and returns valid positions for review comments.
-func calculateDiffPositions(patch string) (map[int]int, error) {
-	if patch == "" {
-		return nil, nil
-	}
-
-	positions := make(map[int]int)
-	currentPosition := 0
-	currentLine := 0
-
-	lines := strings.Split(patch, "\n")
-
-	for _, line := range lines {
-		currentPosition++
-
-		// Skip diff headers
-		if strings.HasPrefix(line, "diff ") ||
-			strings.HasPrefix(line, "index ") ||
-			strings.HasPrefix(line, "--- ") ||
-			strings.HasPrefix(line, "+++ ") {
-			continue
-		}
-
-		// Parse hunk headers
-		if strings.HasPrefix(line, "@@") {
-			// Parse the new file line number from hunk header
-			//		matches := regexp.MustCompile(`\+(\d+)`).FindStringSubmatch(line)
-
-			matches := regexp.MustCompile(`@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@`).FindStringSubmatch(line)
-			if len(matches) >= 2 {
-				lineNum, _ := strconv.Atoi(matches[1])
-				currentLine = lineNum - 1
-			}
-			continue
-		}
-
-		// Track line numbers for additions and context lines
-		if !strings.HasPrefix(line, "-") {
-			currentLine++
-			if !strings.HasPrefix(line, "\\") { // Ignore "\ No newline at end of file"
-				positions[currentLine] = currentPosition
-			}
-		}
-	}
-
-	return positions, nil
-}
-
-// findReviewPosition determines the correct position for a review comment.
-func findReviewPosition(fileChanges []PRFileChange, comment *PRReviewComment) error {
-	logger := logging.GetLogger()
-	logger.Info(context.Background(),
-		"Finding position for comment on %s line %d",
-		comment.FilePath,
-		comment.LineNumber)
-	// Find the corresponding file change
-	var targetFile *PRFileChange
-	for i := range fileChanges {
-		if fileChanges[i].FilePath == comment.FilePath {
-			targetFile = &fileChanges[i]
-			break
-		}
-	}
-
-	if targetFile == nil {
-		return fmt.Errorf("file not found in changes: %s", comment.FilePath)
-	}
-
-	if targetFile.Patch == "" {
-		return fmt.Errorf("no changes found in file: %s", comment.FilePath)
-	}
-	// Validate line exists in actual file content
-	if targetFile.FileContent != "" {
-		lines := strings.Split(targetFile.FileContent, "\n")
-		if comment.LineNumber > len(lines) {
-			return fmt.Errorf("line number %d exceeds file length %d",
-				comment.LineNumber, len(lines))
-		}
-	}
-	// Calculate valid positions from the diff
-	positions, err := calculateDiffPositions(targetFile.Patch)
-	if err != nil {
-		return fmt.Errorf("failed to calculate diff positions: %w", err)
-	}
-
-	// Find the position for the comment's line number
-	position, exists := positions[comment.LineNumber]
-	if !exists {
-		// If exact line not found, try to find nearest valid position
-		nearestLine := findNearestValidLine(positions, comment.LineNumber)
-		if nearestLine > 0 {
-			comment.LineNumber = positions[nearestLine]
-			return nil
-		}
-		return fmt.Errorf("no valid position found near line %d in file %s",
-			comment.LineNumber, comment.FilePath)
-	}
-	logger.Info(context.Background(),
-		"Found position %d for line %d",
-		position,
-		comment.LineNumber)
-	comment.LineNumber = position
-	return nil
-}
-
-func formatCommentBody(comment PRReviewComment) string {
-	var sb strings.Builder
-
-	// Add severity indicator
-	sb.WriteString(fmt.Sprintf("**%s**: ", strings.ToUpper(comment.Severity)))
-
-	// Add the main comment
-	sb.WriteString(comment.Content)
-
-	// Add suggestion if present
-	if comment.Suggestion != "" {
-		sb.WriteString("\n\n**Suggestion:**\n")
-		sb.WriteString(comment.Suggestion)
-	}
-
-	// Add category tag
-	sb.WriteString(fmt.Sprintf("\n\n_Category: %s_", comment.Category))
-
-	return sb.String()
-}
-
-func findNearestValidLine(positions map[int]int, target int) int {
-	if len(positions) == 0 {
-		return 0
-	}
-
-	// Convert positions map keys to slice for sorting
-	lines := make([]int, 0, len(positions))
-	for line := range positions {
-		lines = append(lines, line)
-	}
-	sort.Ints(lines)
-
-	// Find nearest line
-	nearest := lines[0]
-	minDist := abs(target - nearest)
-
-	for _, line := range lines[1:] {
-		dist := abs(target - line)
-		if dist < minDist {
-			minDist = dist
-			nearest = line
-		}
-	}
-
-	// Only return if within reasonable distance (e.g., 5 lines)
-	if minDist <= 5 {
-		return nearest
-	}
-	return 0
-}
-
-func VerifyTokenPermissions(ctx context.Context, token, owner, repo string) error {
-	// Create an authenticated client
-	ts := oauth2.StaticTokenSource(&oauth2.Token{AccessToken: token})
-	tc := oauth2.NewClient(ctx, ts)
-	client := github.NewClient(tc)
-
-	// First, let's check the token's basic information
-	fmt.Println("Checking token permissions...")
-
-	// Check token validity and scopes
-	user, resp, err := client.Users.Get(ctx, "") // Empty string gets authenticated user
-	if err != nil {
-		if resp != nil && resp.StatusCode == 401 {
-			return fmt.Errorf("invalid token or token has expired")
-		}
-		return fmt.Errorf("error checking token: %w", err)
-	}
-
-	fmt.Printf("\nToken belongs to user: %s\n", user.GetLogin())
-	fmt.Printf("Token scopes: %s\n", resp.Header.Get("X-OAuth-Scopes"))
-
-	fmt.Printf("Checking access to repository: %s/%s\n", owner, repo)
-
-	// Now let's check specific permissions we need
-	permissionChecks := []struct {
-		name  string
-		check func() error
-	}{
-		{
-			name: "Repository read access",
-			check: func() error {
-				_, resp, err := client.Repositories.Get(ctx, owner, repo)
-				if err != nil {
-					if resp != nil && resp.StatusCode == 404 {
-						return fmt.Errorf("repository not found or no access")
-					}
-					return err
-				}
-				return nil
-			},
-		},
-		{
-			name: "Pull request read access",
-			check: func() error {
-				_, resp, err := client.PullRequests.List(ctx, owner, repo, &github.PullRequestListOptions{
-					ListOptions: github.ListOptions{PerPage: 1},
-				})
-				if err != nil {
-					if resp != nil && resp.StatusCode == 403 {
-						return fmt.Errorf("no access to pull requests")
-					}
-					return err
-				}
-				return nil
-			},
-		},
-		//		{
-		// 	name: "Pull request write access (comment creation)",
-		// 	check: func() error {
-		// 		// Try to create a draft review to check write permissions
-		// 		// We'll delete it right after
-		// 		_, _, err := client.PullRequests.CreateReview(ctx, owner, repo, 1,
-		// 			&github.PullRequestReviewRequest{
-		// 				Body:  github.Ptr("Permission check - please ignore"),
-		// 				Event: github.Ptr("COMMENT"),
-		// 			})
-		// 		if err != nil {
-		// 			if strings.Contains(err.Error(), "403") {
-		// 				return fmt.Errorf("no permission to create reviews")
-		// 			}
-		// 			// Don't return error if PR #1 doesn't exist
-		// 			if !strings.Contains(err.Error(), "404") {
-		// 				return err
-		// 			}
-		// 		}
-		//
-		// 		return nil
-		// 	},
-		// },
-	}
-
-	// Run all permission checks
-	fmt.Println("\nPermission Check Results:")
-	fmt.Println("------------------------")
-	allPassed := true
-	for _, check := range permissionChecks {
-		fmt.Printf("%-30s: ", check.name)
-		if err := check.check(); err != nil {
-			fmt.Printf("❌ Failed - %v\n", err)
-			allPassed = false
-		} else {
-			fmt.Printf("✅ Passed\n")
-		}
-	}
-
-	if !allPassed {
-		return fmt.Errorf("\nsome permission checks failed - token may not have sufficient access")
-	}
-
-	fmt.Println("\n✅ Token has all required permissions for PR review functionality")
-	return nil
-}
-
-type PreviewOptions struct {
-	ShowColors      bool   // Use ANSI colors for formatting
-	ContextLines    int    // Number of context lines around changes
-	FilePathStyle   string // How to display file paths (full, relative, basename)
-	ShowLineNumbers bool   // Whether to show line numbers
-}
-
 func (g *GitHubTools) PreviewReview(ctx context.Context, console *Console, prNumber int, comments []PRReviewComment) (bool, error) {
 	// Use spinner while fetching PR changes
 	var changes *PRChanges
@@ -777,14 +402,7 @@ func (g *GitHubTools) PreviewReview(ctx context.Context, console *Console, prNum
 	var validComments []PRReviewComment
 
 	var skippedComments []PRReviewComment
-	// for _, comment := range comments {
-	// 	if isCommentInChanges(changes, comment) {
-	// 		validComments = append(validComments, comment)
-	// 	} else {
-	// 		console.printf("Note: Comment on %s line %d will be skipped (unchanged line)\n",
-	// 			comment.FilePath, comment.LineNumber)
-	// 	}
-	// }
+
 	for _, comment := range comments {
 		isValid := false
 		for _, file := range changes.Files {
@@ -809,6 +427,9 @@ func (g *GitHubTools) PreviewReview(ctx context.Context, console *Console, prNum
 			console.printf("\nNote: Comment on %s line %d will be skipped (unchanged line)\n",
 				comment.FilePath, comment.LineNumber)
 		}
+	}
+	if len(skippedComments) != 0 {
+		console.printf("\nSkipping :%d comments", len(skippedComments))
 	}
 	if len(validComments) == 0 {
 		console.println("\nNo comments can be posted - all comments are on unchanged lines")
@@ -967,30 +588,249 @@ func (g *GitHubTools) PreviewReview(ctx context.Context, console *Console, prNum
 	return true, nil
 }
 
-func isCommentInChanges(changes *PRChanges, comment PRReviewComment) bool {
-	for _, file := range changes.Files {
-		if file.FilePath != comment.FilePath {
-			continue
-		}
+func newFileFilterRules() *fileFilterRules {
+	// Simple contains matches for common paths
+	pathContains := []string{
+		"vendor/",
+		"generated/",
+		"node_modules/",
+		".git",
+		"dist/",
+		"build/",
+	}
 
-		// Parse diff to get changed line ranges
-		positions, err := calculateDiffPositions(file.Patch)
-		if err != nil {
-			return false
-		}
+	// Direct extension matches
+	extensions := []string{
+		".pb.go",   // Generated protobuf
+		".gen.go",  // Other generated files
+		".md",      // Documentation
+		".txt",     // Text files
+		".yaml",    // Config files
+		".yml",     // Config files
+		".json",    // Config files
+		".lock",    // Lock files
+		".sum",     // Checksum files
+		".min.js",  // Minified JavaScript
+		".min.css", // Minified CSS
+	}
 
-		// Check if comment line is in changed ranges
-		if _, exists := positions[comment.LineNumber]; exists {
+	// Complex patterns that need regex
+	patterns := []string{
+		// Generated code patterns
+		`\.generated\..*$`,
+		`_generated\..*$`,
+
+		// IDE and system files
+		`\.idea/.*$`,
+		`\.vscode/.*$`,
+		`\.DS_Store$`,
+
+		// Test fixtures and data files
+		`testdata/.*$`,
+		`fixtures/.*$`,
+
+		// Build artifacts
+		`\.exe$`,
+		`\.dll$`,
+		`\.so$`,
+		`\.dylib$`,
+	}
+
+	// Compile all regex patterns
+	regexPatterns := make([]*regexp.Regexp, 0, len(patterns))
+	for _, pattern := range patterns {
+		regex := regexp.MustCompile(pattern)
+		regexPatterns = append(regexPatterns, regex)
+	}
+
+	return &fileFilterRules{
+		pathContains:  pathContains,
+		extensions:    extensions,
+		regexPatterns: regexPatterns,
+	}
+}
+
+var (
+	filterRules     *fileFilterRules
+	filterRulesOnce sync.Once
+)
+
+// getFilterRules returns the singleton instance of filter rules.
+func getFilterRules() *fileFilterRules {
+	filterRulesOnce.Do(func() {
+		filterRules = newFileFilterRules()
+	})
+	return filterRules
+}
+
+// Helper functions.
+func shouldSkipFile(filename string) bool {
+	// Use a singleton instance of filter rules
+	rules := getFilterRules()
+
+	// 1. Check specific filenames first (fastest)
+	specificFiles := map[string]bool{
+		"go.mod":            true,
+		"go.sum":            true,
+		"package-lock.json": true,
+		"yarn.lock":         true,
+		"Cargo.lock":        true,
+		// TODO: figure out xml related issue
+		// "pkg/agents/common.go":            true,
+		// "pkg/agents/orchestrator.go":      true,
+		// "pkg/agents/orchestrator_test.go": true,
+	}
+	if specificFiles[filename] {
+		return true
+	}
+
+	// 2. Check path contains (very fast)
+	for _, path := range rules.pathContains {
+		if strings.Contains(filename, path) {
 			return true
 		}
 	}
+
+	// 3. Check file extensions (fast)
+	ext := filepath.Ext(filename)
+	for _, skipExt := range rules.extensions {
+		if ext == skipExt || strings.HasSuffix(filename, skipExt) {
+			return true
+		}
+	}
+
+	// 4. Check regex patterns (slower but handles complex cases)
+	for _, pattern := range rules.regexPatterns {
+		if pattern.MatchString(filename) {
+			return true
+		}
+	}
+
 	return false
 }
 
-// CodeContext represents lines of code around a specific line.
-type CodeContext struct {
-	StartLine int
-	Lines     []string
+func formatCommentBody(comment PRReviewComment) string {
+	var sb strings.Builder
+
+	// Add severity indicator
+	sb.WriteString(fmt.Sprintf("**%s**: ", strings.ToUpper(comment.Severity)))
+
+	// Add the main comment
+	sb.WriteString(comment.Content)
+
+	// Add suggestion if present
+	if comment.Suggestion != "" {
+		sb.WriteString("\n\n**Suggestion:**\n")
+		sb.WriteString(comment.Suggestion)
+	}
+
+	// Add category tag
+	sb.WriteString(fmt.Sprintf("\n\n_Category: %s_", comment.Category))
+
+	return sb.String()
+}
+
+func VerifyTokenPermissions(ctx context.Context, token, owner, repo string) error {
+	// Create an authenticated client
+	ts := oauth2.StaticTokenSource(&oauth2.Token{AccessToken: token})
+	tc := oauth2.NewClient(ctx, ts)
+	client := github.NewClient(tc)
+
+	// First, let's check the token's basic information
+	fmt.Println("Checking token permissions...")
+
+	// Check token validity and scopes
+	user, resp, err := client.Users.Get(ctx, "") // Empty string gets authenticated user
+	if err != nil {
+		if resp != nil && resp.StatusCode == 401 {
+			return fmt.Errorf("invalid token or token has expired")
+		}
+		return fmt.Errorf("error checking token: %w", err)
+	}
+
+	fmt.Printf("\nToken belongs to user: %s\n", user.GetLogin())
+	fmt.Printf("Token scopes: %s\n", resp.Header.Get("X-OAuth-Scopes"))
+
+	fmt.Printf("Checking access to repository: %s/%s\n", owner, repo)
+
+	// Now let's check specific permissions we need
+	permissionChecks := []struct {
+		name  string
+		check func() error
+	}{
+		{
+			name: "Repository read access",
+			check: func() error {
+				_, resp, err := client.Repositories.Get(ctx, owner, repo)
+				if err != nil {
+					if resp != nil && resp.StatusCode == 404 {
+						return fmt.Errorf("repository not found or no access")
+					}
+					return err
+				}
+				return nil
+			},
+		},
+		{
+			name: "Pull request read access",
+			check: func() error {
+				_, resp, err := client.PullRequests.List(ctx, owner, repo, &github.PullRequestListOptions{
+					ListOptions: github.ListOptions{PerPage: 1},
+				})
+				if err != nil {
+					if resp != nil && resp.StatusCode == 403 {
+						return fmt.Errorf("no access to pull requests")
+					}
+					return err
+				}
+				return nil
+			},
+		},
+		//		{
+		// 	name: "Pull request write access (comment creation)",
+		// 	check: func() error {
+		// 		// Try to create a draft review to check write permissions
+		// 		// We'll delete it right after
+		// 		_, _, err := client.PullRequests.CreateReview(ctx, owner, repo, 1,
+		// 			&github.PullRequestReviewRequest{
+		// 				Body:  github.Ptr("Permission check - please ignore"),
+		// 				Event: github.Ptr("COMMENT"),
+		// 			})
+		// 		if err != nil {
+		// 			if strings.Contains(err.Error(), "403") {
+		// 				return fmt.Errorf("no permission to create reviews")
+		// 			}
+		// 			// Don't return error if PR #1 doesn't exist
+		// 			if !strings.Contains(err.Error(), "404") {
+		// 				return err
+		// 			}
+		// 		}
+		//
+		// 		return nil
+		// 	},
+		// },
+	}
+
+	// Run all permission checks
+	fmt.Println("\nPermission Check Results:")
+	fmt.Println("------------------------")
+	allPassed := true
+	for _, check := range permissionChecks {
+		fmt.Printf("%-30s: ", check.name)
+		if err := check.check(); err != nil {
+			fmt.Printf("❌ Failed - %v\n", err)
+			allPassed = false
+		} else {
+			fmt.Printf("✅ Passed\n")
+		}
+	}
+
+	if !allPassed {
+		return fmt.Errorf("\nsome permission checks failed - token may not have sufficient access")
+	}
+
+	fmt.Println("\n✅ Token has all required permissions for PR review functionality")
+	return nil
 }
 
 // extractContext gets lines of code around a specific line number.

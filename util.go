@@ -145,13 +145,6 @@ func max(a, b int) int {
 	return b
 }
 
-func abs(x int) int {
-	if x < 0 {
-		return -x
-	}
-	return x
-}
-
 func CreateStoragePath(ctx context.Context, owner, repo string) (string, error) {
 	// Get the user's home directory - this is the proper way to handle "~"
 	homeDir, err := os.UserHomeDir()
