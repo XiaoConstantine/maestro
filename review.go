@@ -620,7 +620,7 @@ func (a *PRReviewAgent) performInitialReview(ctx context.Context, tasks []PRRevi
 				repoPatterns = append(repoPatterns, patterns...)
 
 				totalRepoMatches += len(patterns)
-				guidelineMatch, err := a.rag.FindSimilar(ctx, fileEmbedding.Vector, 10, "guideline")
+				guidelineMatch, err := a.rag.FindSimilar(ctx, fileEmbedding.Vector, 20, "guideline")
 				if err != nil {
 					console.FileError(task.FilePath, fmt.Errorf("failed to find guideline matches: %w", err))
 					continue

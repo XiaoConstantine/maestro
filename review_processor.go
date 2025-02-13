@@ -17,6 +17,12 @@ type CodeReviewProcessor struct{}
 
 func (p *CodeReviewProcessor) Process(ctx context.Context, task agents.Task, context map[string]interface{}) (interface{}, error) {
 	logger := logging.GetLogger()
+	metadata, err := extractReviewMetadata(task.Metadata)
+	if err != nil {
+		return nil, fmt.Errorf("task %s: %w", task.ID, err)
+	}
+
+	instruction := buildReviewInstruction(metadata.Guidelines)
 	// Create signature for code review
 	signature := core.NewSignature(
 		[]core.InputField{
@@ -29,46 +35,43 @@ func (p *CodeReviewProcessor) Process(ctx context.Context, task agents.Task, con
 			{Field: core.NewField("comments")},
 			{Field: core.NewField("summary")},
 		},
-	).WithInstruction(`Review the code changes and provide specific, actionable feedback.
-Consider both best practices from guidelines and consistency with existing patterns.
-For each issue found, output in following format:
-
-comments:
-  file: [filename]
-  line: [specific line number where the issue occurs]
-  severity: [must be one of: critical, warning, suggestion]
-  category: [must be one of: error-handling, code-style, performance, security, documentation]
-  content: [clear explanation of the issue and why it matters]
-  suggestion: [specific code example or clear steps to fix the issue]
-
-Review for these specific issues:
-1. Error Handling
-   - Missing error checks or ignored errors
-   - Inconsistent error handling patterns
-   - Silent failures
-2. Code Quality
-   - Function complexity and length
-   - Code duplication
-   - Unclear logic or control flow
-3. Documentation
-   - Missing documentation for exported items
-   - Unclear or incomplete comments
-4. Performance
-   - Inefficient patterns
-   - Resource leaks
-   - Unnecessary allocations
-5. Best Practices
-   - Go idioms and conventions
-   - Package organization
-   - Clear naming conventions`)
-
+	).WithInstruction(instruction)
+	// 	).WithInstruction(`Review the code changes and provide specific, actionable feedback.
+	// Consider both best practices from guidelines and consistency with existing patterns.
+	// For each issue found, output in following format:
+	//
+	// comments:
+	//   file: [filename]
+	//   line: [specific line number where the issue occurs]
+	//   severity: [must be one of: critical, warning, suggestion]
+	//   category: [must be one of: error-handling, code-style, performance, security, documentation]
+	//   content: [clear explanation of the issue and why it matters]
+	//   suggestion: [specific code example or clear steps to fix the issue]
+	//
+	// Review for these specific issues:
+	// 1. Error Handling
+	//    - Missing error checks or ignored errors
+	//    - Inconsistent error handling patterns
+	//    - Silent failures
+	// 2. Code Quality
+	//    - Function complexity and length
+	//    - Code duplication
+	//    - Unclear logic or control flow
+	// 3. Documentation
+	//    - Missing documentation for exported items
+	//    - Unclear or incomplete comments
+	// 4. Performance
+	//    - Inefficient patterns
+	//    - Resource leaks
+	//    - Unnecessary allocations
+	// 5. Best Practices
+	//    - Go idioms and conventions
+	//    - Package organization
+	//    - Clear naming conventions`)
+	//
 	// Create predict module for review
 	predict := modules.NewPredict(signature)
 
-	metadata, err := extractReviewMetadata(task.Metadata)
-	if err != nil {
-		return nil, fmt.Errorf("task %s: %w", task.ID, err)
-	}
 	if metadata.FileContent == "" && metadata.Changes == "" {
 		return nil, fmt.Errorf("both file content and changes cannot be empty for file %s", metadata.FilePath)
 	}
@@ -306,10 +309,27 @@ func validateCategory(category string) string {
 }
 
 func isValidComment(comment PRReviewComment) bool {
-	return comment.LineNumber > 0 &&
-		comment.Content != "" &&
-		comment.Severity != "" &&
-		comment.Category != ""
+	// A comment is considered actionable if it has:
+	// 1. A specific location (line number)
+	// 2. A clear suggestion for improvement
+	// 3. Non-empty content explaining the issue
+	if comment.LineNumber <= 0 ||
+		comment.Suggestion == "" ||
+		comment.Content == "" {
+		return false
+	}
+
+	// Check that the content provides meaningful explanation
+	if len(strings.TrimSpace(comment.Content)) < 10 {
+		return false // Too short to be meaningful
+	}
+
+	// Check that the suggestion is specific enough
+	if len(strings.TrimSpace(comment.Suggestion)) < 10 {
+		return false // Too short to be actionable
+	}
+
+	return true
 }
 
 func getIntFromMetadata(metadata map[string]interface{}, key string) (int, bool) {
@@ -330,4 +350,66 @@ func getIntFromMetadata(metadata map[string]interface{}, key string) (int, bool)
 		}
 	}
 	return 0, false
+}
+
+func buildReviewInstruction(guidelines []*Content) string {
+	var builder strings.Builder
+
+	builder.WriteString(`Review the code changes following these specific guidelines:
+
+For each potential issue, provide:
+- Precise location (file and line number)
+- Clear explanation of the issue
+- Specific suggestion for improvement
+- Reference to the relevant guideline
+
+Focus on these key aspects based on the matched guidelines:
+`)
+
+	// Add specific guidance from each relevant guideline
+	for _, guideline := range guidelines {
+		builder.WriteString(fmt.Sprintf("\n• %s:\n", guideline.Metadata["category"]))
+		builder.WriteString(extractKeyPoints(guideline.Text))
+	}
+
+	return builder.String()
+}
+
+// extractKeyPoints analyzes guideline text and extracts the most important points
+// for code review. It looks for specific patterns that indicate key requirements,
+// common issues, and best practices.
+func extractKeyPoints(content string) string {
+	// Split content into sections based on common headers
+	sections := strings.Split(content, "\n")
+	var keyPoints strings.Builder
+
+	inRelevantSection := false
+	for _, line := range sections {
+		// Look for sections that typically contain key review points
+		if strings.Contains(line, "Review Criteria:") ||
+			strings.Contains(line, "Best Practice Guidelines:") {
+			inRelevantSection = true
+			continue
+		}
+
+		// Stop extracting when we hit examples or other sections
+		if strings.Contains(line, "Examples:") ||
+			strings.Contains(line, "Implementation:") {
+			inRelevantSection = false
+		}
+
+		// Collect bullet points and key statements
+		if inRelevantSection && strings.TrimSpace(line) != "" {
+			// Clean up the line and add indentation for readability
+			cleanLine := strings.TrimPrefix(strings.TrimSpace(line), "-")
+			cleanLine = strings.TrimPrefix(cleanLine, "•")
+			cleanLine = strings.TrimSpace(cleanLine)
+
+			if cleanLine != "" {
+				keyPoints.WriteString("  • " + cleanLine + "\n")
+			}
+		}
+	}
+
+	return keyPoints.String()
 }

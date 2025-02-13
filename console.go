@@ -75,11 +75,6 @@ func (c *Console) Confirm(opts PromptOptions) (bool, error) {
 		}),
 	}
 
-	// Add timeout if specified
-	// if opts.Timeout > 0 {
-	// 	surveyOpts = append(surveyOpts, survey.WithTimeout(opts.Timeout))
-	// }
-	//
 	// Handle piped input (non-interactive mode)
 	if !isatty.IsTerminal(os.Stdin.Fd()) {
 		return opts.Default, nil

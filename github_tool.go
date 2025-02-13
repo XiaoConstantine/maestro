@@ -153,45 +153,6 @@ func (g *GitHubTools) GetPullRequestChanges(ctx context.Context, prNumber int) (
 			fileChange.FileContent = content
 		}
 
-		// var fileContent string
-		//
-		// if file.GetStatus() != "removed" {
-		// 	opts := &github.RepositoryContentGetOptions{
-		// 		Ref: fmt.Sprintf("pull/%d/head", prNumber), // This is crucial!
-		// 	}
-		// 	// Get the file content
-		// 	content, _, resp, err := g.client.Repositories.GetContents(
-		// 		ctx,
-		// 		g.owner,
-		// 		g.repo,
-		// 		file.GetFilename(),
-		// 		opts,
-		// 	)
-		//
-		// 	if err != nil {
-		// 		if resp != nil && resp.StatusCode == 404 {
-		// 			// File might have been deleted or moved
-		// 			continue
-		// 		}
-		// 		// For other errors, log but continue
-		// 		fileContent = fmt.Sprintf("Error getting content: %v", err)
-		// 	} else if content != nil {
-		// 		// Only try to get content if the content object is not nil
-		// 		if fc, err := content.GetContent(); err == nil {
-		// 			fileContent = fc
-		// 		}
-		// 	}
-		//
-		// }
-		//
-		// changes.Files = append(changes.Files, PRFileChange{
-		// 	FilePath:    file.GetFilename(),
-		// 	FileContent: fileContent,
-		// 	Patch:       file.GetPatch(),
-		// 	Additions:   file.GetAdditions(),
-		// 	Deletions:   file.GetDeletions(),
-		// })
-
 		changes.Files = append(changes.Files, fileChange)
 	}
 
@@ -207,43 +168,6 @@ func (g *GitHubTools) CreateReviewComments(ctx context.Context, prNumber int, co
 	if err != nil {
 		return fmt.Errorf("Failed to get changes for: %d", prNumber)
 	}
-	// Convert our comments into GitHub review comments
-	// ghComments := make([]*github.DraftReviewComment, 0, len(comments))
-	//
-	// for _, comment := range comments {
-	//
-	// 	commentCopy := comment
-	// 	if err := findReviewPosition(changes.Files, &commentCopy); err != nil {
-	// 		logger := logging.GetLogger()
-	// 		logger.Warn(ctx, "Skipping comment due to position error: %v", err)
-	// 		continue
-	// 	}
-	//
-	// 	body := formatCommentBody(commentCopy)
-	// 	ghComments = append(ghComments, &github.DraftReviewComment{
-	// 		Path:     &commentCopy.FilePath,
-	// 		Position: github.Ptr(commentCopy.LineNumber),
-	// 		Body:     &body,
-	// 	})
-	// }
-	// if len(ghComments) == 0 {
-	// 	return fmt.Errorf("no valid comments to create")
-	// }
-	//
-	// // Create the review
-	// review := &github.PullRequestReviewRequest{
-	// 	CommitID: nil, // Will use the latest commit
-	// 	Body:     github.Ptr("Code Review Comments"),
-	// 	Event:    github.Ptr("COMMENT"),
-	// 	Comments: ghComments,
-	// }
-	//
-	// _, _, err = g.client.PullRequests.CreateReview(ctx, g.owner, g.repo, prNumber, review)
-	// if err != nil {
-	// 	return fmt.Errorf("failed to create review: %w", err)
-	// }
-	//
-	// return nil
 	// Map file paths to their hunks for quick lookup
 	hunksByFile := make(map[string][]ChangeHunk)
 	for _, file := range changes.Files {
@@ -675,10 +599,6 @@ func shouldSkipFile(filename string) bool {
 		"package-lock.json": true,
 		"yarn.lock":         true,
 		"Cargo.lock":        true,
-		// TODO: figure out xml related issue
-		// "pkg/agents/common.go":            true,
-		// "pkg/agents/orchestrator.go":      true,
-		// "pkg/agents/orchestrator_test.go": true,
 	}
 	if specificFiles[filename] {
 		return true
