@@ -13,7 +13,9 @@ import (
 	"github.com/XiaoConstantine/dspy-go/pkg/modules"
 )
 
-type CodeReviewProcessor struct{}
+type CodeReviewProcessor struct {
+	metrics *BusinessMetrics
+}
 
 func (p *CodeReviewProcessor) Process(ctx context.Context, task agents.Task, context map[string]interface{}) (interface{}, error) {
 	logger := logging.GetLogger()
@@ -21,6 +23,8 @@ func (p *CodeReviewProcessor) Process(ctx context.Context, task agents.Task, con
 	if err != nil {
 		return nil, fmt.Errorf("task %s: %w", task.ID, err)
 	}
+
+	p.metrics.TrackReviewStart(ctx, metadata.Category)
 
 	instruction := buildReviewInstruction(metadata.Guidelines)
 	// Create signature for code review
@@ -89,7 +93,7 @@ func (p *CodeReviewProcessor) Process(ctx context.Context, task agents.Task, con
 	}
 
 	// Parse and format comments
-	comments, err := extractComments(result, metadata.FilePath)
+	comments, err := extractComments(ctx, result, metadata.FilePath, p.metrics)
 
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse comments for task %s: %w", task.ID, err)
@@ -102,7 +106,7 @@ func (p *CodeReviewProcessor) Process(ctx context.Context, task agents.Task, con
 }
 
 // Helper functions.
-func parseReviewComments(filePath string, commentsStr string) ([]PRReviewComment, error) {
+func parseReviewComments(ctx context.Context, filePath string, commentsStr string, metric *BusinessMetrics) ([]PRReviewComment, error) {
 	var comments []PRReviewComment
 
 	// Parse the YAML-like format from the LLM response
@@ -146,13 +150,16 @@ func parseReviewComments(filePath string, commentsStr string) ([]PRReviewComment
 
 		if isValidComment(comment) {
 			comments = append(comments, comment)
+			metric.TrackReviewComment(ctx, comment, true)
+		} else {
+			metric.TrackReviewComment(ctx, comment, true)
 		}
 	}
 
 	return comments, nil
 }
 
-func extractComments(result interface{}, filePath string) ([]PRReviewComment, error) {
+func extractComments(ctx context.Context, result interface{}, filePath string, metric *BusinessMetrics) ([]PRReviewComment, error) {
 	if comments, ok := result.([]PRReviewComment); ok {
 		return comments, nil
 	}
@@ -171,7 +178,7 @@ func extractComments(result interface{}, filePath string) ([]PRReviewComment, er
 		return nil, fmt.Errorf("comments must be string, got %T", commentsRaw)
 	}
 
-	return parseReviewComments(filePath, commentsStr)
+	return parseReviewComments(ctx, filePath, commentsStr, metric)
 }
 
 func extractReviewMetadata(metadata map[string]interface{}) (*ReviewMetadata, error) {

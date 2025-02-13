@@ -388,6 +388,98 @@ func (c *Console) printf(format string, a ...interface{}) {
 	fmt.Fprintf(c.w, format, a...)
 }
 
+func (c *Console) ShowReviewMetrics(metrics *BusinessMetrics, comments []PRReviewComment) {
+	c.printHeader("Review Metrics Summary")
+
+	// First show immediate review statistics
+	c.println("\nImmediate Review Impact:")
+
+	// Group comments by category for analysis
+	categoryCounts := make(map[string]int)
+	severityCounts := make(map[string]int)
+	for _, comment := range comments {
+		categoryCounts[comment.Category]++
+		severityCounts[comment.Severity]++
+	}
+
+	// Show total comments with breakdown
+	if c.color {
+		c.printf("Total Comments: %s\n", aurora.Blue(len(comments)).Bold())
+	} else {
+		c.printf("Total Comments: %d\n", len(comments))
+	}
+
+	// Show category distribution
+	if len(categoryCounts) > 0 {
+		c.println("\nComments by Category:")
+		categories := make([]string, 0, len(categoryCounts))
+		for category := range categoryCounts {
+			categories = append(categories, category)
+		}
+		sort.Strings(categories)
+
+		for _, category := range categories {
+			count := categoryCounts[category]
+			percentage := float64(count) / float64(len(comments)) * 100
+
+			if c.color {
+				c.printf("  %-25s %s (%0.1f%%)\n",
+					aurora.Blue(category),
+					aurora.White(count).Bold(),
+					percentage)
+			} else {
+				c.printf("  %-25s %d (%0.1f%%)\n", category, count, percentage)
+			}
+
+			// Show category-specific metrics
+			if stats := metrics.GetCategoryMetrics(category); stats.TotalComments > 0 {
+				outdatedRate := stats.GetOutdatedRate() * 100
+				c.printf("    • Historical Outdated Rate: %0.1f%%\n", outdatedRate)
+			}
+		}
+	}
+
+	// Show severity distribution
+	if len(severityCounts) > 0 {
+		c.println("\nComments by Severity:")
+		severities := []string{"critical", "warning", "suggestion"}
+		for _, severity := range severities {
+			if count := severityCounts[severity]; count > 0 {
+				percentage := float64(count) / float64(len(comments)) * 100
+				icon := c.severityIcon(severity)
+
+				if c.color {
+					c.printf("  %s %-12s %s (%0.1f%%)\n",
+						icon,
+						severity,
+						aurora.White(count).Bold(),
+						percentage)
+				} else {
+					c.printf("  %s %-12s %d (%0.1f%%)\n",
+						icon,
+						severity,
+						count,
+						percentage)
+				}
+			}
+		}
+	}
+
+	// Show historical impact metrics if available
+	c.println("\nHistorical Impact Metrics:")
+	c.printFields(map[string]interface{}{
+		"Overall Outdated Rate": fmt.Sprintf("%0.1f%%", metrics.GetOverallOutdatedRate()*100),
+		"Weekly Active Users":   metrics.GetWeeklyActiveUsers(),
+		"Review Response Rate":  fmt.Sprintf("%0.1f%%", metrics.GetReviewResponseRate()*100),
+	})
+
+	// Add helpful context about the metrics
+	c.println("\nMetric Explanations:")
+	c.println("• Outdated Rate measures how often flagged code is modified, indicating review effectiveness")
+	c.println("• Review Response Rate shows how frequently developers engage with review comments")
+	c.println("• Historical metrics help track long-term impact of automated reviews")
+}
+
 // indent adds spaces to the start of each line.
 func indent(s string, spaces int) string {
 	prefix := strings.Repeat(" ", spaces)

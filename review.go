@@ -107,6 +107,7 @@ type PRReviewAgent struct {
 	// TODO: should align with dspy agent interface
 	githubTools *GitHubTools // Add this field
 	stopper     *Stopper
+	metrics     *BusinessMetrics
 }
 
 type ThreadTracker struct {
@@ -366,6 +367,7 @@ func NewPRReviewAgent(ctx context.Context, githubTool *GitHubTools, dbPath strin
 		return nil, fmt.Errorf("failed to initialize rag store: %v", err)
 	}
 
+	metrics := NewBusinessMetrics(logger)
 	logger.Debug(ctx, "Successfully created RAG store")
 	indexer := NewRepoIndexer(githubTool, store)
 
@@ -431,8 +433,8 @@ func NewPRReviewAgent(ctx context.Context, githubTool *GitHubTools, dbPath strin
 			BackoffMultiplier: 2.0,
 		},
 		CustomProcessors: map[string]agents.TaskProcessor{
-			"code_review":      &CodeReviewProcessor{},
-			"comment_response": &CommentResponseProcessor{},
+			"code_review":      &CodeReviewProcessor{metrics: metrics},
+			"comment_response": &CommentResponseProcessor{metrics: metrics},
 			"repo_qa":          qaProcessor,
 		},
 		Options: core.WithGenerateOptions(
@@ -450,6 +452,7 @@ func NewPRReviewAgent(ctx context.Context, githubTool *GitHubTools, dbPath strin
 		rag:          store,
 		githubTools:  githubTool,
 		stopper:      stopper,
+		metrics:      metrics,
 	}, nil
 }
 
@@ -485,6 +488,8 @@ func (a *PRReviewAgent) ReviewPR(ctx context.Context, prNumber int, tasks []PRRe
 	if err := a.processExistingComments(ctx, prNumber, console); err != nil {
 		return nil, fmt.Errorf("failed to process existing comments: %w", err)
 	}
+
+	a.metrics.StartReviewSession(ctx, prNumber)
 
 	a.stopper.wg.Add(1)
 	monitorCtx, cancel := context.WithCancel(ctx)
@@ -556,7 +561,15 @@ func (a *PRReviewAgent) ReviewPR(ctx context.Context, prNumber int, tasks []PRRe
 
 	if len(allComments) == 0 {
 		console.println(aurora.Cyan("\nNo valid comments found need to reply"))
+	} else {
+		for _, comment := range allComments {
+			if comment.ThreadID != nil {
+				// Track outdated rate by monitoring thread creation
+				a.metrics.TrackNewThread(ctx, *comment.ThreadID, comment)
+			}
+		}
 	}
+
 	return allComments, nil
 }
 
@@ -709,7 +722,7 @@ func (a *PRReviewAgent) performInitialReview(ctx context.Context, tasks []PRRevi
 				}
 				for taskID, taskResult := range result.CompletedTasks {
 					// Convert task results to comments
-					if reviewComments, err := extractComments(taskResult, task.FilePath); err != nil {
+					if reviewComments, err := extractComments(ctx, taskResult, task.FilePath, a.metrics); err != nil {
 						logging.GetLogger().Error(ctx, "Failed to extract comments from task %s: %v", taskID, err)
 						continue
 					} else {
@@ -774,6 +787,8 @@ func (a *PRReviewAgent) processExistingComments(ctx context.Context, prNumber in
 			// Start a new thread history
 			threadHistory[comment.GetID()] = []PRReviewComment{reviewComment}
 		}
+
+		a.metrics.TrackHistoricalComment(ctx, reviewComment)
 	}
 	for _, comment := range comments {
 		commentID := comment.GetID()
