@@ -256,3 +256,52 @@ func preprocessForEmbedding(content string) (string, error) {
 
 	return chunk.String(), nil
 }
+
+// levenshteinDistance calculates the minimum number of single-character edits
+// required to change one string into another. This helps us determine if two
+// code examples are similar enough that the transformation could be automated.
+func levenshteinDistance(s1, s2 string) int {
+	// Create a matrix of size (len(s1)+1) x (len(s2)+1)
+	// The extra row and column are for the empty string case
+	rows := len(s1) + 1
+	cols := len(s2) + 1
+	matrix := make([][]int, rows)
+	for i := range matrix {
+		matrix[i] = make([]int, cols)
+	}
+
+	// Initialize the first row and column
+	// These represent the distance from an empty string
+	for i := 0; i < rows; i++ {
+		matrix[i][0] = i
+	}
+	for j := 0; j < cols; j++ {
+		matrix[0][j] = j
+	}
+
+	// Fill in the rest of the matrix
+	for i := 1; i < rows; i++ {
+		for j := 1; j < cols; j++ {
+			// If characters match, cost is 0; otherwise 1
+			cost := 1
+			if s1[i-1] == s2[j-1] {
+				cost = 0
+			}
+
+			// Take the minimum of:
+			// 1. Delete a character from s1 (matrix[i-1][j] + 1)
+			// 2. Insert a character into s1 (matrix[i][j-1] + 1)
+			// 3. Substitute a character (matrix[i-1][j-1] + cost)
+			matrix[i][j] = min(
+				matrix[i-1][j]+1, // deletion
+				min(
+					matrix[i][j-1]+1,      // insertion
+					matrix[i-1][j-1]+cost, // substitution
+				),
+			)
+		}
+	}
+
+	// The bottom-right cell contains the minimum number of operations needed
+	return matrix[rows-1][cols-1]
+}

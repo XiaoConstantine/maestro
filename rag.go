@@ -44,6 +44,8 @@ type RAGStore interface {
 	// Populate style guide, best practices based on repo language
 	PopulateGuidelines(ctx context.Context, language string) error
 
+	StoreRule(ctx context.Context, rule ReviewRule) error
+
 	// DB version control
 	GetMetadata(ctx context.Context, key string) (string, error)
 	SetMetadata(ctx context.Context, key, value string) error
@@ -80,6 +82,19 @@ func (s *sqliteRAGStore) init() error {
 		rowid INTEGER PRIMARY KEY,
 		embedding float[768] distance_metric=cosine,  -- Match your embedding dimensions
 		content_id TEXT PARTITION KEY  // Optimizes WHERE clause filtering
+		)`,
+
+		// Rule table
+		`    CREATE TABLE IF NOT EXISTS review_rules (
+		id TEXT PRIMARY KEY,
+		dimension TEXT NOT NULL,
+		category TEXT NOT NULL,
+		name TEXT NOT NULL,
+		description TEXT NOT NULL,
+		examples JSON NOT NULL,
+		metadata JSON NOT NULL,
+		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+		updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 		)`,
 
 		`CREATE INDEX IF NOT EXISTS idx_metadata_key ON db_metadata(key)`,
@@ -195,7 +210,15 @@ func (s *sqliteRAGStore) PopulateGuidelines(ctx context.Context, language string
 	for _, guideline := range guidelines {
 		// Generate embedding for the guideline
 		llm := core.GetDefaultLLM()
-		content := formatGuidelineContent(guideline)
+		rule, err := fetcher.ConvertGuidelineToRules(ctx, guideline)
+		if err != nil {
+			s.log.Error(ctx, "failed to convert guideline to rule")
+		}
+		if err := s.StoreRule(ctx, rule[0]); err != nil {
+			return fmt.Errorf("failed to store rule: %w", err)
+		}
+
+		content := FormatRuleContent(rule[0])
 		embedding, err := llm.CreateEmbedding(ctx, content)
 		if err != nil {
 			return fmt.Errorf("failed to create embedding: %w", err)
@@ -210,6 +233,8 @@ func (s *sqliteRAGStore) PopulateGuidelines(ctx context.Context, language string
 				"content_type": ContentTypeGuideline,
 				"language":     language,
 				"category":     guideline.Category,
+				"dimension":    rule[0].Dimension,
+				"impact":       rule[0].Metadata.Impact,
 			},
 		})
 		if err != nil {
@@ -371,6 +396,62 @@ func (s *sqliteRAGStore) SetMetadata(ctx context.Context, key, value string) err
 
 	if err != nil {
 		return fmt.Errorf("failed to set metadata: %w", err)
+	}
+
+	return nil
+}
+
+func (s *sqliteRAGStore) StoreRule(ctx context.Context, rule ReviewRule) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.closed {
+		return fmt.Errorf("store is closed")
+	}
+
+	query := `
+    INSERT INTO review_rules (
+        id, dimension, category, name, description, examples, metadata
+    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET
+        dimension = excluded.dimension,
+        category = excluded.category,
+        name = excluded.name,
+        description = excluded.description,
+        examples = excluded.examples,
+        metadata = excluded.metadata,
+        updated_at = CURRENT_TIMESTAMP`
+
+	s.log.Debug(ctx, "Beginning transaction for content ID: %s", rule.ID)
+	// Start a transaction
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("failed to start transaction: %w", err)
+	}
+	defer func() {
+		if err := tx.Rollback(); err != nil && err != sql.ErrTxDone {
+			s.log.Error(context.Background(), "failed to rollback transaction: %v", err)
+		}
+	}()
+
+	// Convert metadata to JSON
+	s.log.Debug(ctx, "Marshaling examples for content ID: %s", rule.ID)
+
+	examples, err := json.Marshal(rule.Examples)
+	if err != nil {
+		return fmt.Errorf("failed to marshal examples: %w", err)
+	}
+
+	metadata, err := json.Marshal(rule.Metadata)
+	if err != nil {
+		return fmt.Errorf("failed to marshal metadata: %w", err)
+	}
+
+	_, err = tx.ExecContext(ctx, query,
+		rule.ID, rule.Dimension, rule.Category, rule.Name,
+		rule.Description, examples, metadata)
+	if err != nil {
+		return fmt.Errorf("failed to store content rule: %w", err)
 	}
 
 	return nil

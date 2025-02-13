@@ -154,6 +154,37 @@ func (f *GuidelineFetcher) fetchContent(ctx context.Context, url string) ([]byte
 	return content, nil
 }
 
+func (f *GuidelineFetcher) ConvertGuidelineToRules(ctx context.Context,
+	guideline GuidelineContent) ([]ReviewRule, error) {
+
+	rules := make([]ReviewRule, 0)
+
+	// Convert each guideline example into a review rule
+	ruleID := generateRuleID(guideline.Category)
+
+	var example CodeExample
+	if len(guideline.Examples) > 0 {
+		example = guideline.Examples[0]
+	}
+
+	rule := ReviewRule{
+		ID:          ruleID,
+		Dimension:   mapGuidlineDimension(guideline.Category),
+		Category:    guideline.Category,
+		Name:        guideline.ID,
+		Description: guideline.Text,
+		Examples:    example,
+		Metadata: RuleMetadata{
+			Category:    guideline.Category,
+			Impact:      determineImpact(guideline),
+			AutoFixable: isAutoFixable(guideline),
+		},
+	}
+
+	rules = append(rules, rule)
+	return rules, nil
+}
+
 func parseMarkdownGuidelines(content []byte) ([]GuidelineContent, error) {
 	var guidelines []GuidelineContent
 	logger := logging.GetLogger()
@@ -259,36 +290,151 @@ func generateID(title string) string {
 	return fmt.Sprintf("%s-%d", id, time.Now().Unix())
 }
 
-// formatGuidelineContent creates a rich text representation of a guideline.
-func formatGuidelineContent(guideline GuidelineContent) string {
-	var sb strings.Builder
+// generateRuleID creates a unique identifier for a review rule based on its category
+// For example: "ERROR_HANDLING_001" or "SECURITY_VULN_001".
+func generateRuleID(category string) string {
+	// Create a map of category prefixes for consistent naming
+	categoryPrefixes := map[string]string{
+		"error handling":         "ERR",
+		"security vulnerability": "SEC",
+		"code style":             "STYLE",
+		"performance":            "PERF",
+		"documentation":          "DOC",
+		"maintainability":        "MAINT",
+	}
 
-	// Write the main content
-	sb.WriteString(fmt.Sprintf("# %s\n\n", guideline.ID))
-	sb.WriteString(fmt.Sprintf("Category: %s\n\n", guideline.Category))
-	sb.WriteString(guideline.Text)
-	sb.WriteString("\n\n")
+	// Normalize the category name
+	normalizedCategory := strings.ToLower(strings.TrimSpace(category))
 
-	// Add examples if they exist
-	for _, example := range guideline.Examples {
-		if example.Bad != "" {
-			sb.WriteString("Bad Example:\n```go\n")
-			sb.WriteString(example.Bad)
-			sb.WriteString("\n```\n\n")
-		}
+	// Get the prefix, defaulting to "RULE" if category isn't in our map
+	prefix := categoryPrefixes[normalizedCategory]
+	if prefix == "" {
+		prefix = "RULE"
+	}
 
-		if example.Good != "" {
-			sb.WriteString("Good Example:\n```go\n")
-			sb.WriteString(example.Good)
-			sb.WriteString("\n```\n\n")
-		}
+	// Generate a unique number using timestamp to ensure uniqueness
+	timestamp := time.Now().UnixNano()
+	uniqueNumber := fmt.Sprintf("%03d", timestamp%1000)
 
-		if example.Explanation != "" {
-			sb.WriteString("Explanation:\n")
-			sb.WriteString(example.Explanation)
-			sb.WriteString("\n\n")
+	return fmt.Sprintf("%s_%s", prefix, uniqueNumber)
+}
+
+// mapGuidlineDimension maps a guideline category to one of our main review dimensions
+// This helps organize rules into the high-level structure similar to BitsAI-CR.
+func mapGuidlineDimension(category string) string {
+	// Go-specific mapping of review categories to dimensions
+	// This aligns with both Go's standard practices and common issues
+	dimensionMap := map[string]string{
+		// Code Defects cover Go-specific error handling and common mistakes
+		"error handling":   "Code Defect", // e.g., unchecked errors
+		"defer usage":      "Code Defect", // e.g., incorrect defer ordering
+		"goroutine leak":   "Code Defect", // e.g., unbounded goroutines
+		"channel usage":    "Code Defect", // e.g., channel deadlocks
+		"context handling": "Code Defect", // e.g., missing context propagation
+
+		// Security issues specific to Go applications
+		"input validation":   "Security Vulnerability", // e.g., unsafe file paths
+		"sql injection":      "Security Vulnerability", // e.g., raw SQL queries
+		"template injection": "Security Vulnerability", // e.g., html/template misuse
+
+		// Go's strong opinions about code organization and style
+		"package organization": "Maintainability and Readability", // e.g., package naming
+		"interface design":     "Maintainability and Readability", // e.g., interface size
+		"type naming":          "Maintainability and Readability", // e.g., stuttering names
+		"comment style":        "Maintainability and Readability", // e.g., godoc format
+
+		// Performance concerns particular to Go
+		"memory allocation": "Performance Issue", // e.g., unnecessary allocations
+		"mutex usage":       "Performance Issue", // e.g., lock contention
+		"slice operations":  "Performance Issue", // e.g., inefficient append
+	}
+	normalizedCategory := strings.ToLower(strings.TrimSpace(category))
+
+	// Look up the dimension, defaulting to "Other" if not found
+	dimension := dimensionMap[normalizedCategory]
+	if dimension == "" {
+		dimension = "Other"
+	}
+
+	return dimension
+}
+
+func determineImpact(guideline GuidelineContent) string {
+	content := strings.ToLower(guideline.Text)
+
+	// High-impact issues in Go codebases
+	highImpactPatterns := []string{
+		"race condition",     // Concurrent access issues
+		"goroutine leak",     // Resource leaks
+		"context deadline",   // Timing and cancellation
+		"memory leak",        // Resource management
+		"deadlock",           // Concurrency issues
+		"panic",              // Runtime crashes
+		"nil pointer",        // Common runtime error
+		"unbuffered channel", // Potential deadlocks
+	}
+
+	// Medium-impact issues specific to Go
+	mediumImpactPatterns := []string{
+		"defer",               // Resource cleanup
+		"error wrapping",      // Error chain integrity
+		"interface pollution", // API design
+		"package coupling",    // Code organization
+		"slice capacity",      // Memory usage
+		"method receiver",     // Type design
+		"mutex lock",          // Concurrency control
+	}
+
+	// Check for high impact patterns first
+	for _, pattern := range highImpactPatterns {
+		if strings.Contains(content, pattern) {
+			return "high"
 		}
 	}
 
-	return sb.String()
+	// Then check medium impact patterns
+	for _, pattern := range mediumImpactPatterns {
+		if strings.Contains(content, pattern) {
+			return "medium"
+		}
+	}
+
+	// Default to low impact for style and documentation issues
+	return "low"
+}
+
+// isAutoFixable determines if a rule violation can be automatically fixed
+// based on the guideline content and examples.
+func isAutoFixable(guideline GuidelineContent) bool {
+	// Simple patterns that can usually be auto-fixed
+	autoFixablePatterns := []string{
+		"naming convention",
+		"formatting",
+		"whitespace",
+		"import order",
+		"line length",
+	}
+
+	content := strings.ToLower(guideline.Text)
+
+	// Check if the guideline matches any auto-fixable patterns
+	for _, pattern := range autoFixablePatterns {
+		if strings.Contains(content, pattern) {
+			return true
+		}
+	}
+
+	// If we have both good and bad examples, and they're simple transformations,
+	// it might be auto-fixable
+	if len(guideline.Examples) > 0 {
+		example := guideline.Examples[0]
+		if example.Good != "" && example.Bad != "" {
+			// If the difference is small and systematic, it's likely auto-fixable
+			if levenshteinDistance(example.Good, example.Bad) < 10 {
+				return true
+			}
+		}
+	}
+
+	return false
 }
