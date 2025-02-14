@@ -140,7 +140,7 @@ func (ri *RepoIndexer) processFile(ctx context.Context, file *github.RepositoryC
 	}
 
 	// Configure chunking
-	config := NewChunkConfig()
+	config, err := NewChunkConfig()
 	config.fileMetadata = map[string]interface{}{
 		"file_path": file.GetPath(),
 		"file_type": filepath.Ext(file.GetPath()),
@@ -261,7 +261,7 @@ func (ri *RepoIndexer) processChangedFile(ctx context.Context, file *github.Comm
 	}
 
 	// Configure chunking
-	config := NewChunkConfig()
+	config, err := NewChunkConfig()
 	config.fileMetadata = map[string]interface{}{
 		"file_path": file.GetFilename(),
 		"file_type": filepath.Ext(file.GetFilename()),
