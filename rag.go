@@ -80,7 +80,7 @@ func (s *sqliteRAGStore) init() error {
 		// Vector virtual table (REQUIRED for sqlite-vec)
 		`CREATE VIRTUAL TABLE IF NOT EXISTS vec_items USING vec0(
 		rowid INTEGER PRIMARY KEY,
-		embedding float[768] distance_metric=cosine,  -- Match your embedding dimensions
+		embedding int8[256] distance_metric=l2,  -- Match your embedding dimensions
 		content_id TEXT PARTITION KEY  // Optimizes WHERE clause filtering
 		)`,
 
@@ -180,9 +180,10 @@ func (s *sqliteRAGStore) StoreContent(ctx context.Context, content *Content) err
 	if err != nil {
 		return fmt.Errorf("failed to serialize embedding: %w", err)
 	}
+
 	_, err = tx.ExecContext(ctx,
 		`INSERT OR REPLACE INTO vec_items (embedding, content_id)
-     VALUES (?, ?)`, // Directly use serialized blob
+     VALUES (vec_quantize_int8(vec_slice(vec_f32(?), 0, 256), 'unit'), ?)`, // Directly use serialized blob
 		blob, content.ID)
 	if err != nil {
 		return fmt.Errorf("failed to store content: %w", err)
@@ -268,11 +269,11 @@ func (s *sqliteRAGStore) FindSimilar(ctx context.Context, embedding []float32, l
 	}
 
 	baseQuery := `
-	SELECT c.id, c.text, c.metadata,
-	vec_distance_cosine(v.embedding, ?) as distance
+	SELECT c.id, c.text, c.metadata, v.distance
 	FROM vec_items v
 	JOIN contents c ON v.content_id = c.id
-	WHERE v.embedding MATCH(?, 0.8)`
+	WHERE v.embedding MATCH(vec_quantize_int8(vec_slice(vec_f32(?), 0, 256), 'unit'), 100)
+	AND v.distance < 20`
 
 	// Add content type filter if specified
 	var whereClauses []string
