@@ -270,7 +270,7 @@ func (c *Console) NoIssuesFound(file string) {
 	c.printf("✨ No issues found in %s\n", file)
 }
 
-func (c *Console) ShowComments(comments []PRReviewComment) {
+func (c *Console) ShowComments(comments []PRReviewComment, metric *BusinessMetrics) {
 	if len(comments) == 0 {
 		return
 	}
@@ -301,10 +301,14 @@ func (c *Console) ShowComments(comments []PRReviewComment) {
 			c.println(indent(comment.Suggestion, 4))
 		}
 		c.println()
+
+		if err := c.collectFeedback(comment, metric); err != nil {
+			c.logger.Warn(context.Background(), "Failed to collect feedback: %v", err)
+		}
 	}
 }
 
-func (c *Console) ShowSummary(comments []PRReviewComment) {
+func (c *Console) ShowSummary(comments []PRReviewComment, metric *BusinessMetrics) {
 	c.printHeader("Review Summary")
 
 	// Group by severity
@@ -325,7 +329,7 @@ func (c *Console) ShowSummary(comments []PRReviewComment) {
 			c.printf("%s %s: %d\n", icon, severity, count)
 		}
 	}
-	c.ShowComments(comments)
+	c.ShowComments(comments, metric)
 
 }
 
@@ -478,6 +482,68 @@ func (c *Console) ShowReviewMetrics(metrics *BusinessMetrics, comments []PRRevie
 	c.println("• Outdated Rate measures how often flagged code is modified, indicating review effectiveness")
 	c.println("• Review Response Rate shows how frequently developers engage with review comments")
 	c.println("• Historical metrics help track long-term impact of automated reviews")
+}
+
+func (c *Console) collectFeedback(comment PRReviewComment, metric *BusinessMetrics) error {
+	helpful, err := c.Confirm(PromptOptions{
+		Message: "Was this comment helpful?",
+		Default: true,
+	})
+	if err != nil {
+		return err
+	}
+
+	if !helpful {
+		// Collect reason if not helpful
+		reason, err := c.promptFeedbackReason()
+		if err != nil {
+			return err
+		}
+		metric.TrackUserFeedback(context.Background(), *comment.ThreadID, false, reason)
+	} else {
+		metric.TrackUserFeedback(context.Background(), *comment.ThreadID, true, "")
+	}
+
+	return nil
+}
+
+// promptFeedbackReason collects the reason for unhelpful feedback.
+func (c *Console) promptFeedbackReason() (string, error) {
+	reasons := []string{
+		"Not relevant to the code",
+		"Too vague or unclear",
+		"Already fixed",
+		"Incorrect suggestion",
+		"Other",
+	}
+
+	var selectedReason string
+	prompt := &survey.Select{
+		Message: "Why wasn't this comment helpful?",
+		Options: reasons,
+		Default: reasons[0],
+	}
+
+	err := survey.AskOne(prompt, &selectedReason)
+	if err != nil {
+		return "", fmt.Errorf("failed to get feedback reason: %w", err)
+	}
+
+	// If "Other" was selected, prompt for specific reason
+	if selectedReason == "Other" {
+		var customReason string
+		customPrompt := &survey.Input{
+			Message: "Please specify the reason:",
+		}
+
+		err := survey.AskOne(customPrompt, &customReason)
+		if err != nil {
+			return "", fmt.Errorf("failed to get custom reason: %w", err)
+		}
+		return customReason, nil
+	}
+
+	return selectedReason, nil
 }
 
 // indent adds spaces to the start of each line.

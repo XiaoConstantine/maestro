@@ -368,6 +368,8 @@ func NewPRReviewAgent(ctx context.Context, githubTool *GitHubTools, dbPath strin
 	}
 
 	metrics := NewBusinessMetrics(logger)
+
+	metrics.StartOptimizationCycle(ctx)
 	logger.Debug(ctx, "Successfully created RAG store")
 	indexer := NewRepoIndexer(githubTool, store)
 
@@ -547,6 +549,8 @@ func (a *PRReviewAgent) ReviewPR(ctx context.Context, prNumber int, tasks []PRRe
 		// Track new threads from initial review
 		for _, comment := range comments {
 			if comment.ThreadID != nil {
+
+				a.metrics.StartThreadTracking(ctx, comment)
 				a.activeThreads[*comment.ThreadID] = &ThreadTracker{
 					LastComment:  &comment,
 					ReviewChunks: findRelevantChunks(tasks, comment),
@@ -730,7 +734,7 @@ func (a *PRReviewAgent) performInitialReview(ctx context.Context, tasks []PRRevi
 						if len(reviewComments) == 0 {
 							console.NoIssuesFound(task.FilePath)
 						} else {
-							console.ShowComments(reviewComments)
+							console.ShowComments(reviewComments, a.metrics)
 						}
 						allComments = append(allComments, reviewComments...)
 					}
@@ -802,6 +806,7 @@ func (a *PRReviewAgent) processExistingComments(ctx context.Context, prNumber in
 			reviewComment := convertGitHubComment(comment)
 			reviewComment.Author = comment.GetUser().GetLogin()
 
+			a.metrics.StartThreadTracking(ctx, reviewComment)
 			a.activeThreads[commentID] = &ThreadTracker{
 				LastComment:     &reviewComment,
 				ParentCommentID: parentID,

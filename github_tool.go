@@ -312,7 +312,7 @@ func (g *GitHubTools) GetLatestCommitSHA(ctx context.Context, branch string) (st
 	return ref.Object.GetSHA(), nil
 }
 
-func (g *GitHubTools) PreviewReview(ctx context.Context, console *Console, prNumber int, comments []PRReviewComment) (bool, error) {
+func (g *GitHubTools) PreviewReview(ctx context.Context, console *Console, prNumber int, comments []PRReviewComment, metric *BusinessMetrics) (bool, error) {
 	// Use spinner while fetching PR changes
 	var changes *PRChanges
 	err := console.WithSpinner(ctx, "Fetching PR changes", func() error {
@@ -493,7 +493,7 @@ func (g *GitHubTools) PreviewReview(ctx context.Context, console *Console, prNum
 	}
 
 	// Print summary using existing console method
-	console.ShowSummary(comments)
+	console.ShowSummary(comments, metric)
 
 	shouldPost, err := console.ConfirmReviewPost(len(comments))
 	if err != nil {

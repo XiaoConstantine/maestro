@@ -355,7 +355,7 @@ func runCLI(cfg *config) error {
 	}
 	if len(comments) != 0 {
 
-		shouldPost, err := githubTools.PreviewReview(ctx, console, cfg.prNumber, comments)
+		shouldPost, err := githubTools.PreviewReview(ctx, console, cfg.prNumber, comments, agent.metrics)
 		if err != nil {
 			logger.Error(ctx, "Failed to preview review: %v", err)
 			os.Exit(1)
