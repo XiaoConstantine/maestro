@@ -71,7 +71,7 @@ func (s *sqliteRAGStore) init() error {
 		// Original metadata table
 		`CREATE TABLE IF NOT EXISTS contents (
 		id TEXT PRIMARY KEY,
-		text TEXT NOT NULL,
+		text BLOB COMPRESSED,
 		metadata TEXT,
 		content_type TEXT, -- 'repository' or 'guideline',
 		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -161,12 +161,17 @@ func (s *sqliteRAGStore) StoreContent(ctx context.Context, content *Content) err
 		return fmt.Errorf("failed to marshal metadata: %w", err)
 	}
 
+	// Compress the content text
+	compressedText, err := compressText(content.Text)
+	if err != nil {
+		return fmt.Errorf("failed to compress content: %w", err)
+	}
 	s.log.Debug(ctx, "Executing SQLite insert/replace for content ID: %s", content.ID)
 
 	_, err = tx.ExecContext(ctx,
 		`INSERT OR REPLACE INTO contents (id, text, metadata, content_type)
      VALUES (?, ?, ?, ?)`,
-		content.ID, content.Text, string(metadata), contentType)
+		content.ID, compressedText, string(metadata), contentType)
 	if err != nil {
 		return fmt.Errorf("failed to store content metadata: %w", err)
 	}
@@ -303,14 +308,22 @@ func (s *sqliteRAGStore) FindSimilar(ctx context.Context, embedding []float32, l
 	var results []*Content
 	for rows.Next() {
 		var (
-			content     Content
-			metadataStr string
-			similarity  float64
+			content        Content
+			compressedText string
+			metadataStr    string
+			similarity     float64
 		)
 
-		if err := rows.Scan(&content.ID, &content.Text, &metadataStr, &similarity); err != nil {
+		if err := rows.Scan(&content.ID, &compressedText, &metadataStr, &similarity); err != nil {
 			return nil, fmt.Errorf("failed to scan row: %w", err)
 		}
+		// Decompress the text
+		decompressedText, err := decompressText(compressedText)
+		if err != nil {
+			return nil, fmt.Errorf("failed to decompress content: %w", err)
+		}
+
+		content.Text = decompressedText
 
 		// Parse metadata JSON
 		if err := json.Unmarshal([]byte(metadataStr), &content.Metadata); err != nil {
