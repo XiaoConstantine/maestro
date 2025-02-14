@@ -1,8 +1,12 @@
 package main
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
+	"encoding/base64"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -304,4 +308,50 @@ func levenshteinDistance(s1, s2 string) int {
 
 	// The bottom-right cell contains the minimum number of operations needed
 	return matrix[rows-1][cols-1]
+}
+
+func compressText(text string) (string, error) {
+	// Create a buffer to hold compressed data
+	var compressed bytes.Buffer
+
+	// Create a gzip writer with best compression
+	gzWriter, err := gzip.NewWriterLevel(&compressed, gzip.BestCompression)
+	if err != nil {
+		return "", fmt.Errorf("failed to create gzip writer: %w", err)
+	}
+
+	// Write the text and close the writer
+	if _, err := gzWriter.Write([]byte(text)); err != nil {
+		return "", fmt.Errorf("failed to compress text: %w", err)
+	}
+	if err := gzWriter.Close(); err != nil {
+		return "", fmt.Errorf("failed to finalize compression: %w", err)
+	}
+
+	// Encode as base64 for safe storage in SQLite
+	encoded := base64.StdEncoding.EncodeToString(compressed.Bytes())
+	return encoded, nil
+}
+
+func decompressText(compressed string) (string, error) {
+	// Decode from base64
+	decoded, err := base64.StdEncoding.DecodeString(compressed)
+	if err != nil {
+		return "", fmt.Errorf("failed to decode base64: %w", err)
+	}
+
+	// Create a gzip reader
+	gzReader, err := gzip.NewReader(bytes.NewReader(decoded))
+	if err != nil {
+		return "", fmt.Errorf("failed to create gzip reader: %w", err)
+	}
+	defer gzReader.Close()
+
+	// Read and decompress
+	decompressed, err := io.ReadAll(gzReader)
+	if err != nil {
+		return "", fmt.Errorf("failed to decompress text: %w", err)
+	}
+
+	return string(decompressed), nil
 }
