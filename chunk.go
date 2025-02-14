@@ -12,19 +12,19 @@ import (
 	"github.com/XiaoConstantine/dspy-go/pkg/logging"
 )
 
-// ChunkingStrategy represents different approaches to chunking code
+// ChunkingStrategy represents different approaches to chunking code.
 type ChunkingStrategy string
 
 const (
-	// ChunkByFunction splits code primarily at function boundaries
+	// ChunkByFunction splits code primarily at function boundaries.
 	ChunkByFunction ChunkingStrategy = "function"
-	// ChunkBySize splits code into fixed-size chunks
+	// ChunkBySize splits code into fixed-size chunks.
 	ChunkBySize ChunkingStrategy = "size"
-	// ChunkByLogic attempts to split at logical boundaries (classes, blocks, etc)
+	// ChunkByLogic attempts to split at logical boundaries (classes, blocks, etc).
 	ChunkByLogic ChunkingStrategy = "logic"
 )
 
-// ChunkConfig provides configuration options for code chunking
+// ChunkConfig provides configuration options for code chunking.
 type ChunkConfig struct {
 	// Strategy determines how code should be split into chunks
 	Strategy ChunkingStrategy
@@ -55,15 +55,15 @@ type ChunkConfig struct {
 	fileMetadata map[string]interface{}
 }
 
-// ChunkConfigOption is a function that modifies a ChunkConfig
+// ChunkConfigOption is a function that modifies a ChunkConfig.
 type ChunkConfigOption func(*ChunkConfig)
 
-// NewChunkConfig creates a new chunking configuration with the given options
+// NewChunkConfig creates a new chunking configuration with the given options.
 func NewChunkConfig(options ...ChunkConfigOption) (*ChunkConfig, error) {
 	// Start with sensible defaults
 	config := &ChunkConfig{
-		Strategy:         ChunkByLogic,
-		MaxTokens:        1000,
+		Strategy:         ChunkByFunction,
+		MaxTokens:        2500,
 		ContextLines:     5,
 		OverlapLines:     2,
 		MinChunkSize:     10,
@@ -85,7 +85,7 @@ func NewChunkConfig(options ...ChunkConfigOption) (*ChunkConfig, error) {
 	return config, nil
 }
 
-// Configuration option functions for users to customize behavior
+// Configuration option functions for users to customize behavior.
 func WithStrategy(strategy ChunkingStrategy) ChunkConfigOption {
 	return func(c *ChunkConfig) {
 		c.Strategy = strategy
@@ -116,7 +116,7 @@ func WithFilePattern(pattern string, config ChunkConfig) ChunkConfigOption {
 	}
 }
 
-// Validation method to ensure configuration is valid
+// Validation method to ensure configuration is valid.
 func (c *ChunkConfig) validate() error {
 	if c.MaxTokens < 100 || c.MaxTokens > 4000 {
 		return fmt.Errorf("MaxTokens must be between 100 and 4000")
@@ -133,7 +133,7 @@ func (c *ChunkConfig) validate() error {
 	return nil
 }
 
-// chunkfile is the main entry point for chunking code files
+// chunkfile is the main entry point for chunking code files.
 func chunkfile(ctx context.Context, content string, changes string, config *ChunkConfig) ([]ReviewChunk, error) {
 	logger := logging.GetLogger()
 
@@ -145,12 +145,18 @@ func chunkfile(ctx context.Context, content string, changes string, config *Chun
 		return nil, fmt.Errorf("chunk configuration is required")
 	}
 
-	// Get file path from metadata for pattern matching
-	filename, ok := config.fileMetadata["file_path"].(string)
-	if !ok {
-		return nil, fmt.Errorf("file path not found in metadata")
+	if config.fileMetadata == nil {
+		return nil, fmt.Errorf("file metadata is required")
 	}
-
+	// Get file path from metadata for pattern matching
+	filepathInterface, exists := config.fileMetadata["file_path"]
+	if !exists {
+		return nil, fmt.Errorf("file_path missing from metadata")
+	}
+	filename, ok := filepathInterface.(string)
+	if !ok {
+		return nil, fmt.Errorf("file_path in metadata is not a string: %T", filepathInterface)
+	}
 	// Check if we have a specific configuration for this file type
 	for pattern, patternConfig := range config.FilePatterns {
 		if matched, _ := filepath.Match(pattern, filename); matched {
@@ -173,7 +179,12 @@ func chunkfile(ctx context.Context, content string, changes string, config *Chun
 	var err error
 	switch config.Strategy {
 	case ChunkByFunction:
-		chunks, err = chunkByFunction(content, config)
+		// only chunking correct file type
+		if filepath.Ext(filename) == ".go" {
+			chunks, err = chunkByFunction(content, config)
+		} else {
+			chunks, err = chunkBySize(content, config)
+		}
 	case ChunkByLogic:
 		chunks, err = chunkByLogic(content, config)
 	default:
@@ -183,29 +194,68 @@ func chunkfile(ctx context.Context, content string, changes string, config *Chun
 	if err != nil {
 		return nil, fmt.Errorf("failed to chunk file: %w", err)
 	}
+	// Apply minimum chunk size
+	initialChunks := mergeSmallChunks(chunks, config.MinChunkSize)
 
-	// Apply minimum chunk size - merge small chunks
-	chunks = mergeSmallChunks(chunks, config.MinChunkSize)
+	// Now handle oversized chunks directly instead of using enforceMaxTokens
+	var finalChunks []ReviewChunk
+	for _, chunk := range initialChunks {
+		tokens := estimatetokens(chunk.content)
+		if tokens <= config.MaxTokens {
+			finalChunks = append(finalChunks, chunk)
+			continue
+		}
 
-	// Ensure chunks don't exceed maximum token limit
-	chunks, err = enforceMaxTokens(chunks, config.MaxTokens)
-	if err != nil {
-		return nil, fmt.Errorf("failed to enforce token limits: %w", err)
+		// Split oversized chunk
+		lines := strings.Split(chunk.content, "\n")
+		currentChunk := ReviewChunk{
+			startline: chunk.startline,
+			filePath:  chunk.filePath,
+		}
+		currentLines := []string{}
+		currentTokens := 0
+
+		for i, line := range lines {
+			lineTokens := estimatetokens(line)
+			if currentTokens+lineTokens > config.MaxTokens && len(currentLines) > 0 {
+				// Finalize current chunk
+				currentChunk.content = strings.Join(currentLines, "\n")
+				currentChunk.endline = chunk.startline + i - 1
+				finalChunks = append(finalChunks, currentChunk)
+
+				// Start new chunk
+				currentLines = []string{}
+				currentTokens = 0
+				currentChunk = ReviewChunk{
+					startline: chunk.startline + i,
+					filePath:  chunk.filePath,
+				}
+			}
+			currentLines = append(currentLines, line)
+			currentTokens += lineTokens
+		}
+
+		// Add final subchunk if there's content
+		if len(currentLines) > 0 {
+			currentChunk.content = strings.Join(currentLines, "\n")
+			currentChunk.endline = chunk.endline
+			finalChunks = append(finalChunks, currentChunk)
+		}
 	}
 
-	// Add context and overlap between chunks
-	chunks = addContextAndOverlap(chunks, content, config)
+	// Add context and overlap
+	finalChunks = addContextAndOverlap(finalChunks, content, config)
 
-	// Extract relevant changes for each chunk
-	for i := range chunks {
-		chunks[i].changes = ExtractRelevantChanges(changes, chunks[i].startline, chunks[i].endline)
+	// Extract relevant changes
+	for i := range finalChunks {
+		finalChunks[i].changes = ExtractRelevantChanges(changes, finalChunks[i].startline, finalChunks[i].endline)
 	}
 
-	logger.Debug(ctx, "Created %d chunks for file %s", len(chunks), filename)
-	return chunks, nil
+	logger.Debug(ctx, "Created %d chunks for file %s", len(finalChunks), filename)
+	return finalChunks, nil
 }
 
-// chunkByFunction splits code at function boundaries using AST parsing
+// chunkByFunction splits code at function boundaries using AST parsing.
 func chunkByFunction(content string, config *ChunkConfig) ([]ReviewChunk, error) {
 	// Create a file set and parse the content
 	fset := token.NewFileSet()
@@ -213,7 +263,23 @@ func chunkByFunction(content string, config *ChunkConfig) ([]ReviewChunk, error)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse file: %w", err)
 	}
+	var functionCount int
+	ast.Inspect(file, func(n ast.Node) bool {
+		if _, ok := n.(*ast.FuncDecl); ok {
+			functionCount++
+		}
+		return true
+	})
+	// Get required metadata with safe defaults
+	filePath := ""
+	if path, ok := config.fileMetadata["file_path"].(string); ok {
+		filePath = path
+	}
 
+	changes := ""
+	if changesData, ok := config.fileMetadata["changes"].(string); ok {
+		changes = changesData
+	}
 	var chunks []ReviewChunk
 	ast.Inspect(file, func(n ast.Node) bool {
 		// Look for function declarations
@@ -222,11 +288,18 @@ func chunkByFunction(content string, config *ChunkConfig) ([]ReviewChunk, error)
 			start := fset.Position(fn.Pos())
 			end := fset.Position(fn.End())
 
-			chunks = append(chunks, ReviewChunk{
-				startline: start.Line,
-				endline:   end.Line,
-				content:   content[fn.Pos()-1 : fn.End()-1],
-			})
+			chunk := createCompleteChunk(
+				content[fn.Pos()-1:fn.End()-1],
+				start.Line,
+				end.Line,
+				content,
+				config,
+				filePath,
+				functionCount,
+				changes,
+			)
+
+			chunks = append(chunks, chunk)
 		}
 		return true
 	})
@@ -234,25 +307,54 @@ func chunkByFunction(content string, config *ChunkConfig) ([]ReviewChunk, error)
 	return chunks, nil
 }
 
-// chunkByLogic attempts to split at logical boundaries like classes, blocks, imports
+// chunkByLogic attempts to split at logical boundaries like classes, blocks, imports.
 func chunkByLogic(content string, config *ChunkConfig) ([]ReviewChunk, error) {
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, "", content, parser.ParseComments)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse file: %w", err)
 	}
-
-	var chunks []ReviewChunk
-	var currentChunk *ReviewChunk
-
-	// Helper to finalize current chunk
-	finishChunk := func() {
-		if currentChunk != nil && currentChunk.content != "" {
-			chunks = append(chunks, *currentChunk)
-			currentChunk = nil
+	// First pass to count logical blocks for accurate totalChunks
+	var logicalBlockCount int
+	ast.Inspect(file, func(n ast.Node) bool {
+		switch n.(type) {
+		case *ast.GenDecl, *ast.TypeSpec:
+			logicalBlockCount++
 		}
+		return true
+	})
+	filePath := ""
+	if path, ok := config.fileMetadata["file_path"].(string); ok {
+		filePath = path
 	}
 
+	changes := ""
+	if changesData, ok := config.fileMetadata["changes"].(string); ok {
+		changes = changesData
+	}
+	var chunks []ReviewChunk
+
+	// Helper to finalize current chunk
+	finishChunk := func(chunkContent string, start, end token.Pos) {
+		if chunkContent == "" {
+			return
+		}
+
+		startPos := fset.Position(start)
+		endPos := fset.Position(end)
+
+		chunk := createCompleteChunk(
+			chunkContent,
+			startPos.Line,
+			endPos.Line,
+			content,
+			config,
+			filePath,
+			logicalBlockCount,
+			changes,
+		)
+		chunks = append(chunks, chunk)
+	}
 	ast.Inspect(file, func(n ast.Node) bool {
 		if n == nil {
 			return true
@@ -262,55 +364,80 @@ func chunkByLogic(content string, config *ChunkConfig) ([]ReviewChunk, error) {
 		case *ast.GenDecl:
 			// Handle imports, constants, and type declarations
 			if node.Tok == token.IMPORT || node.Tok == token.CONST || node.Tok == token.TYPE {
-				finishChunk()
-				start := fset.Position(node.Pos())
-				end := fset.Position(node.End())
-				chunks = append(chunks, ReviewChunk{
-					startline: start.Line,
-					endline:   end.Line,
-					content:   content[node.Pos()-1 : node.End()-1],
-				})
+				finishChunk(content[node.Pos()-1:node.End()-1], node.Pos(), node.End())
 				return false
 			}
 		case *ast.TypeSpec:
 			// Handle type definitions and interfaces
-			finishChunk()
-			start := fset.Position(node.Pos())
-			end := fset.Position(node.End())
-			chunks = append(chunks, ReviewChunk{
-				startline: start.Line,
-				endline:   end.Line,
-				content:   content[node.Pos()-1 : node.End()-1],
-			})
+			finishChunk(content[node.Pos()-1:node.End()-1], node.Pos(), node.End())
 			return false
 		}
 		return true
 	})
 
-	finishChunk()
 	return chunks, nil
 }
 
-// chunkBySize splits code into fixed-size chunks without breaking syntax
+// chunkBySize splits code into fixed-size chunks without breaking syntax.
 func chunkBySize(content string, config *ChunkConfig) ([]ReviewChunk, error) {
-	lines := strings.Split(content, "\n")
-	var chunks []ReviewChunk
+	if content == "" {
+		return nil, fmt.Errorf("empty content provided")
+	}
+	if config == nil {
+		return nil, fmt.Errorf("nil config provided")
+	}
+	if config.fileMetadata == nil {
+		return nil, fmt.Errorf("file metadata is required")
+	}
+	// Get filepath with type checking
+	filepathInterface, exists := config.fileMetadata["file_path"]
+	if !exists {
+		return nil, fmt.Errorf("file_path missing from metadata")
+	}
 
-	currentChunk := ReviewChunk{startline: 1}
-	currentLines := []string{}
+	filepath, ok := filepathInterface.(string)
+	if !ok {
+		return nil, fmt.Errorf("file_path in metadata is not a string: %T", filepathInterface)
+	}
+	var changes string
+	if changesInterface, exists := config.fileMetadata["changes"]; exists {
+		if changesStr, ok := changesInterface.(string); ok {
+			changes = changesStr
+		}
+		// If type assertion fails, changes remains empty string
+	}
+	lines := strings.Split(content, "\n")
+	if len(lines) == 0 {
+		return nil, fmt.Errorf("no lines to process")
+	}
+
+	estimatedChunks := (len(lines) + config.MaxTokens - 1) / config.MaxTokens
+	var chunks []ReviewChunk
+	var currentLines []string
 	currentTokens := 0
+	chunkStartLine := 1
 
 	for i, line := range lines {
 		lineTokens := estimatetokens(line)
 
 		// If adding this line would exceed max tokens, finish the current chunk
 		if currentTokens+lineTokens > config.MaxTokens && len(currentLines) > 0 {
-			currentChunk.content = strings.Join(currentLines, "\n")
-			currentChunk.endline = i
-			chunks = append(chunks, currentChunk)
+			chunkContent := strings.Join(currentLines, "\n")
+
+			chunk := createCompleteChunk(
+				chunkContent,
+				chunkStartLine,
+				i, // Current line is where this chunk ends
+				content,
+				config,
+				filepath,
+				estimatedChunks,
+				changes,
+			)
+			chunks = append(chunks, chunk)
 
 			// Start new chunk
-			currentChunk = ReviewChunk{startline: i + 1}
+			chunkStartLine = i + 1
 			currentLines = []string{}
 			currentTokens = 0
 		}
@@ -319,18 +446,26 @@ func chunkBySize(content string, config *ChunkConfig) ([]ReviewChunk, error) {
 		currentTokens += lineTokens
 	}
 
-	// Add final chunk if there's content
+	// Handle the final chunk if there's remaining content
 	if len(currentLines) > 0 {
-		currentChunk.content = strings.Join(currentLines, "\n")
-		currentChunk.endline = len(lines)
-		chunks = append(chunks, currentChunk)
+		chunkContent := strings.Join(currentLines, "\n")
+		chunk := createCompleteChunk(
+			chunkContent,
+			chunkStartLine,
+			len(lines), // Last line of the file
+			content,
+			config,
+			filepath,
+			estimatedChunks,
+			changes,
+		)
+		chunks = append(chunks, chunk)
 	}
 
 	return chunks, nil
 }
 
-// Helper functions for chunk processing
-
+// Helper functions for chunk processing.
 func mergeSmallChunks(chunks []ReviewChunk, minSize int) []ReviewChunk {
 	if len(chunks) <= 1 {
 		return chunks
@@ -356,35 +491,6 @@ func mergeSmallChunks(chunks []ReviewChunk, minSize int) []ReviewChunk {
 	return result
 }
 
-func enforceMaxTokens(chunks []ReviewChunk, maxTokens int) ([]ReviewChunk, error) {
-	var result []ReviewChunk
-
-	for _, chunk := range chunks {
-		tokens := estimatetokens(chunk.content)
-		if tokens > maxTokens {
-			// Split the chunk further using chunkBySize
-			subConfig := &ChunkConfig{MaxTokens: maxTokens}
-			subChunks, err := chunkBySize(chunk.content, subConfig)
-			if err != nil {
-				return nil, err
-			}
-
-			// Adjust line numbers for sub-chunks
-			offset := chunk.startline - 1
-			for i := range subChunks {
-				subChunks[i].startline += offset
-				subChunks[i].endline += offset
-			}
-
-			result = append(result, subChunks...)
-		} else {
-			result = append(result, chunk)
-		}
-	}
-
-	return result, nil
-}
-
 func addContextAndOverlap(chunks []ReviewChunk, fullContent string, config *ChunkConfig) []ReviewChunk {
 	lines := strings.Split(fullContent, "\n")
 
@@ -408,4 +514,34 @@ func addContextAndOverlap(chunks []ReviewChunk, fullContent string, config *Chun
 	}
 
 	return chunks
+}
+
+func createCompleteChunk(
+	content string,
+	startLine, endLine int,
+	fullContent string,
+	config *ChunkConfig,
+	filePath string,
+	estimatedTotalChunks int,
+	changes string,
+) ReviewChunk {
+	// Calculate context boundaries
+	contextStart := max(0, startLine-config.ContextLines)
+	contextEnd := min(strings.Count(fullContent, "\n")+1, endLine+config.ContextLines)
+
+	// Split full content into lines for context extraction
+	lines := strings.Split(fullContent, "\n")
+
+	chunk := ReviewChunk{
+		content:         content,
+		startline:       startLine,
+		endline:         endLine,
+		leadingcontext:  strings.Join(lines[contextStart:startLine-1], "\n"),
+		trailingcontext: strings.Join(lines[endLine:contextEnd], "\n"),
+		changes:         ExtractRelevantChanges(changes, startLine, endLine),
+		filePath:        filePath,
+		totalChunks:     estimatedTotalChunks,
+	}
+
+	return chunk
 }

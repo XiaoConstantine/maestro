@@ -141,6 +141,12 @@ func (ri *RepoIndexer) processFile(ctx context.Context, file *github.RepositoryC
 
 	// Configure chunking
 	config, err := NewChunkConfig()
+	if err != nil {
+		return fmt.Errorf("failed to create chunk config: %w", err)
+	}
+	if content == "" {
+		return fmt.Errorf("empty file content for %s", file.GetPath())
+	}
 	config.fileMetadata = map[string]interface{}{
 		"file_path": file.GetPath(),
 		"file_type": filepath.Ext(file.GetPath()),
@@ -262,6 +268,9 @@ func (ri *RepoIndexer) processChangedFile(ctx context.Context, file *github.Comm
 
 	// Configure chunking
 	config, err := NewChunkConfig()
+	if err != nil {
+		return fmt.Errorf("failed to create chunk config: %w", err)
+	}
 	config.fileMetadata = map[string]interface{}{
 		"file_path": file.GetFilename(),
 		"file_type": filepath.Ext(file.GetFilename()),
