@@ -257,21 +257,21 @@ type ReviewMetadata struct {
 //	}
 //
 // Helper functions to manage context and changes.
-func getleadingcontext(lines []string, start, contextlines int) string {
-	contextstart := max(0, start-contextlines)
-	if contextstart >= start {
-		return ""
-	}
-	return strings.Join(lines[contextstart:start], "\n")
-}
-
-func gettrailingcontext(lines []string, end, contextlines int) string {
-	if end >= len(lines) {
-		return ""
-	}
-	contextend := min(len(lines), end+contextlines)
-	return strings.Join(lines[end:contextend], "\n")
-}
+// func getleadingcontext(lines []string, start, contextlines int) string {
+// 	contextstart := max(0, start-contextlines)
+// 	if contextstart >= start {
+// 		return ""
+// 	}
+// 	return strings.Join(lines[contextstart:start], "\n")
+// }
+//
+// func gettrailingcontext(lines []string, end, contextlines int) string {
+// 	if end >= len(lines) {
+// 		return ""
+// 	}
+// 	contextend := min(len(lines), end+contextlines)
+// 	return strings.Join(lines[end:contextend], "\n")
+// }
 
 // estimatetokens provides a rough estimate of tokens in a string.
 func estimatetokens(text string) int {
@@ -671,6 +671,10 @@ func (a *PRReviewAgent) performInitialReview(ctx context.Context, tasks []PRRevi
 	for i := range tasks {
 		task := tasks[i]
 		config, err := NewChunkConfig()
+		if err != nil {
+			return nil, fmt.Errorf("failed to create chunk config: %w", err)
+		}
+
 		config.fileMetadata = map[string]interface{}{
 			"file_path": task.FilePath,
 			"file_type": filepath.Ext(task.FilePath),
