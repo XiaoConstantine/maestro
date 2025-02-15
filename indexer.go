@@ -4,10 +4,13 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/XiaoConstantine/dspy-go/pkg/core"
 	"github.com/XiaoConstantine/dspy-go/pkg/logging"
@@ -48,7 +51,7 @@ func (ri *RepoIndexer) IndexRepository(ctx context.Context, branch, dbPath strin
 	lastIndexedSHA, err := ri.getLastIndexedCommit(ctx)
 	if err != nil {
 		if err == sql.ErrNoRows {
-			logger.Info(ctx, "No previous index found, requiring full index")
+			logger.Debug(ctx, "No previous index found, requiring full index")
 			needFullIndex = true
 		} else {
 			return fmt.Errorf("failed to check last indexed commit: %w", err)
@@ -197,10 +200,10 @@ func (ri *RepoIndexer) processFile(ctx context.Context, file *github.RepositoryC
 			return fmt.Errorf("failed to store content: %w", err)
 		}
 
-		ri.logger.Info(ctx, "Indexed chunk %d/%d for file %s",
+		ri.logger.Debug(ctx, "Indexed chunk %d/%d for file %s",
 			i+1, len(chunks), file.GetPath())
 	}
-	ri.logger.Info(ctx, "Finish index file: %s", file.GetPath())
+	ri.logger.Debug(ctx, "Finish index file: %s", file.GetPath())
 
 	return nil
 }
@@ -352,7 +355,7 @@ func (ri *RepoIndexer) detectRepositoryLanguage(ctx context.Context) (string, er
 	}
 
 	primaryLang := stats[0].Language
-	logger.Info(ctx, "Detected primary language: %s (%d bytes)",
+	logger.Debug(ctx, "Detected primary language: %s (%d bytes)",
 		primaryLang, stats[0].Bytes)
 
 	// Log secondary languages if present
@@ -383,34 +386,75 @@ func (ri *RepoIndexer) fullIndex(ctx context.Context, branch, latestSHA string) 
 		logger.Warn(ctx, "Failed to detect language: %v, defaulting to Go", err)
 		language = "Go"
 	}
+
+	console := NewConsole(os.Stdout, logger, nil)
+
 	if err := ri.ragStore.PopulateGuidelines(ctx, language); err != nil {
-		logger.Info(ctx, "failed to populate guidelines: %v", err)
 		return fmt.Errorf("failed to populate guidelines: %w", err)
 	}
-	_, directoryContent, resp, err := ri.githubTools.client.Repositories.GetContents(
-		ctx,
-		ri.githubTools.owner,
-		ri.githubTools.repo,
-		"", // Root directory
-		&github.RepositoryContentGetOptions{
-			Ref: branch,
-		},
-	)
-	if err != nil {
-		if resp != nil {
-			logger.Debug(ctx, "GitHub API response status: %d", resp.StatusCode)
-		}
 
-		logger.Debug(ctx, "GitHub API response error: %v", err)
+	var directoryContent []*github.RepositoryContent
+	err = console.WithSpinner(ctx, "Fetching repository contents...", func() error {
+		_, content, _, err := ri.githubTools.client.Repositories.GetContents(
+			ctx,
+			ri.githubTools.owner,
+			ri.githubTools.repo,
+			"", // Root directory
+			&github.RepositoryContentGetOptions{
+				Ref: branch,
+			},
+		)
+		directoryContent = content
+		return err
+	})
+	if err != nil {
 		return fmt.Errorf("failed to get repository contents: %w", err)
 	}
+	// Count total files first
+	var totalFiles int32
+	countChan := make(chan *github.RepositoryContent)
+	var countWg sync.WaitGroup
+	countWg.Add(1)
+	go func() {
+		defer countWg.Done()
+		defer close(countChan)
+		if err := ri.walkDirectory(ctx, directoryContent, branch, countChan); err != nil {
+			logger.Error(ctx, "Error during file count: %v", err)
+		}
+	}()
 
+	for range countChan {
+		atomic.AddInt32(&totalFiles, 1)
+	}
+	countWg.Wait()
 	// Process files concurrently with a worker pool
 	const maxWorkers = 5
 	filesChan := make(chan *github.RepositoryContent)
 	errChan := make(chan error, maxWorkers)
 	workerCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
+
+	var processedFiles int32
+	console.StartSpinner("Indexing repository...")
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	go func() {
+		for {
+			select {
+			case <-workerCtx.Done():
+				return
+			case <-ticker.C:
+				current := atomic.LoadInt32(&processedFiles)
+				total := atomic.LoadInt32(&totalFiles)
+				if total > 0 {
+					percentage := float64(current) / float64(total) * 100
+					console.UpdateSpinnerText(fmt.Sprintf("Indexing repository... %.1f%% (%d/%d files)",
+						percentage, current, total))
+				}
+			}
+		}
+	}()
+
 	var walkWg sync.WaitGroup
 	walkWg.Add(1)
 	go func() {
@@ -443,12 +487,16 @@ func (ri *RepoIndexer) fullIndex(ctx context.Context, branch, latestSHA string) 
 					cancel()
 					return
 				}
+
+				atomic.AddInt32(&processedFiles, 1)
 			}
 		}(i)
 	}
 
 	walkWg.Wait()   // Wait for directory walk to complete
 	workerWg.Wait() // Wait for workers to finish
+
+	console.StopSpinner()
 	close(errChan)
 
 	var errors []error
