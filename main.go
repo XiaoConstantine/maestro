@@ -313,7 +313,17 @@ func runCLI(cfg *config) error {
 		panic(err)
 	}
 
-	logger.Info(ctx, "Fetching changes for PR #%d", cfg.prNumber)
+	logger.Debug(ctx, "Fetching changes for PR #%d", cfg.prNumber)
+	// Before calling changes, err := githubTools.GetPullRequestChanges()
+	if console.color {
+		console.printf("%s %s %s\n",
+			aurora.Blue("↳").Bold(), // Arrow indicator for fetching
+			aurora.White("Fetching changes for PR").Bold(),
+			aurora.Cyan(fmt.Sprintf("#%d", cfg.prNumber)).Bold(),
+		)
+	} else {
+		console.printf("↳ Fetching changes for PR #%d\n", cfg.prNumber)
+	}
 	pr, _, _ := githubTools.client.PullRequests.Get(ctx, cfg.owner, cfg.repo, cfg.prNumber)
 	console.StartReview(pr)
 
@@ -324,8 +334,19 @@ func runCLI(cfg *config) error {
 	}
 	tasks := make([]PRReviewTask, 0, len(changes.Files))
 	for _, file := range changes.Files {
+
+		if console.color {
+			console.printf("\n%s Processing file: %s %s\n",
+				aurora.Blue("→").Bold(),
+				aurora.Cyan(file.FilePath).Bold(),
+				aurora.Gray(12, fmt.Sprintf("(+%d/-%d lines)", file.Additions, file.Deletions)),
+			)
+		} else {
+			console.printf("\n→ Processing file: %s (+%d/-%d lines)\n",
+				file.FilePath, file.Additions, file.Deletions)
+		}
 		// Log file being processed
-		logger.Info(ctx, "Processing file: %s (+%d/-%d lines)",
+		logger.Debug(ctx, "Processing file: %s (+%d/-%d lines)",
 			file.FilePath,
 			file.Additions,
 			file.Deletions,
@@ -342,7 +363,20 @@ func runCLI(cfg *config) error {
 		os.Exit(1)
 	}
 
-	logger.Info(ctx, "Starting code review for %d files", len(tasks))
+	if console.color {
+		console.printf("%s %s %s\n",
+			aurora.Green("⚡").Bold(),
+			aurora.White(fmt.Sprintf("Starting code review for %d %s",
+				len(tasks),
+				pluralize("file", len(tasks)))).Bold(),
+			aurora.Blue("...").String(),
+		)
+	} else {
+		console.printf("⚡ Starting code review for %d %s...\n",
+			len(tasks),
+			pluralize("file", len(tasks)))
+	}
+	logger.Debug(ctx, "Starting code review for %d files", len(tasks))
 	defer func() {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()

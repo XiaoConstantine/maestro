@@ -259,11 +259,15 @@ func (c *Console) StartReview(pr *github.PullRequest) {
 	c.println()
 }
 func (c *Console) ReviewingFile(file string, current, total int) {
-	prefix := fmt.Sprintf("[%d/%d]", current, total)
 	if c.color {
-		prefix = aurora.Blue(prefix).String()
+		c.printf("%s %s %s\n",
+			aurora.Blue("⟳").Bold(),
+			aurora.White(fmt.Sprintf("[%d/%d]", current, total)).Bold(),
+			aurora.Cyan(fmt.Sprintf("Analyzing %s...", file)).Bold(),
+		)
+	} else {
+		c.printf("⟳ [%d/%d] Analyzing %s...\n", current, total, file)
 	}
-	c.printf("%s Analyzing %s...\n", prefix, file)
 }
 
 func (c *Console) NoIssuesFound(file string) {
@@ -544,6 +548,16 @@ func (c *Console) promptFeedbackReason() (string, error) {
 	}
 
 	return selectedReason, nil
+}
+
+// UpdateSpinnerText updates the spinner's suffix text while maintaining animation.
+func (c *Console) UpdateSpinnerText(text string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.spinner.Active() {
+		c.spinner.Suffix = fmt.Sprintf(" %s", text)
+	}
 }
 
 // indent adds spaces to the start of each line.

@@ -5,10 +5,12 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 
 	sqlite_vec "github.com/asg017/sqlite-vec-go-bindings/cgo"
+	"github.com/logrusorgru/aurora"
 
 	_ "github.com/mattn/go-sqlite3"
 
@@ -201,19 +203,34 @@ func (s *sqliteRAGStore) StoreContent(ctx context.Context, content *Content) err
 // populate guidelines during database initialization.
 func (s *sqliteRAGStore) PopulateGuidelines(ctx context.Context, language string) error {
 
-	s.log.Info(ctx, "Starting guideline population for language: %s", language)
-	fetcher := NewGuidelineFetcher(s.log)
+	s.log.Debug(ctx, "Starting guideline population for language: %s", language)
 
-	// Fetch guidelines for the specified language
-	guidelines, err := fetcher.FetchGuidelines(ctx)
+	console := NewConsole(os.Stdout, s.log, nil)
+	fetcher := NewGuidelineFetcher(s.log)
+	// Start with fetching guidelines
+	var guidelines []GuidelineContent
+	err := console.WithSpinner(ctx, "Fetching coding guidelines...", func() error {
+		var err error
+		fetcher := NewGuidelineFetcher(s.log)
+		guidelines, err = fetcher.FetchGuidelines(ctx)
+		if err != nil {
+			return fmt.Errorf("failed to fetch guidelines: %w", err)
+		}
+		return nil
+	})
 	if err != nil {
-		s.log.Info(ctx, "failed to fetch gl: %v", err)
-		return fmt.Errorf("failed to fetch guidelines: %w", err)
+		return err
 	}
 
-	s.log.Info(ctx, "Fetched %d guidelines", len(guidelines))
+	console.StartSpinner("Processing guidelines...")
+
+	s.log.Debug(ctx, "Fetched %d guidelines", len(guidelines))
 	// Store guidelines in the same database
-	for _, guideline := range guidelines {
+	for i, guideline := range guidelines {
+
+		progress := float64(i+1) / float64(len(guidelines)) * 100
+		console.UpdateSpinnerText(fmt.Sprintf("Processing guidelines... %.1f%% (%d/%d)",
+			progress, i+1, len(guidelines)))
 		// Generate embedding for the guideline
 		llm := core.GetDefaultLLM()
 		rule, err := fetcher.ConvertGuidelineToRules(ctx, guideline)
@@ -221,12 +238,14 @@ func (s *sqliteRAGStore) PopulateGuidelines(ctx context.Context, language string
 			s.log.Error(ctx, "failed to convert guideline to rule")
 		}
 		if err := s.StoreRule(ctx, rule[0]); err != nil {
+			console.StopSpinner()
 			return fmt.Errorf("failed to store rule: %w", err)
 		}
 
 		content := FormatRuleContent(rule[0])
 		embedding, err := llm.CreateEmbedding(ctx, content)
 		if err != nil {
+			console.StopSpinner()
 			return fmt.Errorf("failed to create embedding: %w", err)
 		}
 
@@ -244,10 +263,21 @@ func (s *sqliteRAGStore) PopulateGuidelines(ctx context.Context, language string
 			},
 		})
 		if err != nil {
+
+			console.StopSpinner()
 			return fmt.Errorf("failed to store guideline: %w", err)
 		}
 	}
+	console.StopSpinner()
 
+	if console.color {
+		console.printf("%s %s\n",
+			aurora.Green("✓").Bold(),
+			aurora.White(fmt.Sprintf("Successfully processed %d guidelines", len(guidelines))).Bold(),
+		)
+	} else {
+		console.printf("✓ Successfully processed %d guidelines\n", len(guidelines))
+	}
 	s.log.Debug(ctx, "Finished fetch guidelines")
 	return nil
 }

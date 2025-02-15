@@ -355,3 +355,10 @@ func decompressText(compressed string) (string, error) {
 
 	return string(decompressed), nil
 }
+
+func pluralize(word string, count int) string {
+	if count == 1 {
+		return word
+	}
+	return word + "s"
+}
