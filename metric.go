@@ -32,6 +32,7 @@ type BusinessMetrics struct {
 	logger *logging.Logger
 	mu     sync.RWMutex
 
+	detectionStats *DetectionStats
 	// Category-level metrics
 	categoryMetrics map[string]*CategoryStats
 	activeSessions  map[int]*ReviewSession   // Maps PR number to session
@@ -68,11 +69,14 @@ type ThreadMetrics struct {
 
 // CategoryStats tracks statistics for each review category.
 type CategoryStats struct {
-	TotalComments int
-	ValidComments int // Comments deemed technically correct
-	OutdatedLines int // Lines modified after being flagged
-	TotalLines    int // Total lines flagged
-	LastUpdated   time.Time
+	TotalComments  int
+	ValidComments  int // Comments deemed technically correct
+	OutdatedLines  int // Lines modified after being flagged
+	TotalLines     int // Total lines flagged
+	LastUpdated    time.Time
+	TotalValidated int     // Total number of issues that went through validation
+	ValidIssues    int     // Number of issues that passed validation
+	ValidationRate float64 // Ratio of valid issues to total validated
 }
 
 // TrendAnalysis represents the performance trends for a review category.
@@ -90,6 +94,14 @@ type CommentIdentifier struct {
 	ID       string
 	Category string
 	ThreadID int64
+}
+
+type DetectionStats struct {
+	TotalIssuesDetected int
+	TotalDetectionRuns  int
+	LastUpdated         time.Time
+	DetectionLatency    time.Duration  // Track how long detection takes
+	IssuesPerFile       map[string]int // Track issues found per file
 }
 
 type ReviewMetricsCollector interface {
@@ -125,7 +137,10 @@ func NewBusinessMetrics(logger *logging.Logger) *BusinessMetrics {
 		activeThreads:     make(map[int64]*ThreadMetrics),
 		weeklyActiveUsers: 0,
 		totalReviews:      0,
-		userFeedback:      make(map[string]*FeedbackStats),
+		detectionStats: &DetectionStats{
+			IssuesPerFile: make(map[string]int),
+		},
+		userFeedback: make(map[string]*FeedbackStats),
 	}
 }
 
@@ -557,6 +572,39 @@ func (bm *BusinessMetrics) storeOptimizationResults(ctx context.Context, trends 
 	}
 
 	return nil
+}
+
+func (bm *BusinessMetrics) TrackDetectionResults(ctx context.Context, issueCount int) {
+	bm.mu.Lock()
+	defer bm.mu.Unlock()
+
+	bm.detectionStats.TotalIssuesDetected += issueCount
+	bm.detectionStats.TotalDetectionRuns++
+	bm.detectionStats.LastUpdated = time.Now()
+
+	bm.logger.Debug(ctx, "Tracked detection results: %d issues found", issueCount)
+}
+
+func (bm *BusinessMetrics) TrackValidationResult(ctx context.Context, category string, validated bool) {
+	bm.mu.Lock()
+	defer bm.mu.Unlock()
+
+	stats, exists := bm.categoryMetrics[category]
+	if !exists {
+		stats = &CategoryStats{}
+		bm.categoryMetrics[category] = stats
+	}
+
+	stats.TotalValidated++
+	if validated {
+		stats.ValidIssues++
+
+		stats.ValidationRate = float64(stats.ValidIssues) / float64(stats.TotalValidated)
+	}
+	stats.LastUpdated = time.Now()
+
+	bm.logger.Debug(ctx, "Tracked validation result for category %s: validated=%v, rate=%.2f%%",
+		category, validated, stats.ValidationRate*100)
 }
 
 // calculateImpactScore computes a composite score based on outdated rate and precision.
