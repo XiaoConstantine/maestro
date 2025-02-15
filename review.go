@@ -105,9 +105,11 @@ type PRReviewAgent struct {
 	rag           RAGStore
 	activeThreads map[int64]*ThreadTracker // Track active discussion threads
 	// TODO: should align with dspy agent interface
-	githubTools *GitHubTools // Add this field
-	stopper     *Stopper
-	metrics     *BusinessMetrics
+	githubTools  *GitHubTools // Add this field
+	stopper      *Stopper
+	metrics      *BusinessMetrics
+	ruleChecker  *RuleChecker
+	reviewFilter *ReviewFilter
 }
 
 type ThreadTracker struct {
@@ -314,6 +316,9 @@ func NewPRReviewAgent(ctx context.Context, githubTool *GitHubTools, dbPath strin
 
 	orchestrator := agents.NewFlexibleOrchestrator(memory, config)
 
+	ruleChecker := NewRuleChecker(metrics, logger)
+	// TODO: fine grain context window
+	reviewFilter := NewReviewFilter(metrics, 15, logger)
 	logger.Debug(ctx, "Successfully created orchestrator")
 	return &PRReviewAgent{
 		orchestrator: orchestrator,
@@ -322,6 +327,8 @@ func NewPRReviewAgent(ctx context.Context, githubTool *GitHubTools, dbPath strin
 		githubTools:  githubTool,
 		stopper:      stopper,
 		metrics:      metrics,
+		ruleChecker:  ruleChecker,
+		reviewFilter: reviewFilter,
 	}, nil
 }
 
@@ -574,7 +581,7 @@ func (a *PRReviewAgent) performInitialReview(ctx context.Context, tasks []PRRevi
 		// Process each chunk separately
 		task := tasks[i]
 
-		for i, chunk := range task.Chunks {
+		for chunkIdx, chunk := range task.Chunks {
 			chunkContext := map[string]interface{}{
 				"file_path": task.FilePath,
 				"chunk":     chunk.content,
@@ -598,7 +605,7 @@ func (a *PRReviewAgent) performInitialReview(ctx context.Context, tasks []PRRevi
 
 			console.ReviewingFile(task.FilePath, i+1, len(task.Changes))
 
-			message := fmt.Sprintf("⟲ Reviewing %s (chunk %d/%d)", task.FilePath, i+1, len(task.Chunks))
+			message := fmt.Sprintf("⟲ Reviewing %s (chunk %d/%d)", task.FilePath, chunkIdx+1, len(task.Chunks))
 
 			console.UpdateSpinnerText(message)
 			if console.color {
