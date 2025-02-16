@@ -128,6 +128,7 @@ func (rc *RuleChecker) Process(ctx context.Context, task agents.Task, context ma
 	return issues, nil
 }
 
+// TODO: Impl
 func (rc *RuleChecker) parseDetectionResult(result interface{}) ([]PotentialIssue, error) {
 	// Implementation of result parsing logic
 	// Convert LLM output into PotentialIssue structs
