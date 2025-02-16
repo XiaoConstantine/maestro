@@ -362,3 +362,46 @@ func pluralize(word string, count int) string {
 	}
 	return word + "s"
 }
+
+func getIntOrZero(v interface{}) int {
+	switch num := v.(type) {
+	case int:
+		return num
+	case float64:
+		return int(num)
+	default:
+		return 0
+	}
+}
+
+func getStringOrEmpty(v interface{}) string {
+	if str, ok := v.(string); ok {
+		return str
+	}
+	return ""
+}
+
+// IsEmptyResult safely checks if a result contains no items, handling different
+// potential result types that could come from our review stages. This helps us
+// distinguish between valid empty results and errors.
+func IsEmptyResult(result interface{}) bool {
+	if result == nil {
+		return true
+	}
+
+	switch v := result.(type) {
+	case []PotentialIssue:
+		// For rule checker results
+		return len(v) == 0
+	case []PRReviewComment:
+		// For review filter and final review results
+		return len(v) == 0
+	case map[string]interface{}:
+		// For structured results that might contain comments or issues
+		return len(v) == 0
+	default:
+		// For any other type, we consider it empty if it's not one of our
+		// expected result types
+		return true
+	}
+}

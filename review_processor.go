@@ -160,25 +160,38 @@ func parseReviewComments(ctx context.Context, filePath string, commentsStr strin
 }
 
 func extractComments(ctx context.Context, result interface{}, filePath string, metric *BusinessMetrics) ([]PRReviewComment, error) {
-	if comments, ok := result.([]PRReviewComment); ok {
-		return comments, nil
-	}
+	switch v := result.(type) {
 
-	resultMap, ok := result.(map[string]interface{})
-	if !ok {
-		return nil, fmt.Errorf("invalid task result type: %T", result)
-	}
-	commentsRaw, exists := resultMap["comments"]
-	if !exists {
-		return nil, fmt.Errorf("prediction result missing 'comments' field")
-	}
+	case []PotentialIssue:
+		// Rule checker results don't need comment extraction
+		if result == nil || IsEmptyResult(result) {
+			return nil, nil // Empty result is valid for rule checker
+		}
+		return nil, fmt.Errorf("rule_checker results should be processed by review_filter")
+	case map[string]interface{}:
+		if isReviewFilterResult(v) {
+			return extractFilteredComments(result, filePath, metric)
+		}
 
-	commentsStr, ok := commentsRaw.(string)
-	if !ok {
-		return nil, fmt.Errorf("comments must be string, got %T", commentsRaw)
-	}
+		resultMap, ok := result.(map[string]interface{})
+		if !ok {
+			return nil, fmt.Errorf("invalid task result type: %T", result)
+		}
+		commentsRaw, exists := resultMap["comments"]
+		if !exists {
+			return nil, fmt.Errorf("prediction result missing 'comments' field")
+		}
 
-	return parseReviewComments(ctx, filePath, commentsStr, metric)
+		commentsStr, ok := commentsRaw.(string)
+		if !ok {
+			return nil, fmt.Errorf("comments must be string, got %T", commentsRaw)
+		}
+
+		return parseReviewComments(ctx, filePath, commentsStr, metric)
+	default:
+		return nil, fmt.Errorf("unexpected result type: %T", result)
+
+	}
 }
 
 func extractReviewMetadata(metadata map[string]interface{}) (*ReviewMetadata, error) {
@@ -419,4 +432,70 @@ func extractKeyPoints(content string) string {
 	}
 
 	return keyPoints.String()
+}
+
+func extractFilteredComments(result interface{}, filePath string, metric *BusinessMetrics) ([]PRReviewComment, error) {
+	// First try to convert the result to our expected format
+	resultMap, ok := result.(map[string]interface{})
+	if !ok {
+		return nil, fmt.Errorf("invalid review filter result type: %T", result)
+	}
+
+	// Extract the comments from the result
+	commentsRaw, exists := resultMap["comments"]
+	if !exists {
+		return nil, fmt.Errorf("review filter result missing 'comments' field")
+	}
+
+	// Handle different possible comment formats
+	var comments []PRReviewComment
+	switch v := commentsRaw.(type) {
+	case string:
+		// If comments are provided as a formatted string, parse them
+		return parseReviewComments(context.Background(), filePath, v, metric)
+	case []PRReviewComment:
+		// If comments are already in the correct format
+		comments = v
+	case []interface{}:
+		// If comments are a generic array, convert each item
+		comments = make([]PRReviewComment, 0, len(v))
+		for _, item := range v {
+			if commentMap, ok := item.(map[string]interface{}); ok {
+				comment := PRReviewComment{
+					FilePath:   filePath,
+					LineNumber: getIntOrZero(commentMap["line_number"]),
+					Content:    getStringOrEmpty(commentMap["content"]),
+					Severity:   validateSeverity(getStringOrEmpty(commentMap["severity"])),
+					Category:   validateCategory(getStringOrEmpty(commentMap["category"])),
+					Suggestion: getStringOrEmpty(commentMap["suggestion"]),
+				}
+				if isValidComment(comment) {
+					comments = append(comments, comment)
+					metric.TrackReviewComment(context.Background(), comment, true)
+				}
+			}
+		}
+	default:
+		return nil, fmt.Errorf("unexpected comments format: %T", v)
+	}
+
+	return comments, nil
+}
+
+// isReviewFilterResult examines the structure of the result to determine
+// if it came from the review filter stage.
+func isReviewFilterResult(result map[string]interface{}) bool {
+	comments, ok := result["comments"].([]interface{})
+	if !ok || len(comments) == 0 {
+		return false
+	}
+
+	// Look at the first comment's structure
+	if firstComment, ok := comments[0].(map[string]interface{}); ok {
+		// Review filter results will have these distinctive fields
+		_, hasConfidence := firstComment["confidence"]
+		_, hasValidated := firstComment["validated"]
+		return hasConfidence || hasValidated
+	}
+	return false
 }

@@ -105,11 +105,9 @@ type PRReviewAgent struct {
 	rag           RAGStore
 	activeThreads map[int64]*ThreadTracker // Track active discussion threads
 	// TODO: should align with dspy agent interface
-	githubTools  *GitHubTools // Add this field
-	stopper      *Stopper
-	metrics      *BusinessMetrics
-	ruleChecker  *RuleChecker
-	reviewFilter *ReviewFilter
+	githubTools *GitHubTools // Add this field
+	stopper     *Stopper
+	metrics     *BusinessMetrics
 }
 
 type ThreadTracker struct {
@@ -256,9 +254,20 @@ func NewPRReviewAgent(ctx context.Context, githubTool *GitHubTools, dbPath strin
 	logger.Debug(ctx, "Creating orchestrator configuration")
 	analyzerConfig := agents.AnalyzerConfig{
 		BaseInstruction: `Analyze the input and determine the appropriate task type:
-		- If responding to existing comments, create a comment_response task
-		- If reviewing new code, create a code_review task
-		- If answering questions about the repository, create a repo_qa task
+		First, examine if this is new code or follow-up interaction:
+
+		For new code review:
+		- Create a rule_checker task if examining code against our taxonomy of review rules
+		- Only after rule_checker completes, create a review_filter task to validate potential issues
+		- The final code_review task should only be created after both rule checking and filtering are complete
+
+		For interaction with existing reviews:
+		- Create a comment_response task when processing replies to previous review comments
+		- This includes handling developer questions, clarifications, or pushback on previous comments
+
+		For repository exploration:
+		- Create a repo_qa task when answering questions about code patterns, architecture, or general repository information
+		- This applies when the query is about understanding existing code rather than reviewing changes
 
 		IMPORTANT FORMAT RULES:
 		1. Start fields exactly with 'analysis:' or 'tasks:' (no markdown formatting)
@@ -293,6 +302,9 @@ func NewPRReviewAgent(ctx context.Context, githubTool *GitHubTools, dbPath strin
 	}
 
 	qaProcessor := NewRepoQAProcessor(store)
+	ruleChecker := NewRuleChecker(metrics, logger)
+	// TODO: fine grain context window
+	reviewFilter := NewReviewFilter(metrics, 15, logger)
 
 	config := agents.OrchestrationConfig{
 		MaxConcurrent:  5,
@@ -307,6 +319,8 @@ func NewPRReviewAgent(ctx context.Context, githubTool *GitHubTools, dbPath strin
 			"code_review":      &CodeReviewProcessor{metrics: metrics},
 			"comment_response": &CommentResponseProcessor{metrics: metrics},
 			"repo_qa":          qaProcessor,
+			"rule_checker":     ruleChecker,
+			"review_filter":    reviewFilter,
 		},
 		Options: core.WithGenerateOptions(
 			core.WithTemperature(0.3),
@@ -316,9 +330,6 @@ func NewPRReviewAgent(ctx context.Context, githubTool *GitHubTools, dbPath strin
 
 	orchestrator := agents.NewFlexibleOrchestrator(memory, config)
 
-	ruleChecker := NewRuleChecker(metrics, logger)
-	// TODO: fine grain context window
-	reviewFilter := NewReviewFilter(metrics, 15, logger)
 	logger.Debug(ctx, "Successfully created orchestrator")
 	return &PRReviewAgent{
 		orchestrator: orchestrator,
@@ -327,8 +338,6 @@ func NewPRReviewAgent(ctx context.Context, githubTool *GitHubTools, dbPath strin
 		githubTools:  githubTool,
 		stopper:      stopper,
 		metrics:      metrics,
-		ruleChecker:  ruleChecker,
-		reviewFilter: reviewFilter,
 	}, nil
 }
 
