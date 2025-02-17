@@ -389,13 +389,13 @@ func runCLI(cfg *config) error {
 	}
 	if len(comments) != 0 {
 
-		shouldPost, err := githubTools.PreviewReview(ctx, console, cfg.prNumber, comments, agent.metrics)
+		shouldPost, err := githubTools.PreviewReview(ctx, console, cfg.prNumber, comments, agent.Metrics(ctx))
 		if err != nil {
 			logger.Error(ctx, "Failed to preview review: %v", err)
 			os.Exit(1)
 		}
 
-		console.ShowReviewMetrics(agent.metrics, comments)
+		console.ShowReviewMetrics(agent.Metrics(ctx), comments)
 
 		if shouldPost {
 			logger.Info(ctx, "Posting review comments to GitHub")
@@ -626,7 +626,7 @@ func initializeAndAskQuestions(ctx context.Context, cfg *config, console *Consol
 		return fmt.Errorf("Failed to initiliaze agent due to : %v", err)
 	}
 
-	qaProcessor, _ := agent.GetOrchestrator().GetProcessor("repo_qa")
+	qaProcessor, _ := agent.Orchestrator(ctx).GetProcessor("repo_qa")
 	// Interactive question loop
 	for {
 		var question string
