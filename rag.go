@@ -111,7 +111,7 @@ func (s *sqliteRAGStore) init() error {
 }
 
 // NewSQLiteRAGStore creates a new SQLite-backed RAG store.
-func NewSQLiteRAGStore(db *sql.DB, logger *logging.Logger) (*sqliteRAGStore, error) {
+func NewSQLiteRAGStore(db *sql.DB, logger *logging.Logger) (RAGStore, error) {
 	store := &sqliteRAGStore{
 		db:     db,
 		log:    logger,
