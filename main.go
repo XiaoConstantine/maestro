@@ -324,7 +324,7 @@ func runCLI(cfg *config) error {
 	} else {
 		console.printf("↳ Fetching changes for PR #%d\n", cfg.prNumber)
 	}
-	pr, _, _ := githubTools.client.PullRequests.Get(ctx, cfg.owner, cfg.repo, cfg.prNumber)
+	pr, _, _ := githubTools.Client().PullRequests.Get(ctx, cfg.owner, cfg.repo, cfg.prNumber)
 	console.StartReview(pr)
 
 	changes, err := githubTools.GetPullRequestChanges(ctx, cfg.prNumber)
@@ -613,7 +613,7 @@ func initializeAndAskQuestions(ctx context.Context, cfg *config, console *Consol
 	}
 	// Initialize GitHub tools and other necessary components
 	githubTools := NewGitHubTools(cfg.githubToken, cfg.owner, cfg.repo)
-	if githubTools == nil || githubTools.client == nil {
+	if githubTools == nil || githubTools.Client() == nil {
 		return fmt.Errorf("failed to initialize GitHub client")
 	}
 
