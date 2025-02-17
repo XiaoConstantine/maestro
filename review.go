@@ -98,6 +98,14 @@ const (
 	AcknowledgementMessage MessageType = "acknowledgement"
 )
 
+type ReviewAgent interface {
+	ReviewPR(ctx context.Context, prNumber int, tasks []PRReviewTask, console *Console) ([]PRReviewComment, error)
+	Stop(ctx context.Context)
+	Metrics(ctx context.Context) *BusinessMetrics
+	Orchestrator(ctx context.Context) *agents.FlexibleOrchestrator
+	Close() error
+}
+
 // PRReviewAgent handles code review using dspy-go.
 type PRReviewAgent struct {
 	orchestrator  *agents.FlexibleOrchestrator
@@ -218,7 +226,7 @@ func ExtractRelevantChanges(changes string, startline, endline int) string {
 }
 
 // NewPRReviewAgent creates a new PR review agent.
-func NewPRReviewAgent(ctx context.Context, githubTool GitHubInterface, dbPath string) (*PRReviewAgent, error) {
+func NewPRReviewAgent(ctx context.Context, githubTool GitHubInterface, dbPath string) (ReviewAgent, error) {
 	logger := logging.GetLogger()
 
 	logger.Debug(ctx, "Starting agent initialization with dbPath: %s", dbPath)
@@ -348,11 +356,16 @@ func (a *PRReviewAgent) GetGitHubTools() GitHubInterface {
 	return a.githubTools
 }
 
-func (a *PRReviewAgent) GetOrchestrator() *agents.FlexibleOrchestrator {
+func (a *PRReviewAgent) Orchestrator(ctx context.Context) *agents.FlexibleOrchestrator {
 	if a.orchestrator == nil {
 		panic("Agent orchestrator not initialized")
 	}
 	return a.orchestrator
+
+}
+
+func (a *PRReviewAgent) Metrics(ctx context.Context) *BusinessMetrics {
+	return a.metrics
 
 }
 
