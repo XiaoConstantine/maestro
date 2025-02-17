@@ -25,29 +25,11 @@ type PotentialIssue struct {
 	Metadata   map[string]interface{}
 }
 
-// RuleChecker handles the initial detection of potential code issues.
-type RuleChecker struct {
-	metrics MetricsCollector
-	rules   map[string]ReviewRule
-	logger  *logging.Logger
-}
-
 // ReviewFilter validates potential issues and generates final review comments.
 type ReviewFilter struct {
 	metrics       MetricsCollector
 	contextWindow int
 	logger        *logging.Logger
-}
-
-type RuleCheckerMetadata struct {
-	FilePath       string
-	FileContent    string
-	Changes        string
-	Guidelines     []*Content
-	ReviewPatterns []*Content
-	LineRange      LineRange
-	ChunkNumber    int
-	TotalChunks    int
 }
 
 type ReviewFilterMetadata struct {
@@ -58,81 +40,12 @@ type ReviewFilterMetadata struct {
 	LineRange   LineRange
 }
 
-func NewRuleChecker(metrics MetricsCollector, logger *logging.Logger) *RuleChecker {
-	return &RuleChecker{
-		metrics: metrics,
-		rules:   make(map[string]ReviewRule),
-		logger:  logger,
-	}
-}
-
 func NewReviewFilter(metrics MetricsCollector, contextWindow int, logger *logging.Logger) *ReviewFilter {
 	return &ReviewFilter{
 		metrics:       metrics,
 		contextWindow: contextWindow,
 		logger:        logger,
 	}
-}
-
-// RuleChecker implementation.
-func (rc *RuleChecker) Process(ctx context.Context, task agents.Task, context map[string]interface{}) (interface{}, error) {
-	metadata, err := extractRuleCheckerMetadata(task.Metadata)
-	if err != nil {
-		return nil, fmt.Errorf("failed to extract metadata: %w", err)
-	}
-
-	signature := core.NewSignature(
-		[]core.InputField{
-			{Field: core.Field{Name: "file_content"}},
-			{Field: core.Field{Name: "changes"}},
-			{Field: core.Field{Name: "guidelines"}},
-			{Field: core.Field{Name: "repo_patterns"}},
-		},
-		[]core.OutputField{
-			{Field: core.NewField("potential_issues")},
-		},
-	).WithInstruction(`Analyze the code for potential issues with high recall.
-    For each potential issue, provide:
-    - File path and line number
-    - Rule ID that detected the issue
-    - Initial confidence score (0.0-1.0)
-    - Problematic code snippet
-    - Surrounding context
-    - Preliminary suggestion
-    - Category (error-handling, code-style, etc.)
-    
-    Focus on finding all possible issues - validation will happen in the next stage.
-    Include issues even with lower confidence scores, as they will be filtered later.`)
-
-	predict := modules.NewPredict(signature)
-
-	rc.logger.Debug(ctx, "Starting issue detection for file: %s", metadata.FilePath)
-
-	result, err := predict.Process(ctx, map[string]interface{}{
-		"file_content":  metadata.FileContent,
-		"changes":       metadata.Changes,
-		"guidelines":    metadata.Guidelines,
-		"repo_patterns": metadata.ReviewPatterns,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("detection failed: %w", err)
-	}
-
-	issues, err := rc.parseDetectionResult(result)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse detection results: %w", err)
-	}
-
-	rc.metrics.TrackDetectionResults(ctx, len(issues))
-
-	return issues, nil
-}
-
-// TODO: Impl.
-func (rc *RuleChecker) parseDetectionResult(result interface{}) ([]PotentialIssue, error) {
-	// Implementation of result parsing logic
-	// Convert LLM output into PotentialIssue structs
-	return nil, nil
 }
 
 // ReviewFilter implementation.
@@ -282,59 +195,6 @@ func deriveSeverityFromConfidence(confidence float64) string {
 }
 
 // Add to review_stages.go.
-func extractRuleCheckerMetadata(metadata map[string]interface{}) (*RuleCheckerMetadata, error) {
-	rcm := &RuleCheckerMetadata{}
-
-	// Extract file information
-	if filePath, ok := metadata["file_path"].(string); ok {
-		rcm.FilePath = filePath
-	} else {
-		return nil, fmt.Errorf("missing or invalid file_path")
-	}
-
-	if content, ok := metadata["file_content"].(string); ok {
-		rcm.FileContent = content
-	} else {
-		return nil, fmt.Errorf("missing or invalid file_content")
-	}
-
-	if changes, ok := metadata["changes"].(string); ok {
-		rcm.Changes = changes
-	}
-
-	// Extract guidelines and patterns
-	if guidelines, ok := metadata["guidelines"].([]*Content); ok {
-		rcm.Guidelines = guidelines
-	}
-	if patterns, ok := metadata["repo_patterns"].([]*Content); ok {
-		rcm.ReviewPatterns = patterns
-	}
-
-	// Extract line range information
-	if rangeData, ok := metadata["line_range"].(map[string]interface{}); ok {
-		startLine, startOk := rangeData["start"].(int)
-		endLine, endOk := rangeData["end"].(int)
-		if !startOk || !endOk {
-			return nil, fmt.Errorf("invalid line range format")
-		}
-		rcm.LineRange = LineRange{
-			Start: startLine,
-			End:   endLine,
-			File:  rcm.FilePath,
-		}
-	}
-
-	// Extract chunk information
-	if chunkNum, ok := metadata["chunk_number"].(int); ok {
-		rcm.ChunkNumber = chunkNum
-	}
-	if totalChunks, ok := metadata["total_chunks"].(int); ok {
-		rcm.TotalChunks = totalChunks
-	}
-
-	return rcm, nil
-}
-
 func extractReviewFilterMetadata(metadata map[string]interface{}) (*ReviewFilterMetadata, error) {
 	rfm := &ReviewFilterMetadata{}
 
