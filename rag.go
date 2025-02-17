@@ -270,13 +270,13 @@ func (s *sqliteRAGStore) PopulateGuidelines(ctx context.Context, language string
 	}
 	console.StopSpinner()
 
-	if console.color {
-		console.printf("%s %s\n",
+	if console.Color() {
+		console.Printf("%s %s\n",
 			aurora.Green("✓").Bold(),
 			aurora.White(fmt.Sprintf("Successfully processed %d guidelines", len(guidelines))).Bold(),
 		)
 	} else {
-		console.printf("✓ Successfully processed %d guidelines\n", len(guidelines))
+		console.Printf("✓ Successfully processed %d guidelines\n", len(guidelines))
 	}
 	s.log.Debug(ctx, "Finished fetch guidelines")
 	return nil

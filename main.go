@@ -315,14 +315,14 @@ func runCLI(cfg *config) error {
 
 	logger.Debug(ctx, "Fetching changes for PR #%d", cfg.prNumber)
 	// Before calling changes, err := githubTools.GetPullRequestChanges()
-	if console.color {
-		console.printf("%s %s %s\n",
+	if console.Color() {
+		console.Printf("%s %s %s\n",
 			aurora.Blue("↳").Bold(), // Arrow indicator for fetching
 			aurora.White("Fetching changes for PR").Bold(),
 			aurora.Cyan(fmt.Sprintf("#%d", cfg.prNumber)).Bold(),
 		)
 	} else {
-		console.printf("↳ Fetching changes for PR #%d\n", cfg.prNumber)
+		console.Printf("↳ Fetching changes for PR #%d\n", cfg.prNumber)
 	}
 	pr, _, _ := githubTools.Client().PullRequests.Get(ctx, cfg.owner, cfg.repo, cfg.prNumber)
 	console.StartReview(pr)
@@ -335,14 +335,14 @@ func runCLI(cfg *config) error {
 	tasks := make([]PRReviewTask, 0, len(changes.Files))
 	for _, file := range changes.Files {
 
-		if console.color {
-			console.printf("\n%s Processing file: %s %s\n",
+		if console.Color() {
+			console.Printf("\n%s Processing file: %s %s\n",
 				aurora.Blue("→").Bold(),
 				aurora.Cyan(file.FilePath).Bold(),
 				aurora.Gray(12, fmt.Sprintf("(+%d/-%d lines)", file.Additions, file.Deletions)),
 			)
 		} else {
-			console.printf("\n→ Processing file: %s (+%d/-%d lines)\n",
+			console.Printf("\n→ Processing file: %s (+%d/-%d lines)\n",
 				file.FilePath, file.Additions, file.Deletions)
 		}
 		// Log file being processed
@@ -363,8 +363,8 @@ func runCLI(cfg *config) error {
 		os.Exit(1)
 	}
 
-	if console.color {
-		console.printf("%s %s %s\n",
+	if console.Color() {
+		console.Printf("%s %s %s\n",
 			aurora.Green("⚡").Bold(),
 			aurora.White(fmt.Sprintf("Starting code review for %d %s",
 				len(tasks),
@@ -372,7 +372,7 @@ func runCLI(cfg *config) error {
 			aurora.Blue("...").String(),
 		)
 	} else {
-		console.printf("⚡ Starting code review for %d %s...\n",
+		console.Printf("⚡ Starting code review for %d %s...\n",
 			len(tasks),
 			pluralize("file", len(tasks)))
 	}
@@ -500,7 +500,7 @@ Cloud Models (Anthropic, Google):
 
 			// Find the selected model and update configuration
 			if selectedChoice := findSelectedChoice(selectedOption, choices, options); selectedChoice != nil {
-				console.printf("Select choice: %s", selectedChoice)
+				console.Printf("Select choice: %s", selectedChoice)
 				// Update configuration based on selection
 				cfg.modelProvider = selectedChoice.Provider
 				cfg.modelName = string(selectedChoice.ID)
@@ -538,7 +538,7 @@ Examples:
 					selectedChoice.Provider != "llamacpp" &&
 					cfg.apiKey == "" {
 					if err := handleAPIKeySetup(cfg, selectedChoice); err != nil {
-						console.printf("got error verify key: %v", err)
+						console.Printf("got error verify key: %v", err)
 
 						return err
 					}
@@ -607,7 +607,7 @@ Examples:
 	}
 }
 
-func initializeAndAskQuestions(ctx context.Context, cfg *config, console *Console) error {
+func initializeAndAskQuestions(ctx context.Context, cfg *config, console ConsoleInterface) error {
 	if cfg.githubToken == "" {
 		return fmt.Errorf("GitHub token is required")
 	}
@@ -655,18 +655,18 @@ func initializeAndAskQuestions(ctx context.Context, cfg *config, console *Consol
 		}
 		if response, ok := result.(*QAResponse); ok {
 			// Print a separator line for visual clarity
-			console.println("\n" + strings.Repeat("─", 80))
+			console.Println("\n" + strings.Repeat("─", 80))
 
 			// Format and print the main answer using structured sections
 			formattedAnswer := formatStructuredAnswer(response.Answer)
-			console.println(formattedAnswer)
+			console.Println(formattedAnswer)
 
 			// Print source files in a tree-like structure if available
 			if len(response.SourceFiles) > 0 {
-				if console.color {
-					console.println("\n" + aurora.Blue("Source Files:").String())
+				if console.Color() {
+					console.Println("\n" + aurora.Blue("Source Files:").String())
 				} else {
-					console.println("\nSource Files:")
+					console.Println("\nSource Files:")
 				}
 
 				// Group files by directory for better organization
@@ -675,7 +675,7 @@ func initializeAndAskQuestions(ctx context.Context, cfg *config, console *Consol
 			}
 
 			// Print final separator
-			console.println("\n" + strings.Repeat("─", 80) + "\n")
+			console.Println("\n" + strings.Repeat("─", 80) + "\n")
 		}
 	}
 }

@@ -19,6 +19,29 @@ import (
 	"github.com/mattn/go-isatty"
 )
 
+type ConsoleInterface interface {
+	StartSpinner(message string)
+	StopSpinner()
+	WithSpinner(ctx context.Context, message string, fn func() error) error
+	ShowComments(comments []PRReviewComment, metric MetricsCollector)
+	ShowSummary(comments []PRReviewComment, metric MetricsCollector)
+	StartReview(pr *github.PullRequest)
+	ReviewingFile(file string, current, total int)
+	ConfirmReviewPost(commentCount int) (bool, error)
+	ReviewComplete()
+	UpdateSpinnerText(text string)
+	ShowReviewMetrics(metrics MetricsCollector, comments []PRReviewComment)
+	Confirm(opts PromptOptions) (bool, error)
+	FileError(filepath string, err error)
+	Printf(format string, a ...interface{})
+	Println(a ...interface{})
+	PrintHeader(text string)
+	NoIssuesFound(file string)
+	SeverityIcon(severity string) string
+	Color() bool
+	Spinner() *spinner.Spinner
+}
+
 // Console handles user-facing output separate from logging.
 type Console struct {
 	w       io.Writer
@@ -56,6 +79,74 @@ func DefaultPromptOptions() PromptOptions {
 	}
 }
 
+func DefaultSpinnerConfig() SpinnerConfig {
+	return SpinnerConfig{
+		Color:   "cyan",
+		Speed:   100 * time.Millisecond,
+		CharSet: spinner.CharSets[14], // Using the character set from your example
+		Prefix:  "Processing ",
+		Suffix:  "",
+	}
+}
+
+func NewConsole(w io.Writer, logger *logging.Logger, cfg *SpinnerConfig) ConsoleInterface {
+	if cfg == nil {
+		defaultCfg := DefaultSpinnerConfig()
+		cfg = &defaultCfg
+	}
+
+	s := spinner.New(cfg.CharSet, cfg.Speed)
+	s.Prefix = cfg.Prefix
+	s.Suffix = cfg.Suffix
+
+	if err := s.Color(cfg.Color); err != nil {
+		logger.Warn(context.Background(), "Failed to set spinner color: %v", err)
+	}
+	// Detect if terminal supports color
+	color := true
+	if f, ok := w.(*os.File); ok {
+		color = isatty.IsTerminal(f.Fd())
+	}
+
+	return &Console{
+		w:       w,
+		logger:  logger,
+		color:   color,
+		spinner: s,
+	}
+}
+
+func (c *Console) Spinner() *spinner.Spinner {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.spinner
+
+}
+
+func (c *Console) StartSpinner(message string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.spinner.Suffix = fmt.Sprintf(" %s", message)
+	c.spinner.Start()
+}
+
+// StopSpinner stops the current spinner.
+func (c *Console) StopSpinner() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.spinner.Active() {
+		c.spinner.Stop()
+	}
+}
+
+func (c *Console) Color() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.color
+}
+
 func (c *Console) Confirm(opts PromptOptions) (bool, error) {
 	// Create the survey prompt with styling
 	prompt := &survey.Confirm{
@@ -86,9 +177,9 @@ func (c *Console) Confirm(opts PromptOptions) (bool, error) {
 	// Special handling for interrupt (Ctrl+C)
 	if err == terminal.InterruptErr {
 		if c.color {
-			c.println(aurora.Red("\n✖ Operation cancelled").String())
+			c.Println(aurora.Red("\n✖ Operation cancelled").String())
 		} else {
-			c.println("\n✖ Operation cancelled")
+			c.Println("\n✖ Operation cancelled")
 		}
 		return false, nil
 	}
@@ -111,61 +202,6 @@ func (c *Console) ConfirmReviewPost(commentCount int) (bool, error) {
 	opts.Color = c.color
 
 	return c.Confirm(opts)
-}
-
-func DefaultSpinnerConfig() SpinnerConfig {
-	return SpinnerConfig{
-		Color:   "cyan",
-		Speed:   100 * time.Millisecond,
-		CharSet: spinner.CharSets[14], // Using the character set from your example
-		Prefix:  "Processing ",
-		Suffix:  "",
-	}
-}
-
-func NewConsole(w io.Writer, logger *logging.Logger, cfg *SpinnerConfig) *Console {
-	if cfg == nil {
-		defaultCfg := DefaultSpinnerConfig()
-		cfg = &defaultCfg
-	}
-
-	s := spinner.New(cfg.CharSet, cfg.Speed)
-	s.Prefix = cfg.Prefix
-	s.Suffix = cfg.Suffix
-
-	if err := s.Color(cfg.Color); err != nil {
-		logger.Warn(context.Background(), "Failed to set spinner color: %v", err)
-	}
-	// Detect if terminal supports color
-	color := true
-	if f, ok := w.(*os.File); ok {
-		color = isatty.IsTerminal(f.Fd())
-	}
-
-	return &Console{
-		w:       w,
-		logger:  logger,
-		color:   color,
-		spinner: s,
-	}
-}
-
-func (c *Console) StartSpinner(message string) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	c.spinner.Suffix = fmt.Sprintf(" %s", message)
-	c.spinner.Start()
-}
-
-// StopSpinner stops the current spinner.
-func (c *Console) StopSpinner() {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	if c.spinner.Active() {
-		c.spinner.Stop()
-	}
 }
 
 // Helper method for handling LLM operations with spinner.
@@ -217,7 +253,7 @@ func (c *Console) printFields(fields map[string]interface{}) {
 		}
 
 		// Print the formatted line
-		c.printf("%s : %v\n", label, fields[k])
+		c.Printf("%s : %v\n", label, fields[k])
 	}
 }
 
@@ -248,7 +284,7 @@ func (c *Console) StartReview(pr *github.PullRequest) {
 		changedFiles = *pr.ChangedFiles
 	}
 
-	c.printHeader(fmt.Sprintf("Reviewing PR #%d: %s", pr.Number, title))
+	c.PrintHeader(fmt.Sprintf("Reviewing PR #%d: %s", pr.Number, title))
 
 	// Now we use interface{} for the map to handle different value types
 	c.printFields(map[string]interface{}{
@@ -256,22 +292,22 @@ func (c *Console) StartReview(pr *github.PullRequest) {
 		"Author":     author,
 		"Files":      fmt.Sprintf("%d files changed", changedFiles),
 	})
-	c.println()
+	c.Println()
 }
 func (c *Console) ReviewingFile(file string, current, total int) {
 	if c.color {
-		c.printf("%s %s %s\n",
+		c.Printf("%s %s %s\n",
 			aurora.Blue("⟳").Bold(),
 			aurora.White(fmt.Sprintf("[%d/%d]", current, total)).Bold(),
 			aurora.Cyan(fmt.Sprintf("Analyzing %s...", file)).Bold(),
 		)
 	} else {
-		c.printf("⟳ [%d/%d] Analyzing %s...\n", current, total, file)
+		c.Printf("⟳ [%d/%d] Analyzing %s...\n", current, total, file)
 	}
 }
 
 func (c *Console) NoIssuesFound(file string) {
-	c.printf("✨ No issues found in %s\n", file)
+	c.Printf("✨ No issues found in %s\n", file)
 }
 
 func (c *Console) ShowComments(comments []PRReviewComment, metric MetricsCollector) {
@@ -279,32 +315,32 @@ func (c *Console) ShowComments(comments []PRReviewComment, metric MetricsCollect
 		return
 	}
 
-	c.println("\nReview Comments:")
+	c.Println("\nReview Comments:")
 	for _, comment := range comments {
 		if c.color {
-			c.printf("%s %s:%d\n",
-				c.severityIcon(comment.Severity),
+			c.Printf("%s %s:%d\n",
+				c.SeverityIcon(comment.Severity),
 				comment.FilePath,
 				comment.LineNumber,
 			)
 		} else {
-			c.printf("[%s] %s:%d\n",
+			c.Printf("[%s] %s:%d\n",
 				comment.Severity,
 				comment.FilePath,
 				comment.LineNumber,
 			)
 		}
-		c.println(indent(comment.Content, 2))
+		c.Println(indent(comment.Content, 2))
 
 		if comment.Suggestion != "" {
 			if c.color {
-				c.println(aurora.Green("  Suggestion:").String())
+				c.Println(aurora.Green("  Suggestion:").String())
 			} else {
-				c.println("  Suggestion:")
+				c.Println("  Suggestion:")
 			}
-			c.println(indent(comment.Suggestion, 4))
+			c.Println(indent(comment.Suggestion, 4))
 		}
-		c.println()
+		c.Println()
 
 		if err := c.collectFeedback(comment, metric); err != nil {
 			c.logger.Warn(context.Background(), "Failed to collect feedback: %v", err)
@@ -313,7 +349,7 @@ func (c *Console) ShowComments(comments []PRReviewComment, metric MetricsCollect
 }
 
 func (c *Console) ShowSummary(comments []PRReviewComment, metric MetricsCollector) {
-	c.printHeader("Review Summary")
+	c.PrintHeader("Review Summary")
 
 	// Group by severity
 	bySeverity := make(map[string]int)
@@ -322,15 +358,15 @@ func (c *Console) ShowSummary(comments []PRReviewComment, metric MetricsCollecto
 	}
 
 	if len(bySeverity) == 0 {
-		c.println("✨ No issues found")
+		c.Println("✨ No issues found")
 		return
 	}
 
 	// Print counts by severity
 	for _, severity := range []string{"critical", "warning", "suggestion"} {
 		if count := bySeverity[severity]; count > 0 {
-			icon := c.severityIcon(severity)
-			c.printf("%s %s: %d\n", icon, severity, count)
+			icon := c.SeverityIcon(severity)
+			c.Printf("%s %s: %d\n", icon, severity, count)
 		}
 	}
 	c.ShowComments(comments, metric)
@@ -339,32 +375,30 @@ func (c *Console) ShowSummary(comments []PRReviewComment, metric MetricsCollecto
 
 func (c *Console) FileError(filepath string, err error) {
 	if c.color {
-		c.printf("%s Error processing %s: %v\n",
+		c.Printf("%s Error processing %s: %v\n",
 			aurora.Red("✖").String(),
 			aurora.Bold(filepath).String(),
 			err)
 	} else {
-		c.printf("✖ Error processing %s: %v\n", filepath, err)
+		c.Printf("✖ Error processing %s: %v\n", filepath, err)
 	}
 }
 
 func (c *Console) PostingComments(count int) {
 	if count > 0 {
-		c.printf("\nPosting %d comments to GitHub...\n", count)
+		c.Printf("\nPosting %d comments to GitHub...\n", count)
 	}
 }
 
 func (c *Console) ReviewComplete() {
 	if c.color {
-		c.println(aurora.Green("\n✓ Review completed successfully").String())
+		c.Println(aurora.Green("\n✓ Review completed successfully").String())
 	} else {
-		c.println("\n✓ Review completed successfully")
+		c.Println("\n✓ Review completed successfully")
 	}
 }
 
-// Helper methods
-
-func (c *Console) severityIcon(severity string) string {
+func (c *Console) SeverityIcon(severity string) string {
 	if !c.color {
 		return "[" + severity + "]"
 	}
@@ -381,26 +415,26 @@ func (c *Console) severityIcon(severity string) string {
 	}
 }
 
-func (c *Console) printHeader(text string) {
+func (c *Console) PrintHeader(text string) {
 	if c.color {
 		text = aurora.Bold(text).String()
 	}
-	c.printf("\n=== %s ===\n", text)
+	c.Printf("\n=== %s ===\n", text)
 }
 
-func (c *Console) println(a ...interface{}) {
+func (c *Console) Println(a ...interface{}) {
 	fmt.Fprintln(c.w, a...)
 }
 
-func (c *Console) printf(format string, a ...interface{}) {
+func (c *Console) Printf(format string, a ...interface{}) {
 	fmt.Fprintf(c.w, format, a...)
 }
 
 func (c *Console) ShowReviewMetrics(metrics MetricsCollector, comments []PRReviewComment) {
-	c.printHeader("Review Metrics Summary")
+	c.PrintHeader("Review Metrics Summary")
 
 	// First show immediate review statistics
-	c.println("\nImmediate Review Impact:")
+	c.Println("\nImmediate Review Impact:")
 
 	// Group comments by category for analysis
 	categoryCounts := make(map[string]int)
@@ -412,14 +446,14 @@ func (c *Console) ShowReviewMetrics(metrics MetricsCollector, comments []PRRevie
 
 	// Show total comments with breakdown
 	if c.color {
-		c.printf("Total Comments: %s\n", aurora.Blue(len(comments)).Bold())
+		c.Printf("Total Comments: %s\n", aurora.Blue(len(comments)).Bold())
 	} else {
-		c.printf("Total Comments: %d\n", len(comments))
+		c.Printf("Total Comments: %d\n", len(comments))
 	}
 
 	// Show category distribution
 	if len(categoryCounts) > 0 {
-		c.println("\nComments by Category:")
+		c.Println("\nComments by Category:")
 		categories := make([]string, 0, len(categoryCounts))
 		for category := range categoryCounts {
 			categories = append(categories, category)
@@ -431,39 +465,39 @@ func (c *Console) ShowReviewMetrics(metrics MetricsCollector, comments []PRRevie
 			percentage := float64(count) / float64(len(comments)) * 100
 
 			if c.color {
-				c.printf("  %-25s %s (%0.1f%%)\n",
+				c.Printf("  %-25s %s (%0.1f%%)\n",
 					aurora.Blue(category),
 					aurora.White(count).Bold(),
 					percentage)
 			} else {
-				c.printf("  %-25s %d (%0.1f%%)\n", category, count, percentage)
+				c.Printf("  %-25s %d (%0.1f%%)\n", category, count, percentage)
 			}
 
 			// Show category-specific metrics
 			if stats := metrics.GetCategoryMetrics(category); stats.TotalComments > 0 {
 				outdatedRate := stats.GetOutdatedRate() * 100
-				c.printf("    • Historical Outdated Rate: %0.1f%%\n", outdatedRate)
+				c.Printf("    • Historical Outdated Rate: %0.1f%%\n", outdatedRate)
 			}
 		}
 	}
 
 	// Show severity distribution
 	if len(severityCounts) > 0 {
-		c.println("\nComments by Severity:")
+		c.Println("\nComments by Severity:")
 		severities := []string{"critical", "warning", "suggestion"}
 		for _, severity := range severities {
 			if count := severityCounts[severity]; count > 0 {
 				percentage := float64(count) / float64(len(comments)) * 100
-				icon := c.severityIcon(severity)
+				icon := c.SeverityIcon(severity)
 
 				if c.color {
-					c.printf("  %s %-12s %s (%0.1f%%)\n",
+					c.Printf("  %s %-12s %s (%0.1f%%)\n",
 						icon,
 						severity,
 						aurora.White(count).Bold(),
 						percentage)
 				} else {
-					c.printf("  %s %-12s %d (%0.1f%%)\n",
+					c.Printf("  %s %-12s %d (%0.1f%%)\n",
 						icon,
 						severity,
 						count,
@@ -474,7 +508,7 @@ func (c *Console) ShowReviewMetrics(metrics MetricsCollector, comments []PRRevie
 	}
 
 	// Show historical impact metrics if available
-	c.println("\nHistorical Impact Metrics:")
+	c.Println("\nHistorical Impact Metrics:")
 	c.printFields(map[string]interface{}{
 		"Overall Outdated Rate": fmt.Sprintf("%0.1f%%", metrics.GetOverallOutdatedRate()*100),
 		"Weekly Active Users":   metrics.GetWeeklyActiveUsers(),
@@ -482,10 +516,10 @@ func (c *Console) ShowReviewMetrics(metrics MetricsCollector, comments []PRRevie
 	})
 
 	// Add helpful context about the metrics
-	c.println("\nMetric Explanations:")
-	c.println("• Outdated Rate measures how often flagged code is modified, indicating review effectiveness")
-	c.println("• Review Response Rate shows how frequently developers engage with review comments")
-	c.println("• Historical metrics help track long-term impact of automated reviews")
+	c.Println("\nMetric Explanations:")
+	c.Println("• Outdated Rate measures how often flagged code is modified, indicating review effectiveness")
+	c.Println("• Review Response Rate shows how frequently developers engage with review comments")
+	c.Println("• Historical metrics help track long-term impact of automated reviews")
 }
 
 func (c *Console) collectFeedback(comment PRReviewComment, metric MetricsCollector) error {

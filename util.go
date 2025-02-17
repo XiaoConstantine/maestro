@@ -205,7 +205,7 @@ func groupFilesByDirectory(files []string) map[string][]string {
 }
 
 // Helper function to print file tree.
-func printFileTree(console *Console, filesByDir map[string][]string) {
+func printFileTree(console ConsoleInterface, filesByDir map[string][]string) {
 	// Sort directories for consistent output
 	dirs := make([]string, 0, len(filesByDir))
 	for dir := range filesByDir {
@@ -215,10 +215,10 @@ func printFileTree(console *Console, filesByDir map[string][]string) {
 
 	for _, dir := range dirs {
 		files := filesByDir[dir]
-		if console.color {
-			console.printf("📁 %s\n", aurora.Blue(dir).String())
+		if console.Color() {
+			console.Printf("📁 %s\n", aurora.Blue(dir).String())
 		} else {
-			console.printf("📁 %s\n", dir)
+			console.Printf("📁 %s\n", dir)
 		}
 
 		for i, file := range files {
@@ -226,10 +226,10 @@ func printFileTree(console *Console, filesByDir map[string][]string) {
 			if i == len(files)-1 {
 				prefix = "   └── "
 			}
-			if console.color {
-				console.printf("%s%s\n", prefix, aurora.Cyan(file).String())
+			if console.Color() {
+				console.Printf("%s%s\n", prefix, aurora.Cyan(file).String())
 			} else {
-				console.printf("%s%s\n", prefix, file)
+				console.Printf("%s%s\n", prefix, file)
 			}
 		}
 	}
