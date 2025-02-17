@@ -99,7 +99,7 @@ const (
 )
 
 type ReviewAgent interface {
-	ReviewPR(ctx context.Context, prNumber int, tasks []PRReviewTask, console *Console) ([]PRReviewComment, error)
+	ReviewPR(ctx context.Context, prNumber int, tasks []PRReviewTask, console ConsoleInterface) ([]PRReviewComment, error)
 	Stop(ctx context.Context)
 	Metrics(ctx context.Context) MetricsCollector
 	Orchestrator(ctx context.Context) *agents.FlexibleOrchestrator
@@ -378,7 +378,7 @@ func (a *PRReviewAgent) Close() error {
 }
 
 // ReviewPR reviews a complete pull request.
-func (a *PRReviewAgent) ReviewPR(ctx context.Context, prNumber int, tasks []PRReviewTask, console *Console) ([]PRReviewComment, error) {
+func (a *PRReviewAgent) ReviewPR(ctx context.Context, prNumber int, tasks []PRReviewTask, console ConsoleInterface) ([]PRReviewComment, error) {
 	if a.activeThreads == nil {
 		a.activeThreads = make(map[int64]*ThreadTracker)
 	}
@@ -426,7 +426,7 @@ func (a *PRReviewAgent) ReviewPR(ctx context.Context, prNumber int, tasks []PRRe
 	}
 
 	for _, thread := range newThreadsByOthers {
-		console.printf("Generating response to new thread %d (file: %s)\n",
+		console.Printf("Generating response to new thread %d (file: %s)\n",
 			thread.ThreadID, thread.LastComment.FilePath)
 
 		_, err := a.generateResponse(ctx, thread, console)
@@ -437,13 +437,13 @@ func (a *PRReviewAgent) ReviewPR(ctx context.Context, prNumber int, tasks []PRRe
 		}
 	}
 	if len(myOpenThreads) == 0 && len(repliestoMe) == 0 {
-		if console.color {
-			console.printf("%s %s\n",
+		if console.Color() {
+			console.Printf("%s %s\n",
 				aurora.Cyan("⋮").Bold(),
 				aurora.White("No existing review found, performing initial review").Bold(),
 			)
 		} else {
-			console.println("⋮ No existing review found, performing initial review")
+			console.Println("⋮ No existing review found, performing initial review")
 		}
 		comments, err := a.performInitialReview(ctx, tasks, console)
 		if err != nil {
@@ -467,7 +467,7 @@ func (a *PRReviewAgent) ReviewPR(ctx context.Context, prNumber int, tasks []PRRe
 	}
 
 	if len(allComments) == 0 {
-		console.println(aurora.Cyan("\nNo valid comments found need to reply"))
+		console.Println(aurora.Cyan("\nNo valid comments found need to reply"))
 	} else {
 		for _, comment := range allComments {
 			if comment.ThreadID != nil {
@@ -505,7 +505,7 @@ func (a *PRReviewAgent) Stop(ctx context.Context) {
 	})
 }
 
-func (a *PRReviewAgent) performInitialReview(ctx context.Context, tasks []PRReviewTask, console *Console) ([]PRReviewComment, error) {
+func (a *PRReviewAgent) performInitialReview(ctx context.Context, tasks []PRReviewTask, console ConsoleInterface) ([]PRReviewComment, error) {
 	var allComments []PRReviewComment
 
 	var repoPatterns []*Content
@@ -526,7 +526,7 @@ func (a *PRReviewAgent) performInitialReview(ctx context.Context, tasks []PRRevi
 		err = console.WithSpinner(ctx, message, func() error {
 			for i, chunk := range chunks {
 
-				console.spinner.Suffix = fmt.Sprintf(" (chunk %d/%d) of %s", i+1, len(chunks), task.FilePath)
+				console.Spinner().Suffix = fmt.Sprintf(" (chunk %d/%d) of %s", i+1, len(chunks), task.FilePath)
 				fileEmbedding, err := llm.CreateEmbedding(ctx, chunk)
 				if err != nil {
 					return fmt.Errorf("failed to create file embedding: %w", err)
@@ -557,8 +557,8 @@ func (a *PRReviewAgent) performInitialReview(ctx context.Context, tasks []PRRevi
 			console.FileError(task.FilePath, fmt.Errorf("failed to analyze patterns: %w", err))
 			continue
 		}
-		if console.color {
-			console.printf("%s %s %s %s %s\n",
+		if console.Color() {
+			console.Printf("%s %s %s %s %s\n",
 				aurora.Green("✓").Bold(),
 				aurora.White("Analysis complete for").Bold(),
 				aurora.Cyan(filepath.Base(task.FilePath)).Bold(),
@@ -567,7 +567,7 @@ func (a *PRReviewAgent) performInitialReview(ctx context.Context, tasks []PRRevi
 				aurora.Blue("...").String(),
 			)
 		} else {
-			console.printf("✓ Analysis complete for %s: found %d repository patterns and %d guideline matches across %d chunks\n",
+			console.Printf("✓ Analysis complete for %s: found %d repository patterns and %d guideline matches across %d chunks\n",
 				filepath.Base(task.FilePath), totalRepoMatches, totalGuidelineMatches, len(chunks))
 		}
 	}
@@ -630,15 +630,15 @@ func (a *PRReviewAgent) performInitialReview(ctx context.Context, tasks []PRRevi
 			message := fmt.Sprintf("⟲ Reviewing %s (chunk %d/%d)", task.FilePath, chunkIdx+1, len(task.Chunks))
 
 			console.UpdateSpinnerText(message)
-			if console.color {
+			if console.Color() {
 				parts := strings.SplitN(message, " ", 2) // Split into icon and rest
 				coloredMessage := fmt.Sprintf("%s %s",
 					aurora.Blue(parts[0]).Bold(),  // Color the icon
 					aurora.White(parts[1]).Bold(), // Color the rest of the message
 				)
-				console.println(coloredMessage)
+				console.Println(coloredMessage)
 			} else {
-				console.println(message)
+				console.Println(message)
 			}
 			err := console.WithSpinner(ctx, message, func() error {
 				result, err := a.orchestrator.Process(ctx,
@@ -674,15 +674,15 @@ func (a *PRReviewAgent) performInitialReview(ctx context.Context, tasks []PRRevi
 
 }
 
-func (a *PRReviewAgent) processExistingComments(ctx context.Context, prNumber int, console *Console) error {
+func (a *PRReviewAgent) processExistingComments(ctx context.Context, prNumber int, console ConsoleInterface) error {
 	logger := logging.GetLogger()
-	if console.color {
-		console.printf("\n%s %s\n",
+	if console.Color() {
+		console.Printf("\n%s %s\n",
 			aurora.Blue("↳").Bold(),
 			aurora.White("Processing existing comments...").Bold(),
 		)
 	} else {
-		console.println("\n↳ Processing existing comments...")
+		console.Println("\n↳ Processing existing comments...")
 	}
 	githubTools := a.GetGitHubTools()
 
@@ -763,7 +763,7 @@ func (a *PRReviewAgent) processExistingComments(ctx context.Context, prNumber in
 	return nil
 }
 
-func (a *PRReviewAgent) monitorAndRespond(ctx context.Context, prNumber int, console *Console) error {
+func (a *PRReviewAgent) monitorAndRespond(ctx context.Context, prNumber int, console ConsoleInterface) error {
 	githubTools := a.GetGitHubTools()
 
 	return githubTools.MonitorPRComments(ctx, prNumber, func(comment *github.PullRequestComment) {
@@ -776,7 +776,7 @@ func (a *PRReviewAgent) monitorAndRespond(ctx context.Context, prNumber int, con
 }
 
 // processComment handles the processing of a single PR comment.
-func (a *PRReviewAgent) processComment(ctx context.Context, comment *github.PullRequestComment, console *Console) {
+func (a *PRReviewAgent) processComment(ctx context.Context, comment *github.PullRequestComment, console ConsoleInterface) {
 	logger := logging.GetLogger()
 
 	// Extract comment identifiers
@@ -864,9 +864,9 @@ func (a *PRReviewAgent) processComment(ctx context.Context, comment *github.Pull
 		}
 	}
 }
-func (a *PRReviewAgent) generateResponse(ctx context.Context, thread *ThreadTracker, console *Console) (*PRReviewComment, error) {
+func (a *PRReviewAgent) generateResponse(ctx context.Context, thread *ThreadTracker, console ConsoleInterface) (*PRReviewComment, error) {
 	logger := logging.GetLogger()
-	console.println(aurora.Cyan("Generating response..."))
+	console.Println(aurora.Cyan("Generating response..."))
 	if thread.FileContent == "" {
 		if err := a.refreshThreadContent(ctx, thread); err != nil {
 			logger.Warn(ctx, "Could not refresh file content for %s: %v",

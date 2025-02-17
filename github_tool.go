@@ -23,7 +23,7 @@ type GitHubInterface interface {
 	CreateReviewComments(ctx context.Context, prNumber int, comments []PRReviewComment) error
 	GetLatestCommitSHA(ctx context.Context, branch string) (string, error)
 	MonitorPRComments(ctx context.Context, prNumber int, callback func(comment *github.PullRequestComment)) error
-	PreviewReview(ctx context.Context, console *Console, prNumber int, comments []PRReviewComment, metric MetricsCollector) (bool, error)
+	PreviewReview(ctx context.Context, console ConsoleInterface, prNumber int, comments []PRReviewComment, metric MetricsCollector) (bool, error)
 
 	GetAuthenticatedUser(ctx context.Context) string
 	GetRepositoryInfo(ctx context.Context) RepositoryInfo
@@ -348,7 +348,7 @@ func (g *GitHubTools) GetLatestCommitSHA(ctx context.Context, branch string) (st
 	return ref.Object.GetSHA(), nil
 }
 
-func (g *GitHubTools) PreviewReview(ctx context.Context, console *Console, prNumber int, comments []PRReviewComment, metric MetricsCollector) (bool, error) {
+func (g *GitHubTools) PreviewReview(ctx context.Context, console ConsoleInterface, prNumber int, comments []PRReviewComment, metric MetricsCollector) (bool, error) {
 	// Use spinner while fetching PR changes
 	var changes *PRChanges
 	err := console.WithSpinner(ctx, "Fetching PR changes", func() error {
@@ -384,15 +384,15 @@ func (g *GitHubTools) PreviewReview(ctx context.Context, console *Console, prNum
 			validComments = append(validComments, comment)
 		} else {
 			skippedComments = append(skippedComments, comment)
-			console.printf("\nNote: Comment on %s line %d will be skipped (unchanged line)\n",
+			console.Printf("\nNote: Comment on %s line %d will be skipped (unchanged line)\n",
 				comment.FilePath, comment.LineNumber)
 		}
 	}
 	if len(skippedComments) != 0 {
-		console.printf("\nSkipping :%d comments", len(skippedComments))
+		console.Printf("\nSkipping :%d comments", len(skippedComments))
 	}
 	if len(validComments) == 0 {
-		console.println("\nNo comments can be posted - all comments are on unchanged lines")
+		console.Println("\nNo comments can be posted - all comments are on unchanged lines")
 		return false, nil
 	}
 	// Group comments by file
@@ -409,10 +409,10 @@ func (g *GitHubTools) PreviewReview(ctx context.Context, console *Console, prNum
 	}
 
 	// Print preview header
-	if console.color {
-		console.printHeader(aurora.Bold("Pull Request Review Preview").String())
+	if console.Color() {
+		console.PrintHeader(aurora.Bold("Pull Request Review Preview").String())
 	} else {
-		console.printHeader("Pull Request Review Preview")
+		console.PrintHeader("Pull Request Review Preview")
 	}
 
 	// For each file with comments
@@ -430,12 +430,12 @@ func (g *GitHubTools) PreviewReview(ctx context.Context, console *Console, prNum
 		}
 
 		// Print file header with styling
-		if console.color {
-			console.println(aurora.Blue("📄").String(), aurora.Bold(filePath).String())
+		if console.Color() {
+			console.Println(aurora.Blue("📄").String(), aurora.Bold(filePath).String())
 		} else {
-			console.printf("📄 %s\n", filePath)
+			console.Printf("📄 %s\n", filePath)
 		}
-		console.println(strings.Repeat("─", 80))
+		console.Println(strings.Repeat("─", 80))
 
 		// Sort comments by line number
 		sort.Slice(fileComments, func(i, j int) bool {
@@ -459,7 +459,7 @@ func (g *GitHubTools) PreviewReview(ctx context.Context, console *Console, prNum
 
 			if !shownLines[comment.LineNumber] {
 				// Print the code context with gutters
-				console.println(aurora.Cyan("┃").String() + " " +
+				console.Println(aurora.Cyan("┃").String() + " " +
 					aurora.Cyan("┃").String() + " " +
 					aurora.Cyan("┃").String())
 
@@ -469,61 +469,61 @@ func (g *GitHubTools) PreviewReview(ctx context.Context, console *Console, prNum
 					shownLines[lineNum] = true
 					if lineNum == comment.LineNumber {
 						// Highlight commented line
-						if console.color {
-							console.printf("%s %4d %s %s\n",
+						if console.Color() {
+							console.Printf("%s %4d %s %s\n",
 								aurora.Blue("┃").String(),
 								lineNum,
 								aurora.Blue("│").String(),
 								aurora.Cyan(line).String())
 						} else {
-							console.printf("┃ %4d │ %s\n", lineNum, line)
+							console.Printf("┃ %4d │ %s\n", lineNum, line)
 						}
 					} else {
-						if console.color {
-							console.printf("%s %4d %s %s\n",
+						if console.Color() {
+							console.Printf("%s %4d %s %s\n",
 								aurora.Blue("┃").String(),
 								lineNum,
 								aurora.Blue("│").String(),
 								line)
 						} else {
-							console.printf("┃ %4d │ %s\n", lineNum, line)
+							console.Printf("┃ %4d │ %s\n", lineNum, line)
 						}
 					}
 				}
 
 				// Print the review comment using existing console methods
-				console.println(aurora.Cyan("┃").String() + " " +
+				console.Println(aurora.Cyan("┃").String() + " " +
 					aurora.Cyan("┃").String() + " " +
 					aurora.Cyan("┃").String())
 			}
 			// Print severity icon and comment
-			icon := console.severityIcon(comment.Severity)
-			if console.color {
-				console.printf("%s %s:\n", icon, aurora.Bold(strings.ToUpper(comment.Severity)))
+			icon := console.SeverityIcon(comment.Severity)
+			if console.Color() {
+				console.Printf("%s %s:\n", icon, aurora.Bold(strings.ToUpper(comment.Severity)))
 			} else {
-				console.printf("%s %s:\n", icon, strings.ToUpper(comment.Severity))
+				console.Printf("%s %s:\n", icon, strings.ToUpper(comment.Severity))
 			}
 
-			console.println(indent(comment.Content, 4))
+			console.Println(indent(comment.Content, 4))
 
 			// Print suggestion if present
 			if comment.Suggestion != "" {
-				if console.color {
-					console.println(aurora.Green("  ✨ Suggestion:").String())
+				if console.Color() {
+					console.Println(aurora.Green("  ✨ Suggestion:").String())
 				} else {
-					console.println("  ✨ Suggestion:")
+					console.Println("  ✨ Suggestion:")
 				}
-				console.println(indent(comment.Suggestion, 4))
+				console.Println(indent(comment.Suggestion, 4))
 			}
 
 			// Print category
-			if console.color {
-				console.printf("\n  %s %s: %s\n\n",
+			if console.Color() {
+				console.Printf("\n  %s %s: %s\n\n",
 					aurora.Blue("🏷").String(),
 					aurora.Blue("Category").String(),
 					comment.Category)
 			} else {
-				console.printf("\n  🏷 Category: %s\n\n", comment.Category)
+				console.Printf("\n  🏷 Category: %s\n\n", comment.Category)
 			}
 		}
 	}
@@ -537,10 +537,10 @@ func (g *GitHubTools) PreviewReview(ctx context.Context, console *Console, prNum
 	}
 
 	if !shouldPost {
-		if console.color {
-			console.println(aurora.Yellow("\nReview cancelled - no comments posted").String())
+		if console.Color() {
+			console.Println(aurora.Yellow("\nReview cancelled - no comments posted").String())
 		} else {
-			console.println("\nReview cancelled - no comments posted")
+			console.Println("\nReview cancelled - no comments posted")
 		}
 		return false, nil
 	}
