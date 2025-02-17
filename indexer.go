@@ -19,7 +19,7 @@ import (
 
 // RepoIndexer handles the indexing of repository content into the RAG store.
 type RepoIndexer struct {
-	githubTools *GitHubTools
+	githubTools GitHubInterface
 	ragStore    RAGStore
 	logger      *logging.Logger
 }
@@ -31,7 +31,7 @@ type LanguageStats struct {
 }
 
 // NewRepoIndexer creates a new repository indexer.
-func NewRepoIndexer(githubTools *GitHubTools, ragStore RAGStore) *RepoIndexer {
+func NewRepoIndexer(githubTools GitHubInterface, ragStore RAGStore) *RepoIndexer {
 	return &RepoIndexer{
 		githubTools: githubTools,
 		ragStore:    ragStore,
@@ -58,15 +58,16 @@ func (ri *RepoIndexer) IndexRepository(ctx context.Context, branch, dbPath strin
 		}
 	}
 	if needFullIndex {
+		repoInfo := ri.githubTools.GetRepositoryInfo(ctx)
 		logger.Debug(ctx, "Indexing repository with config:")
-		logger.Debug(ctx, "  Owner: %s", ri.githubTools.owner)
-		logger.Debug(ctx, "  Repo: %s", ri.githubTools.repo)
+		logger.Debug(ctx, "  Owner: %s", repoInfo.Owner)
+		logger.Debug(ctx, "  Repo: %s", repoInfo.Name)
 		logger.Debug(ctx, "  Branch: %s", branch)
-		logger.Debug(ctx, "  Token set: %v", ri.githubTools.client != nil)
+		logger.Debug(ctx, "  Token set: %v", ri.githubTools.Client() != nil)
 		logger.Debug(ctx, "=======================")
 		if branch == "" {
 			// Get repository information to find default branch
-			repo, _, err := ri.githubTools.client.Repositories.Get(ctx, ri.githubTools.owner, ri.githubTools.repo)
+			repo, _, err := ri.githubTools.Client().Repositories.Get(ctx, repoInfo.Owner, repoInfo.Name)
 			if err != nil {
 				return fmt.Errorf("failed to get repository info: %w", err)
 			}
@@ -110,10 +111,12 @@ func (ri *RepoIndexer) walkDirectory(
 		}
 		if content.GetType() == "dir" {
 			// Get contents of subdirectory
-			_, subContents, _, err := ri.githubTools.client.Repositories.GetContents(
+
+			repoInfo := ri.githubTools.GetRepositoryInfo(ctx)
+			_, subContents, _, err := ri.githubTools.Client().Repositories.GetContents(
 				ctx,
-				ri.githubTools.owner,
-				ri.githubTools.repo,
+				repoInfo.Owner,
+				repoInfo.Name,
 				content.GetPath(),
 				&github.RepositoryContentGetOptions{
 					Ref: branch,
@@ -227,10 +230,11 @@ func (ri *RepoIndexer) SearchSimilarCode(ctx context.Context, query string, limi
 }
 
 func (ri *RepoIndexer) getCommitDifferences(ctx context.Context, oldSHA, newSHA string) ([]*github.CommitFile, error) {
-	comparison, _, err := ri.githubTools.client.Repositories.CompareCommits(
+	repoInfo := ri.githubTools.GetRepositoryInfo(ctx)
+	comparison, _, err := ri.githubTools.Client().Repositories.CompareCommits(
 		ctx,
-		ri.githubTools.owner,
-		ri.githubTools.repo,
+		repoInfo.Owner,
+		repoInfo.Name,
 		oldSHA,
 		newSHA,
 		nil,
@@ -325,11 +329,12 @@ func (ri *RepoIndexer) detectRepositoryLanguage(ctx context.Context) (string, er
 	logger := logging.GetLogger()
 	logger.Debug(ctx, "Detecting repository primary language")
 
+	repoInfo := ri.githubTools.GetRepositoryInfo(ctx)
 	// Get repository language statistics from GitHub API
-	langs, _, err := ri.githubTools.client.Repositories.ListLanguages(
+	langs, _, err := ri.githubTools.Client().Repositories.ListLanguages(
 		ctx,
-		ri.githubTools.owner,
-		ri.githubTools.repo,
+		repoInfo.Owner,
+		repoInfo.Name,
 	)
 	if err != nil {
 		return "", fmt.Errorf("failed to get language statistics: %w", err)
@@ -394,11 +399,12 @@ func (ri *RepoIndexer) fullIndex(ctx context.Context, branch, latestSHA string) 
 	}
 
 	var directoryContent []*github.RepositoryContent
+	repoInfo := ri.githubTools.GetRepositoryInfo(ctx)
 	err = console.WithSpinner(ctx, "Fetching repository contents...", func() error {
-		_, content, _, err := ri.githubTools.client.Repositories.GetContents(
+		_, content, _, err := ri.githubTools.Client().Repositories.GetContents(
 			ctx,
-			ri.githubTools.owner,
-			ri.githubTools.repo,
+			repoInfo.Owner,
+			repoInfo.Name,
 			"", // Root directory
 			&github.RepositoryContentGetOptions{
 				Ref: branch,

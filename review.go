@@ -105,7 +105,7 @@ type PRReviewAgent struct {
 	rag           RAGStore
 	activeThreads map[int64]*ThreadTracker // Track active discussion threads
 	// TODO: should align with dspy agent interface
-	githubTools *GitHubTools // Add this field
+	githubTools GitHubInterface // Add this field
 	stopper     *Stopper
 	metrics     *BusinessMetrics
 }
@@ -218,7 +218,7 @@ func ExtractRelevantChanges(changes string, startline, endline int) string {
 }
 
 // NewPRReviewAgent creates a new PR review agent.
-func NewPRReviewAgent(ctx context.Context, githubTool *GitHubTools, dbPath string) (*PRReviewAgent, error) {
+func NewPRReviewAgent(ctx context.Context, githubTool GitHubInterface, dbPath string) (*PRReviewAgent, error) {
 	logger := logging.GetLogger()
 
 	logger.Debug(ctx, "Starting agent initialization with dbPath: %s", dbPath)
@@ -341,7 +341,7 @@ func NewPRReviewAgent(ctx context.Context, githubTool *GitHubTools, dbPath strin
 	}, nil
 }
 
-func (a *PRReviewAgent) GetGitHubTools() *GitHubTools {
+func (a *PRReviewAgent) GetGitHubTools() GitHubInterface {
 	if a.githubTools == nil {
 		panic("GitHub tools not initialized")
 	}
@@ -397,12 +397,12 @@ func (a *PRReviewAgent) ReviewPR(ctx context.Context, prNumber int, tasks []PRRe
 	)
 	var allComments []PRReviewComment
 	for _, thread := range a.activeThreads {
-		if thread.OriginalAuthor == a.githubTools.authenticatedUser {
+		if thread.OriginalAuthor == a.githubTools.GetAuthenticatedUser(ctx) {
 			// This is a thread I started
 			if !thread.IsResolved {
 				myOpenThreads = append(myOpenThreads, thread)
 			}
-		} else if thread.LastComment.Author != a.githubTools.authenticatedUser {
+		} else if thread.LastComment.Author != a.githubTools.GetAuthenticatedUser(ctx) {
 			// Someone else made the last comment
 			if thread.InReplyToMyComment {
 				repliestoMe = append(repliestoMe, thread)
@@ -681,8 +681,9 @@ func (a *PRReviewAgent) processExistingComments(ctx context.Context, prNumber in
 	for _, change := range changes.Files {
 		fileContents[change.FilePath] = change.FileContent
 	}
-	comments, _, err := githubTools.client.PullRequests.ListComments(ctx,
-		githubTools.owner, githubTools.repo, prNumber,
+	repoInfo := githubTools.GetRepositoryInfo(ctx)
+	comments, _, err := githubTools.Client().PullRequests.ListComments(ctx,
+		repoInfo.Owner, repoInfo.Name, prNumber,
 		&github.PullRequestListCommentsOptions{})
 	if err != nil {
 		return fmt.Errorf("failed to fetch existing comments: %w", err)
@@ -734,7 +735,7 @@ func (a *PRReviewAgent) processExistingComments(ctx context.Context, prNumber in
 				OriginalAuthor:      comment.GetUser().GetLogin(),
 				ConversationHistory: threadHistory[commentID],
 				ThreadID:            commentID,
-				InReplyToMyComment:  isReplyToMyComment(comment, commentsByID, githubTools.authenticatedUser),
+				InReplyToMyComment:  isReplyToMyComment(comment, commentsByID, githubTools.GetAuthenticatedUser(ctx)),
 			}
 			// If this is a reply, link it to the parent thread
 			if parentID != 0 {
@@ -754,7 +755,7 @@ func (a *PRReviewAgent) monitorAndRespond(ctx context.Context, prNumber int, con
 
 	return githubTools.MonitorPRComments(ctx, prNumber, func(comment *github.PullRequestComment) {
 		// Only process comments from other users
-		if comment.GetUser().GetLogin() != githubTools.authenticatedUser {
+		if comment.GetUser().GetLogin() != githubTools.GetAuthenticatedUser(ctx) {
 			a.processComment(ctx, comment, console)
 		}
 	})

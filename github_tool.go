@@ -17,6 +17,19 @@ import (
 	"golang.org/x/oauth2"
 )
 
+type GitHubInterface interface {
+	GetPullRequestChanges(ctx context.Context, prNumber int) (*PRChanges, error)
+	GetFileContent(ctx context.Context, path string) (string, error)
+	CreateReviewComments(ctx context.Context, prNumber int, comments []PRReviewComment) error
+	GetLatestCommitSHA(ctx context.Context, branch string) (string, error)
+	MonitorPRComments(ctx context.Context, prNumber int, callback func(comment *github.PullRequestComment)) error
+	PreviewReview(ctx context.Context, console *Console, prNumber int, comments []PRReviewComment, metric *BusinessMetrics) (bool, error)
+
+	GetAuthenticatedUser(ctx context.Context) string
+	GetRepositoryInfo(ctx context.Context) RepositoryInfo
+	Client() *github.Client
+}
+
 // GitHubTools handles interactions with GitHub API.
 type GitHubTools struct {
 	client            *github.Client
@@ -25,8 +38,15 @@ type GitHubTools struct {
 	authenticatedUser string
 }
 
+type RepositoryInfo struct {
+	Owner         string
+	Name          string
+	DefaultBranch string
+	CloneURL      string
+}
+
 // NewGitHubTools creates a new GitHub tools instance.
-func NewGitHubTools(token, owner, repo string) *GitHubTools {
+func NewGitHubTools(token, owner, repo string) GitHubInterface {
 	// Create an authenticated GitHub client
 	ctx := context.Background()
 	ts := oauth2.StaticTokenSource(
@@ -102,6 +122,22 @@ type fileFilterRules struct {
 
 	// Regex patterns for complex matches
 	regexPatterns []*regexp.Regexp
+}
+
+func (g *GitHubTools) Client() *github.Client {
+	return g.client
+
+}
+
+func (g *GitHubTools) GetRepositoryInfo(ctx context.Context) RepositoryInfo {
+	return RepositoryInfo{
+		Owner: g.owner,
+		Name:  g.repo,
+	}
+}
+
+func (g *GitHubTools) GetAuthenticatedUser(ctx context.Context) string {
+	return g.authenticatedUser
 }
 
 // GetPullRequestChanges retrieves the changes from a pull request.
