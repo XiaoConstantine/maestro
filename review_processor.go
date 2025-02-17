@@ -14,7 +14,7 @@ import (
 )
 
 type CodeReviewProcessor struct {
-	metrics *BusinessMetrics
+	metrics MetricsCollector
 }
 
 func (p *CodeReviewProcessor) Process(ctx context.Context, task agents.Task, context map[string]interface{}) (interface{}, error) {
@@ -106,7 +106,7 @@ func (p *CodeReviewProcessor) Process(ctx context.Context, task agents.Task, con
 }
 
 // Helper functions.
-func parseReviewComments(ctx context.Context, filePath string, commentsStr string, metric *BusinessMetrics) ([]PRReviewComment, error) {
+func parseReviewComments(ctx context.Context, filePath string, commentsStr string, metric MetricsCollector) ([]PRReviewComment, error) {
 	var comments []PRReviewComment
 
 	// Parse the YAML-like format from the LLM response
@@ -159,7 +159,7 @@ func parseReviewComments(ctx context.Context, filePath string, commentsStr strin
 	return comments, nil
 }
 
-func extractComments(ctx context.Context, result interface{}, filePath string, metric *BusinessMetrics) ([]PRReviewComment, error) {
+func extractComments(ctx context.Context, result interface{}, filePath string, metric MetricsCollector) ([]PRReviewComment, error) {
 	switch v := result.(type) {
 
 	case []PotentialIssue:
@@ -434,7 +434,7 @@ func extractKeyPoints(content string) string {
 	return keyPoints.String()
 }
 
-func extractFilteredComments(result interface{}, filePath string, metric *BusinessMetrics) ([]PRReviewComment, error) {
+func extractFilteredComments(result interface{}, filePath string, metric MetricsCollector) ([]PRReviewComment, error) {
 	// First try to convert the result to our expected format
 	resultMap, ok := result.(map[string]interface{})
 	if !ok {

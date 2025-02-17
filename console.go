@@ -274,7 +274,7 @@ func (c *Console) NoIssuesFound(file string) {
 	c.printf("✨ No issues found in %s\n", file)
 }
 
-func (c *Console) ShowComments(comments []PRReviewComment, metric *BusinessMetrics) {
+func (c *Console) ShowComments(comments []PRReviewComment, metric MetricsCollector) {
 	if len(comments) == 0 {
 		return
 	}
@@ -312,7 +312,7 @@ func (c *Console) ShowComments(comments []PRReviewComment, metric *BusinessMetri
 	}
 }
 
-func (c *Console) ShowSummary(comments []PRReviewComment, metric *BusinessMetrics) {
+func (c *Console) ShowSummary(comments []PRReviewComment, metric MetricsCollector) {
 	c.printHeader("Review Summary")
 
 	// Group by severity
@@ -396,7 +396,7 @@ func (c *Console) printf(format string, a ...interface{}) {
 	fmt.Fprintf(c.w, format, a...)
 }
 
-func (c *Console) ShowReviewMetrics(metrics *BusinessMetrics, comments []PRReviewComment) {
+func (c *Console) ShowReviewMetrics(metrics MetricsCollector, comments []PRReviewComment) {
 	c.printHeader("Review Metrics Summary")
 
 	// First show immediate review statistics
@@ -488,7 +488,7 @@ func (c *Console) ShowReviewMetrics(metrics *BusinessMetrics, comments []PRRevie
 	c.println("• Historical metrics help track long-term impact of automated reviews")
 }
 
-func (c *Console) collectFeedback(comment PRReviewComment, metric *BusinessMetrics) error {
+func (c *Console) collectFeedback(comment PRReviewComment, metric MetricsCollector) error {
 	helpful, err := c.Confirm(PromptOptions{
 		Message: "Was this comment helpful?",
 		Default: true,

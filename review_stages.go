@@ -27,14 +27,14 @@ type PotentialIssue struct {
 
 // RuleChecker handles the initial detection of potential code issues.
 type RuleChecker struct {
-	metrics *BusinessMetrics
+	metrics MetricsCollector
 	rules   map[string]ReviewRule
 	logger  *logging.Logger
 }
 
 // ReviewFilter validates potential issues and generates final review comments.
 type ReviewFilter struct {
-	metrics       *BusinessMetrics
+	metrics       MetricsCollector
 	contextWindow int
 	logger        *logging.Logger
 }
@@ -58,7 +58,7 @@ type ReviewFilterMetadata struct {
 	LineRange   LineRange
 }
 
-func NewRuleChecker(metrics *BusinessMetrics, logger *logging.Logger) *RuleChecker {
+func NewRuleChecker(metrics MetricsCollector, logger *logging.Logger) *RuleChecker {
 	return &RuleChecker{
 		metrics: metrics,
 		rules:   make(map[string]ReviewRule),
@@ -66,7 +66,7 @@ func NewRuleChecker(metrics *BusinessMetrics, logger *logging.Logger) *RuleCheck
 	}
 }
 
-func NewReviewFilter(metrics *BusinessMetrics, contextWindow int, logger *logging.Logger) *ReviewFilter {
+func NewReviewFilter(metrics MetricsCollector, contextWindow int, logger *logging.Logger) *ReviewFilter {
 	return &ReviewFilter{
 		metrics:       metrics,
 		contextWindow: contextWindow,

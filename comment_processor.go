@@ -66,7 +66,7 @@ const (
 
 type CommentResponseProcessor struct {
 	previousContext string
-	metrics         *BusinessMetrics
+	metrics         MetricsCollector
 }
 
 func (p *CommentResponseProcessor) Process(ctx context.Context, task agents.Task, context map[string]interface{}) (interface{}, error) {
