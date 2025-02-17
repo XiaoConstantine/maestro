@@ -11,6 +11,27 @@ import (
 	"github.com/google/go-github/v68/github"
 )
 
+type MetricsCollector interface {
+	TrackReviewStart(ctx context.Context, category string)
+	TrackNewThread(ctx context.Context, threadID int64, comment PRReviewComment)
+	TrackCommentResolution(ctx context.Context, threadID int64, resolution ResolutionOutcome)
+	TrackReviewComment(ctx context.Context, comment PRReviewComment, isValid bool)
+	TrackHistoricalComment(ctx context.Context, comment PRReviewComment)
+	TrackUserFeedback(ctx context.Context, threadID int64, helpful bool, reason string)
+	GetOutdatedRate(category string) float64
+	GetPrecision(category string) float64
+	GenerateReport(ctx context.Context) *BusinessReport
+	GetCategoryMetrics(category string) *CategoryStats
+	GetOverallOutdatedRate() float64
+	GetWeeklyActiveUsers() int
+	GetReviewResponseRate() float64
+	StartOptimizationCycle(ctx context.Context)
+	StartReviewSession(ctx context.Context, prNumber int)
+	StartThreadTracking(ctx context.Context, comment PRReviewComment)
+	TrackValidationResult(ctx context.Context, category string, validated bool)
+	TrackDetectionResults(ctx context.Context, issueCount int)
+}
+
 // BusinessReport represents a comprehensive snapshot of our review system's metrics.
 type BusinessReport struct {
 	GeneratedAt       time.Time
@@ -129,7 +150,7 @@ func (cs *CategoryStats) GetOutdatedRate() float64 {
 	return float64(cs.OutdatedLines) / float64(cs.TotalLines)
 }
 
-func NewBusinessMetrics(logger *logging.Logger) *BusinessMetrics {
+func NewBusinessMetrics(logger *logging.Logger) MetricsCollector {
 	return &BusinessMetrics{
 		logger:            logger,
 		categoryMetrics:   make(map[string]*CategoryStats),

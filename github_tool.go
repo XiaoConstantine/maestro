@@ -23,7 +23,7 @@ type GitHubInterface interface {
 	CreateReviewComments(ctx context.Context, prNumber int, comments []PRReviewComment) error
 	GetLatestCommitSHA(ctx context.Context, branch string) (string, error)
 	MonitorPRComments(ctx context.Context, prNumber int, callback func(comment *github.PullRequestComment)) error
-	PreviewReview(ctx context.Context, console *Console, prNumber int, comments []PRReviewComment, metric *BusinessMetrics) (bool, error)
+	PreviewReview(ctx context.Context, console *Console, prNumber int, comments []PRReviewComment, metric MetricsCollector) (bool, error)
 
 	GetAuthenticatedUser(ctx context.Context) string
 	GetRepositoryInfo(ctx context.Context) RepositoryInfo
@@ -348,7 +348,7 @@ func (g *GitHubTools) GetLatestCommitSHA(ctx context.Context, branch string) (st
 	return ref.Object.GetSHA(), nil
 }
 
-func (g *GitHubTools) PreviewReview(ctx context.Context, console *Console, prNumber int, comments []PRReviewComment, metric *BusinessMetrics) (bool, error) {
+func (g *GitHubTools) PreviewReview(ctx context.Context, console *Console, prNumber int, comments []PRReviewComment, metric MetricsCollector) (bool, error) {
 	// Use spinner while fetching PR changes
 	var changes *PRChanges
 	err := console.WithSpinner(ctx, "Fetching PR changes", func() error {

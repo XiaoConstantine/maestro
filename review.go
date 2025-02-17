@@ -101,7 +101,7 @@ const (
 type ReviewAgent interface {
 	ReviewPR(ctx context.Context, prNumber int, tasks []PRReviewTask, console *Console) ([]PRReviewComment, error)
 	Stop(ctx context.Context)
-	Metrics(ctx context.Context) *BusinessMetrics
+	Metrics(ctx context.Context) MetricsCollector
 	Orchestrator(ctx context.Context) *agents.FlexibleOrchestrator
 	Close() error
 }
@@ -115,7 +115,7 @@ type PRReviewAgent struct {
 	// TODO: should align with dspy agent interface
 	githubTools GitHubInterface // Add this field
 	stopper     *Stopper
-	metrics     *BusinessMetrics
+	metrics     MetricsCollector
 }
 
 type ThreadTracker struct {
@@ -364,7 +364,7 @@ func (a *PRReviewAgent) Orchestrator(ctx context.Context) *agents.FlexibleOrches
 
 }
 
-func (a *PRReviewAgent) Metrics(ctx context.Context) *BusinessMetrics {
+func (a *PRReviewAgent) Metrics(ctx context.Context) MetricsCollector {
 	return a.metrics
 
 }
@@ -649,7 +649,7 @@ func (a *PRReviewAgent) performInitialReview(ctx context.Context, tasks []PRRevi
 				}
 				for taskID, taskResult := range result.CompletedTasks {
 					// Convert task results to comments
-					if reviewComments, err := extractComments(ctx, taskResult, task.FilePath, a.metrics); err != nil {
+					if reviewComments, err := extractComments(ctx, taskResult, task.FilePath, a.Metrics(ctx)); err != nil {
 						logging.GetLogger().Error(ctx, "Failed to extract comments from task %s: %v", taskID, err)
 						continue
 					} else {
@@ -657,7 +657,7 @@ func (a *PRReviewAgent) performInitialReview(ctx context.Context, tasks []PRRevi
 						if len(reviewComments) == 0 {
 							console.NoIssuesFound(task.FilePath)
 						} else {
-							console.ShowComments(reviewComments, a.metrics)
+							console.ShowComments(reviewComments, a.Metrics(ctx))
 						}
 						allComments = append(allComments, reviewComments...)
 					}
