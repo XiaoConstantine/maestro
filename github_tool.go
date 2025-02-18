@@ -558,7 +558,7 @@ func (g *GitHubTools) PreviewReview(ctx context.Context, console ConsoleInterfac
 	return true, nil
 }
 
-// getPreviousContent retrieves the content of a file from the base branch
+// getPreviousContent retrieves the content of a file from the base branch.
 func (g *GitHubTools) getPreviousContent(ctx context.Context, filepath string, prNumber int) (string, error) {
 	// Get PR details to find base commit
 	pr, _, err := g.client.PullRequests.Get(ctx, g.owner, g.repo, prNumber)
