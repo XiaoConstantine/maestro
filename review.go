@@ -13,6 +13,7 @@ import (
 
 	"github.com/XiaoConstantine/dspy-go/pkg/agents"
 	"github.com/XiaoConstantine/dspy-go/pkg/core"
+	"go.uber.org/atomic"
 
 	"github.com/XiaoConstantine/dspy-go/pkg/logging"
 	"github.com/google/go-github/v68/github"
@@ -506,8 +507,29 @@ func (a *PRReviewAgent) Stop(ctx context.Context) {
 }
 
 func (a *PRReviewAgent) performInitialReview(ctx context.Context, tasks []PRReviewTask, console ConsoleInterface) ([]PRReviewComment, error) {
-	var allComments []PRReviewComment
+	// Phase 1: Pattern Matching - Keep this sequential as it's file-level analysis
+	repoPatterns, guidelineMatches, err := a.analyzePatterns(ctx, tasks, console)
+	if err != nil {
+		return nil, fmt.Errorf("failed to analyze patterns: %w", err)
+	}
 
+	// Phase 2: Create chunks for all files
+	_, processedTasks, err := a.prepareChunks(ctx, tasks, console)
+	if err != nil {
+		return nil, fmt.Errorf("failed to prepare chunks: %w", err)
+	}
+
+	// Phase 3: Parallel chunk processing
+	comments, err := a.processChunksParallel(ctx, processedTasks, repoPatterns, guidelineMatches, console)
+	if err != nil {
+		return nil, fmt.Errorf("failed to process chunks: %w", err)
+	}
+
+	return comments, nil
+}
+
+// analyzePatterns keeps the existing pattern matching logic intact.
+func (a *PRReviewAgent) analyzePatterns(ctx context.Context, tasks []PRReviewTask, console ConsoleInterface) ([]*Content, []*Content, error) {
 	var repoPatterns []*Content
 	var guidelineMatches []*Content
 
@@ -518,7 +540,7 @@ func (a *PRReviewAgent) performInitialReview(ctx context.Context, tasks []PRRevi
 
 		chunks, err := splitContentForEmbedding(task.FileContent, 1024) // Keep under 10KB limit
 		if err != nil {
-			return nil, fmt.Errorf("failed to split content for %s: %w", task.FilePath, err)
+			return repoPatterns, guidelineMatches, fmt.Errorf("failed to split content for %s: %w", task.FilePath, err)
 		}
 		message := fmt.Sprintf("Processing %s (%d chunks)...", filepath.Base(task.FilePath), len(chunks))
 
@@ -571,13 +593,21 @@ func (a *PRReviewAgent) performInitialReview(ctx context.Context, tasks []PRRevi
 				filepath.Base(task.FilePath), totalRepoMatches, totalGuidelineMatches, len(chunks))
 		}
 	}
-	// Create review context
+
+	return repoPatterns, guidelineMatches, nil
+}
+
+// prepareChunks handles chunk creation for all files.
+func (a *PRReviewAgent) prepareChunks(ctx context.Context, tasks []PRReviewTask, console ConsoleInterface) (map[string]map[string]interface{}, []PRReviewTask, error) {
 	fileData := make(map[string]map[string]interface{})
-	for i := range tasks {
-		task := tasks[i]
+	processedTasks := make([]PRReviewTask, len(tasks))
+	copy(processedTasks, tasks)
+
+	for i := range processedTasks {
+		task := &processedTasks[i]
 		config, err := NewChunkConfig()
 		if err != nil {
-			return nil, fmt.Errorf("failed to create chunk config: %w", err)
+			return nil, nil, fmt.Errorf("failed to create chunk config: %w", err)
 		}
 
 		config.fileMetadata = map[string]interface{}{
@@ -585,13 +615,13 @@ func (a *PRReviewAgent) performInitialReview(ctx context.Context, tasks []PRRevi
 			"file_type": filepath.Ext(task.FilePath),
 			"package":   filepath.Base(filepath.Dir(task.FilePath)),
 		}
+
 		chunks, err := chunkfile(ctx, task.FileContent, task.Changes, config)
 		if err != nil {
-			return nil, fmt.Errorf("failed to chunk file %s: %w", task.FilePath, err)
+			return nil, nil, fmt.Errorf("failed to chunk file %s: %w", task.FilePath, err)
 		}
 
-		tasks[i].Chunks = chunks
-
+		task.Chunks = chunks
 		fileData[task.FilePath] = map[string]interface{}{
 			"file_content": task.FileContent,
 			"changes":      task.Changes,
@@ -599,81 +629,333 @@ func (a *PRReviewAgent) performInitialReview(ctx context.Context, tasks []PRRevi
 		}
 	}
 
-	for i := range tasks {
-		// Process each chunk separately
-		task := tasks[i]
+	return fileData, processedTasks, nil
+}
 
-		for chunkIdx, chunk := range task.Chunks {
-			chunkContext := map[string]interface{}{
-				"file_path": task.FilePath,
-				"chunk":     chunk.content,
-				"context": map[string]string{
-					"leading":  chunk.leadingcontext,
-					"trailing": chunk.trailingcontext,
-				},
-				"changes":      chunk.changes,
-				"chunk_start":  chunk.startline,
-				"chunk_end":    chunk.endline,
-				"chunk_number": chunkIdx + 1,
-				"total_chunks": len(task.Chunks),
-				"line_range": map[string]int{
-					"start": chunk.startline,
-					"end":   chunk.endline,
-				},
-				"review_type":   "chunk_review",
-				"repo_patterns": repoPatterns,
-				"guidelines":    guidelineMatches,
-			}
+// processChunksParallel handles parallel chunk processing.
+func (a *PRReviewAgent) processChunksParallel(ctx context.Context, tasks []PRReviewTask, repoPatterns []*Content, guidelineMatches []*Content, console ConsoleInterface) ([]PRReviewComment, error) {
+	var allComments []PRReviewComment
+	var mu sync.Mutex // For thread-safe comment aggregation
 
-			console.ReviewingFile(task.FilePath, i+1, len(task.Changes))
+	// Create work pool for chunk processing
+	type chunkWork struct {
+		task     *PRReviewTask
+		chunk    ReviewChunk
+		chunkIdx int
+		taskIdx  int
+	}
 
-			message := fmt.Sprintf("⟲ Reviewing %s (chunk %d/%d)", task.FilePath, chunkIdx+1, len(task.Chunks))
+	// Create channels for work distribution and results
+	workChan := make(chan chunkWork)
+	resultChan := make(chan []PRReviewComment)
+	errorChan := make(chan error)
 
-			console.UpdateSpinnerText(message)
-			if console.Color() {
-				parts := strings.SplitN(message, " ", 2) // Split into icon and rest
-				coloredMessage := fmt.Sprintf("%s %s",
-					aurora.Blue(parts[0]).Bold(),  // Color the icon
-					aurora.White(parts[1]).Bold(), // Color the rest of the message
-				)
-				console.Println(coloredMessage)
-			} else {
-				console.Println(message)
-			}
-			err := console.WithSpinner(ctx, message, func() error {
+	// Calculate total chunks for progress tracking
+	totalChunks := 0
+	for _, task := range tasks {
+		totalChunks += len(task.Chunks)
+	}
+	processedChunks := atomic.NewInt32(0)
+
+	// Start worker pool
+	numWorkers := 5 // Configurable based on system resources
+	var wg sync.WaitGroup
+	for i := 0; i < numWorkers; i++ {
+		wg.Add(1)
+		go func(workerID int) {
+			defer wg.Done()
+			for work := range workChan {
+				chunkContext := map[string]interface{}{
+					"file_path": work.task.FilePath,
+					"chunk":     work.chunk.content,
+					"context": map[string]string{
+						"leading":  work.chunk.leadingcontext,
+						"trailing": work.chunk.trailingcontext,
+					},
+					"changes":      work.chunk.changes,
+					"chunk_start":  work.chunk.startline,
+					"chunk_end":    work.chunk.endline,
+					"chunk_number": work.chunkIdx + 1,
+					"total_chunks": len(work.task.Chunks),
+					"line_range": map[string]int{
+						"start": work.chunk.startline,
+						"end":   work.chunk.endline,
+					},
+					"review_type":   "chunk_review",
+					"repo_patterns": repoPatterns,
+					"guidelines":    guidelineMatches,
+				}
+
+				// Process the chunk
 				result, err := a.orchestrator.Process(ctx,
-					fmt.Sprintf("Review chunk %d of %s", i+1, task.FilePath),
+					fmt.Sprintf("Review chunk %d of %s", work.chunkIdx+1, work.task.FilePath),
 					chunkContext)
 				if err != nil {
-					return err
+					errorChan <- fmt.Errorf("failed to process chunk %d of %s: %w",
+						work.chunkIdx+1, work.task.FilePath, err)
+					continue
 				}
+
+				// Process results
 				for taskID, taskResult := range result.CompletedTasks {
-					// Convert task results to comments
-					if reviewComments, err := extractComments(ctx, taskResult, task.FilePath, a.Metrics(ctx)); err != nil {
+					comments, err := extractComments(ctx, taskResult, work.task.FilePath, a.Metrics(ctx))
+					if err != nil {
 						logging.GetLogger().Error(ctx, "Failed to extract comments from task %s: %v", taskID, err)
 						continue
-					} else {
-						// Show the results for this file
-						if len(reviewComments) == 0 {
+					}
 
-							console.NoIssuesFound(task.FilePath, chunkIdx+1, len(task.Chunks))
-						} else {
-							console.ShowComments(reviewComments, a.Metrics(ctx))
-						}
-						allComments = append(allComments, reviewComments...)
+					// Thread-safe updates
+					mu.Lock()
+					if len(comments) == 0 {
+						console.NoIssuesFound(work.task.FilePath, work.chunkIdx+1, len(work.task.Chunks))
+					} else {
+						console.ShowComments(comments, a.Metrics(ctx))
+					}
+					resultChan <- comments
+					mu.Unlock()
+				}
+
+				// Update progress
+				processed := processedChunks.Add(1)
+				percentage := float64(processed) / float64(totalChunks) * 100
+				console.UpdateSpinnerText(fmt.Sprintf("Processing chunks... %.1f%% (%d/%d)",
+					percentage, processed, totalChunks))
+			}
+		}(i)
+	}
+
+	// Distribute work
+	go func() {
+		for taskIdx, task := range tasks {
+			for chunkIdx, chunk := range task.Chunks {
+				select {
+				case <-ctx.Done():
+					return
+				default:
+					workChan <- chunkWork{
+						task:     &task,
+						chunk:    chunk,
+						chunkIdx: chunkIdx,
+						taskIdx:  taskIdx,
 					}
 				}
-				return nil
-
-			})
-			if err != nil {
-				return nil, fmt.Errorf("failed to process chunk %d of %s: %w", i+1, task.FilePath, err)
 			}
 		}
-	}
-	return allComments, nil
+		close(workChan)
+	}()
 
+	// Collect results
+	go func() {
+		wg.Wait()
+		close(resultChan)
+		close(errorChan)
+	}()
+
+	// Process results and errors
+	var errors []error
+	for {
+		select {
+		case err, ok := <-errorChan:
+			if !ok {
+				errorChan = nil
+				continue
+			}
+			errors = append(errors, err)
+
+		case comments, ok := <-resultChan:
+			if !ok {
+				resultChan = nil
+				continue
+			}
+			mu.Lock()
+			allComments = append(allComments, comments...)
+			mu.Unlock()
+
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+
+		if errorChan == nil && resultChan == nil {
+			break
+		}
+	}
+
+	if len(errors) > 0 {
+		return nil, fmt.Errorf("encountered errors during parallel processing: %v", errors)
+	}
+
+	return allComments, nil
 }
+
+// func (a *PRReviewAgent) performInitialReview(ctx context.Context, tasks []PRReviewTask, console ConsoleInterface) ([]PRReviewComment, error) {
+// 	var allComments []PRReviewComment
+//
+// 	var repoPatterns []*Content
+// 	var guidelineMatches []*Content
+//
+// 	for _, task := range tasks {
+//
+// 		// Create embedding for the entire file to find similar patterns
+// 		llm := core.GetDefaultLLM()
+//
+// 		chunks, err := splitContentForEmbedding(task.FileContent, 1024) // Keep under 10KB limit
+// 		if err != nil {
+// 			return nil, fmt.Errorf("failed to split content for %s: %w", task.FilePath, err)
+// 		}
+// 		message := fmt.Sprintf("Processing %s (%d chunks)...", filepath.Base(task.FilePath), len(chunks))
+//
+// 		var totalRepoMatches, totalGuidelineMatches int
+// 		err = console.WithSpinner(ctx, message, func() error {
+// 			for i, chunk := range chunks {
+//
+// 				console.Spinner().Suffix = fmt.Sprintf(" (chunk %d/%d) of %s", i+1, len(chunks), task.FilePath)
+// 				fileEmbedding, err := llm.CreateEmbedding(ctx, chunk)
+// 				if err != nil {
+// 					return fmt.Errorf("failed to create file embedding: %w", err)
+// 				}
+// 				// Find similar patterns in the repository
+// 				patterns, err := a.rag.FindSimilar(ctx, fileEmbedding.Vector, 5, "repository")
+// 				if err != nil {
+// 					console.FileError(task.FilePath, fmt.Errorf("failed to find similar patterns: %w", err))
+// 					continue
+// 				}
+// 				repoPatterns = append(repoPatterns, patterns...)
+//
+// 				totalRepoMatches += len(patterns)
+// 				guidelineMatch, err := a.rag.FindSimilar(ctx, fileEmbedding.Vector, 20, "guideline")
+// 				if err != nil {
+// 					console.FileError(task.FilePath, fmt.Errorf("failed to find guideline matches: %w", err))
+// 					continue
+// 				}
+// 				guidelineMatches = append(guidelineMatches, guidelineMatch...)
+//
+// 				totalGuidelineMatches += len(guidelineMatch)
+//
+// 			}
+// 			return nil
+// 		})
+//
+// 		if err != nil {
+// 			console.FileError(task.FilePath, fmt.Errorf("failed to analyze patterns: %w", err))
+// 			continue
+// 		}
+// 		if console.Color() {
+// 			console.Printf("%s %s %s %s %s\n",
+// 				aurora.Green("✓").Bold(),
+// 				aurora.White("Analysis complete for").Bold(),
+// 				aurora.Cyan(filepath.Base(task.FilePath)).Bold(),
+// 				aurora.White(fmt.Sprintf("found %d repository patterns and %d guideline matches across %d chunks",
+// 					totalRepoMatches, totalGuidelineMatches, len(chunks))).Bold(),
+// 				aurora.Blue("...").String(),
+// 			)
+// 		} else {
+// 			console.Printf("✓ Analysis complete for %s: found %d repository patterns and %d guideline matches across %d chunks\n",
+// 				filepath.Base(task.FilePath), totalRepoMatches, totalGuidelineMatches, len(chunks))
+// 		}
+// 	}
+// 	// Create review context
+// 	fileData := make(map[string]map[string]interface{})
+// 	for i := range tasks {
+// 		task := tasks[i]
+// 		config, err := NewChunkConfig()
+// 		if err != nil {
+// 			return nil, fmt.Errorf("failed to create chunk config: %w", err)
+// 		}
+//
+// 		config.fileMetadata = map[string]interface{}{
+// 			"file_path": task.FilePath,
+// 			"file_type": filepath.Ext(task.FilePath),
+// 			"package":   filepath.Base(filepath.Dir(task.FilePath)),
+// 		}
+// 		chunks, err := chunkfile(ctx, task.FileContent, task.Changes, config)
+// 		if err != nil {
+// 			return nil, fmt.Errorf("failed to chunk file %s: %w", task.FilePath, err)
+// 		}
+//
+// 		tasks[i].Chunks = chunks
+//
+// 		fileData[task.FilePath] = map[string]interface{}{
+// 			"file_content": task.FileContent,
+// 			"changes":      task.Changes,
+// 			"chunks":       chunks,
+// 		}
+// 	}
+//
+// 	for i := range tasks {
+// 		// Process each chunk separately
+// 		task := tasks[i]
+//
+// 		for chunkIdx, chunk := range task.Chunks {
+// 			chunkContext := map[string]interface{}{
+// 				"file_path": task.FilePath,
+// 				"chunk":     chunk.content,
+// 				"context": map[string]string{
+// 					"leading":  chunk.leadingcontext,
+// 					"trailing": chunk.trailingcontext,
+// 				},
+// 				"changes":      chunk.changes,
+// 				"chunk_start":  chunk.startline,
+// 				"chunk_end":    chunk.endline,
+// 				"chunk_number": chunkIdx + 1,
+// 				"total_chunks": len(task.Chunks),
+// 				"line_range": map[string]int{
+// 					"start": chunk.startline,
+// 					"end":   chunk.endline,
+// 				},
+// 				"review_type":   "chunk_review",
+// 				"repo_patterns": repoPatterns,
+// 				"guidelines":    guidelineMatches,
+// 			}
+//
+// 			console.ReviewingFile(task.FilePath, i+1, len(task.Changes))
+//
+// 			message := fmt.Sprintf("⟲ Reviewing %s (chunk %d/%d)", task.FilePath, chunkIdx+1, len(task.Chunks))
+//
+// 			console.UpdateSpinnerText(message)
+// 			if console.Color() {
+// 				parts := strings.SplitN(message, " ", 2) // Split into icon and rest
+// 				coloredMessage := fmt.Sprintf("%s %s",
+// 					aurora.Blue(parts[0]).Bold(),  // Color the icon
+// 					aurora.White(parts[1]).Bold(), // Color the rest of the message
+// 				)
+// 				console.Println(coloredMessage)
+// 			} else {
+// 				console.Println(message)
+// 			}
+// 			err := console.WithSpinner(ctx, message, func() error {
+// 				result, err := a.orchestrator.Process(ctx,
+// 					fmt.Sprintf("Review chunk %d of %s", i+1, task.FilePath),
+// 					chunkContext)
+// 				if err != nil {
+// 					return err
+// 				}
+// 				for taskID, taskResult := range result.CompletedTasks {
+// 					// Convert task results to comments
+// 					if reviewComments, err := extractComments(ctx, taskResult, task.FilePath, a.Metrics(ctx)); err != nil {
+// 						logging.GetLogger().Error(ctx, "Failed to extract comments from task %s: %v", taskID, err)
+// 						continue
+// 					} else {
+// 						// Show the results for this file
+// 						if len(reviewComments) == 0 {
+//
+// 							console.NoIssuesFound(task.FilePath, chunkIdx+1, len(task.Chunks))
+// 						} else {
+// 							console.ShowComments(reviewComments, a.Metrics(ctx))
+// 						}
+// 						allComments = append(allComments, reviewComments...)
+// 					}
+// 				}
+// 				return nil
+//
+// 			})
+// 			if err != nil {
+// 				return nil, fmt.Errorf("failed to process chunk %d of %s: %w", i+1, task.FilePath, err)
+// 			}
+// 		}
+// 	}
+// 	return allComments, nil
+//
+// }
 
 func (a *PRReviewAgent) processExistingComments(ctx context.Context, prNumber int, console ConsoleInterface) error {
 	logger := logging.GetLogger()
