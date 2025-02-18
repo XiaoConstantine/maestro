@@ -36,7 +36,7 @@ type ConsoleInterface interface {
 	Printf(format string, a ...interface{})
 	Println(a ...interface{})
 	PrintHeader(text string)
-	NoIssuesFound(file string)
+	NoIssuesFound(file string, chunkNumber, totalChunks int)
 	SeverityIcon(severity string) string
 	Color() bool
 	Spinner() *spinner.Spinner
@@ -306,8 +306,8 @@ func (c *Console) ReviewingFile(file string, current, total int) {
 	}
 }
 
-func (c *Console) NoIssuesFound(file string) {
-	c.Printf("✨ No issues found in %s\n", file)
+func (c *Console) NoIssuesFound(file string, chunkNumber, totalChunks int) {
+	c.Printf("✨ No issues found in chunk (%d/%d) of %s\n", chunkNumber, totalChunks, file)
 }
 
 func (c *Console) ShowComments(comments []PRReviewComment, metric MetricsCollector) {

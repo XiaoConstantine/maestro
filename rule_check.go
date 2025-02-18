@@ -2,10 +2,13 @@ package main
 
 import (
 	"context"
+	"encoding/xml"
 	"fmt"
+	"time"
 
 	"github.com/XiaoConstantine/dspy-go/pkg/agents"
 	"github.com/XiaoConstantine/dspy-go/pkg/core"
+	"github.com/XiaoConstantine/dspy-go/pkg/errors"
 	"github.com/XiaoConstantine/dspy-go/pkg/logging"
 	"github.com/XiaoConstantine/dspy-go/pkg/modules"
 )
@@ -26,6 +29,22 @@ type RuleCheckerMetadata struct {
 	LineRange      LineRange
 	ChunkNumber    int
 	TotalChunks    int
+}
+
+// RuleCheckResult represents a structured issue found during analysis.
+type RuleCheckResult struct {
+	FilePath   string  `json:"file_path"`
+	LineNumber int     `json:"line_number"`
+	RuleID     string  `json:"rule_id"`
+	Confidence float64 `json:"confidence"`
+	Content    string  `json:"content"`
+	Context    struct {
+		Before string `json:"before"`
+		After  string `json:"after"`
+	} `json:"context"`
+	Suggestion string                 `json:"suggestion"`
+	Category   string                 `json:"category"`
+	Metadata   map[string]interface{} `json:"metadata"`
 }
 
 func NewRuleChecker(metrics MetricsCollector, logger *logging.Logger) *RuleChecker {
@@ -54,18 +73,41 @@ func (rc *RuleChecker) Process(ctx context.Context, task agents.Task, context ma
 			{Field: core.NewField("potential_issues")},
 		},
 	).WithInstruction(`Analyze the code for potential issues with high recall.
-    For each potential issue, provide:
-    - File path and line number
-    - Rule ID that detected the issue
-    - Initial confidence score (0.0-1.0)
-    - Problematic code snippet
-    - Surrounding context
-    - Preliminary suggestion
-    - Category (error-handling, code-style, etc.)
-    
-    Focus on finding all possible issues - validation will happen in the next stage.
-    Include issues even with lower confidence scores, as they will be filtered later.`)
+		For each potential issue found, provide the information in the following XML format:
+		<potential_issues>
+		<issue>
+		<file_path>string</file_path>
+		<line_number>integer</line_number>
+		<rule_id>string</rule_id>
+		<confidence>float between 0.0-1.0</confidence>
+		<content>string describing the problematic code</content>
+		<context>
+		<before>lines before the issue</before>
+		<after>lines after the issue</after>
+		</context>
+		<suggestion>specific steps to fix the issue</suggestion>
+		<category>one of: error-handling, code-style, performance, security, documentation</category>
+		<metadata></metadata>
+		</issue>
+		<!-- Additional issues as needed --
+		</potential_issues>
 
+		Important format requirements
+		1. Use proper XML escaping for special characters in code conten
+		2. Ensure line numbers are valid integer
+		3. Keep confidence scores between 0.0 and 1.
+		4. Use standard category value
+		5. Provide specific, actionable suggestion
+		6. Include relevant context before/after the issue
+		7. Before inserting it into the XML, replace every '<' with '&lt; and every '>' with '&gt;', every & with &amp.
+
+		Focus on finding
+		1. Error handling issue
+		2. Code style violation
+		3. Performance concern
+		4. Security vulnerabilitie
+		5. Documentation gaps
+		Only report issues with high confidence (>0.7) and clear impact.`)
 	predict := modules.NewPredict(signature)
 
 	rc.logger.Debug(ctx, "Starting issue detection for file: %s", metadata.FilePath)
@@ -80,119 +122,68 @@ func (rc *RuleChecker) Process(ctx context.Context, task agents.Task, context ma
 		return nil, fmt.Errorf("detection failed: %w", err)
 	}
 
-	issues, err := rc.parseDetectionResult(result)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse detection results: %w", err)
-	}
-
-	rc.metrics.TrackDetectionResults(ctx, len(issues))
-
-	return issues, nil
-}
-
-func (rc *RuleChecker) parseDetectionResult(result interface{}) ([]PotentialIssue, error) {
-	// First, we need to ensure the result is in the expected format
-	resultMap, ok := result.(map[string]interface{})
+	// Parse the XML response into a structured format
+	xmlContent, ok := result["potential_issues"].(string)
 	if !ok {
-		return nil, fmt.Errorf("invalid result type: expected map[string]interface{}, got %T", result)
+		return nil, errors.New(errors.InvalidResponse, "missing potential_issues in response")
 	}
 
-	// The LLM output should contain a "potential_issues" field as defined in our signature
-	issuesRaw, exists := resultMap["potential_issues"]
-	if !exists {
-		return nil, fmt.Errorf("missing potential_issues field in result")
+	// Create a struct to unmarshal the XML
+	var xmlResults struct {
+		Issues []struct {
+			FilePath   string  `xml:"file_path"`
+			LineNumber int     `xml:"line_number"`
+			RuleID     string  `xml:"rule_id"`
+			Confidence float64 `xml:"confidence"`
+			Content    string  `xml:"content"`
+			Context    struct {
+				Before string `xml:"before"`
+				After  string `xml:"after"`
+			} `xml:"context"`
+			Suggestion string `xml:"suggestion"`
+			Category   string `xml:"category"`
+		} `xml:"issue"`
 	}
 
-	// The issues should be provided as an array
-	issuesArray, ok := issuesRaw.([]interface{})
-	if !ok {
-		return nil, fmt.Errorf("potential_issues must be an array, got %T", issuesRaw)
+	if err := xml.Unmarshal([]byte(xmlContent), &xmlResults); err != nil {
+		return nil, errors.WithFields(
+			errors.Wrap(err, errors.InvalidResponse, "failed to parse detection results"),
+			errors.Fields{
+				"xml_content": xmlContent,
+			})
 	}
 
-	var potentialIssues []PotentialIssue
-
-	// Process each detected issue from the LLM output
-	for i, issueRaw := range issuesArray {
-		issueMap, ok := issueRaw.(map[string]interface{})
-		if !ok {
-			rc.logger.Warn(context.Background(), "Skipping invalid issue format at index %d", i)
-			continue
+	// Convert XML results to the format expected by orchestrator
+	issues := make([]RuleCheckResult, len(xmlResults.Issues))
+	for i, issue := range xmlResults.Issues {
+		issues[i] = RuleCheckResult{
+			FilePath:   issue.FilePath,
+			LineNumber: issue.LineNumber,
+			RuleID:     issue.RuleID,
+			Confidence: issue.Confidence,
+			Content:    issue.Content,
+			Context: struct {
+				Before string `json:"before"`
+				After  string `json:"after"`
+			}{
+				Before: issue.Context.Before,
+				After:  issue.Context.After,
+			},
+			Suggestion: issue.Suggestion,
+			Category:   issue.Category,
+			Metadata:   make(map[string]interface{}),
 		}
-
-		// Extract required fields with type validation
-		filePath := getStringOrEmpty(issueMap["file_path"])
-		lineNum := getIntOrZero(issueMap["line_number"])
-		ruleID := getStringOrEmpty(issueMap["rule_id"])
-		content := getStringOrEmpty(issueMap["content"])
-		suggestion := getStringOrEmpty(issueMap["suggestion"])
-		category := getStringOrEmpty(issueMap["category"])
-
-		// Extract confidence score with validation
-		confidence := 0.0
-		if conf, ok := issueMap["confidence"].(float64); ok {
-			confidence = conf
-		}
-
-		// Extract context information
-		contextMap := make(map[string]string)
-		if ctx, ok := issueMap["context"].(map[string]interface{}); ok {
-			for key, value := range ctx {
-				if strValue, ok := value.(string); ok {
-					contextMap[key] = strValue
-				}
-			}
-		}
-
-		// Extract any additional metadata
-		metadata := make(map[string]interface{})
-		if meta, ok := issueMap["metadata"].(map[string]interface{}); ok {
-			metadata = meta
-		}
-
-		// Validate required fields
-		if filePath == "" || lineNum == 0 || content == "" {
-			rc.logger.Warn(context.Background(),
-				"Skipping issue with missing required fields at index %d", i)
-			continue
-		}
-
-		// Normalize the category if provided, otherwise use a default
-		if category == "" {
-			category = "code-style" // Default category
-		}
-
-		// Create the PotentialIssue with all extracted information
-		issue := PotentialIssue{
-			FilePath:   filePath,
-			LineNumber: lineNum,
-			RuleID:     ruleID,
-			Content:    content,
-			Confidence: confidence,
-			Context:    contextMap,
-			Suggestion: suggestion,
-			Category:   category,
-			Metadata:   metadata,
-		}
-
-		// Ensure the confidence score is within valid range
-		if issue.Confidence < 0 || issue.Confidence > 1 {
-			issue.Confidence = 0.5 // Set a default confidence if invalid
-		}
-
-		potentialIssues = append(potentialIssues, issue)
 	}
 
-	// Log the parsing results for debugging
-	rc.logger.Debug(context.Background(),
-		"Parsed %d potential issues from detection results",
-		len(potentialIssues))
-
-	// Return an empty slice rather than nil if no issues were found
-	if potentialIssues == nil {
-		potentialIssues = make([]PotentialIssue, 0)
-	}
-
-	return potentialIssues, nil
+	// Return the results in a format the orchestrator expects
+	return map[string]interface{}{
+		"potential_issues": issues, // This will be properly serialized as an array
+		"metadata": map[string]interface{}{
+			"issue_count": len(issues),
+			"task_id":     task.ID,
+			"timestamp":   time.Now().UTC().Format(time.RFC3339),
+		},
+	}, nil
 }
 
 // Add to review_stages.go.

@@ -312,7 +312,7 @@ func NewPRReviewAgent(ctx context.Context, githubTool GitHubInterface, dbPath st
 	qaProcessor := NewRepoQAProcessor(store)
 	ruleChecker := NewRuleChecker(metrics, logger)
 	// TODO: fine grain context window
-	reviewFilter := NewReviewFilter(metrics, 15, logger)
+	reviewFilter := NewReviewFilter(ctx, metrics, 15, logger)
 
 	config := agents.OrchestrationConfig{
 		MaxConcurrent:  5,
@@ -614,7 +614,7 @@ func (a *PRReviewAgent) performInitialReview(ctx context.Context, tasks []PRRevi
 				"changes":      chunk.changes,
 				"chunk_start":  chunk.startline,
 				"chunk_end":    chunk.endline,
-				"chunk_number": i + 1,
+				"chunk_number": chunkIdx + 1,
 				"total_chunks": len(task.Chunks),
 				"line_range": map[string]int{
 					"start": chunk.startline,
@@ -655,7 +655,8 @@ func (a *PRReviewAgent) performInitialReview(ctx context.Context, tasks []PRRevi
 					} else {
 						// Show the results for this file
 						if len(reviewComments) == 0 {
-							console.NoIssuesFound(task.FilePath)
+
+							console.NoIssuesFound(task.FilePath, chunkIdx+1, len(task.Chunks))
 						} else {
 							console.ShowComments(reviewComments, a.Metrics(ctx))
 						}
