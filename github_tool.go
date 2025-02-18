@@ -187,6 +187,16 @@ func (g *GitHubTools) GetPullRequestChanges(ctx context.Context, prNumber int) (
 					file.GetFilename(), err)
 			}
 			fileChange.FileContent = content
+		} else {
+			previousContent, err := g.getPreviousContent(ctx, file.GetFilename(), prNumber)
+			if err != nil {
+				logger.Warn(ctx, "Could not get previous content for deleted file %s: %v",
+					file.GetFilename(), err)
+				// Continue processing even if we can't get previous content
+				fileChange.FileContent = ""
+			} else {
+				fileChange.FileContent = previousContent
+			}
 		}
 
 		changes.Files = append(changes.Files, fileChange)
@@ -546,6 +556,42 @@ func (g *GitHubTools) PreviewReview(ctx context.Context, console ConsoleInterfac
 	}
 
 	return true, nil
+}
+
+// getPreviousContent retrieves the content of a file from the base branch
+func (g *GitHubTools) getPreviousContent(ctx context.Context, filepath string, prNumber int) (string, error) {
+	// Get PR details to find base commit
+	pr, _, err := g.client.PullRequests.Get(ctx, g.owner, g.repo, prNumber)
+	if err != nil {
+		return "", fmt.Errorf("failed to get PR details: %w", err)
+	}
+
+	// Get the file content at the base commit
+	opts := &github.RepositoryContentGetOptions{
+		Ref: pr.GetBase().GetSHA(),
+	}
+
+	content, _, resp, err := g.client.Repositories.GetContents(
+		ctx,
+		g.owner,
+		g.repo,
+		filepath,
+		opts,
+	)
+
+	if err != nil {
+		if resp != nil && resp.StatusCode == 404 {
+			return "", fmt.Errorf("file not found in base branch: %s", filepath)
+		}
+		return "", fmt.Errorf("failed to get previous content: %w", err)
+	}
+
+	fileContent, err := content.GetContent()
+	if err != nil {
+		return "", fmt.Errorf("failed to decode content: %w", err)
+	}
+
+	return fileContent, nil
 }
 
 func newFileFilterRules() *fileFilterRules {
