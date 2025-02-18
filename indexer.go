@@ -268,9 +268,11 @@ func (ri *RepoIndexer) processChangedFiles(ctx context.Context, changes []*githu
 
 // Add this to indexer.go.
 func (ri *RepoIndexer) processChangedFile(ctx context.Context, file *github.CommitFile, dbPath string) error {
+	logger := logging.GetLogger()
 	// Get the file content
 	content, err := ri.githubTools.GetFileContent(ctx, file.GetFilename())
 	if err != nil {
+		logger.Debug(ctx, "failed to get file content: %v", err)
 		return fmt.Errorf("failed to get file content: %w", err)
 	}
 
@@ -279,6 +281,7 @@ func (ri *RepoIndexer) processChangedFile(ctx context.Context, file *github.Comm
 		WithMaxBytes(9000),
 	)
 	if err != nil {
+		logger.Debug(ctx, "failed to create chunk config: %v", err)
 		return fmt.Errorf("failed to create chunk config: %w", err)
 	}
 	config.fileMetadata = map[string]interface{}{
@@ -289,6 +292,7 @@ func (ri *RepoIndexer) processChangedFile(ctx context.Context, file *github.Comm
 	// Chunk the file content
 	chunks, err := chunkfile(ctx, content, file.GetPatch(), config)
 	if err != nil {
+		logger.Debug(ctx, "failed to chunk file: %v", err)
 		return fmt.Errorf("failed to chunk file: %w", err)
 	}
 
