@@ -63,7 +63,7 @@ func NewChunkConfig(options ...ChunkConfigOption) (*ChunkConfig, error) {
 	// Start with sensible defaults
 	config := &ChunkConfig{
 		Strategy:         ChunkBySize,
-		MaxTokens:        2500,
+		MaxTokens:        1500,
 		ContextLines:     5,
 		OverlapLines:     2,
 		MinChunkSize:     10,

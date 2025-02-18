@@ -161,23 +161,24 @@ func parseReviewComments(ctx context.Context, filePath string, commentsStr strin
 
 func extractComments(ctx context.Context, result interface{}, filePath string, metric MetricsCollector) ([]PRReviewComment, error) {
 	switch v := result.(type) {
+	case []RuleCheckResult:
+		// Rule checker results need review filter processing - return empty slice
+		return []PRReviewComment{}, nil
 
-	case []PotentialIssue:
-		// Rule checker results don't need comment extraction
-		if result == nil || IsEmptyResult(result) {
-			return nil, nil // Empty result is valid for rule checker
-		}
-		return nil, fmt.Errorf("rule_checker results should be processed by review_filter")
 	case map[string]interface{}:
+		// Check if this is a rule checker result
+		if _, ok := v["potential_issues"]; ok {
+			// Rule checker results need review filter processing - return empty slice
+			return []PRReviewComment{}, nil
+		}
+
+		// Handle review filter results
 		if isReviewFilterResult(v) {
 			return extractFilteredComments(result, filePath, metric)
 		}
 
-		resultMap, ok := result.(map[string]interface{})
-		if !ok {
-			return nil, fmt.Errorf("invalid task result type: %T", result)
-		}
-		commentsRaw, exists := resultMap["comments"]
+		// Handle regular review comments
+		commentsRaw, exists := v["comments"]
 		if !exists {
 			return nil, fmt.Errorf("prediction result missing 'comments' field")
 		}
@@ -188,9 +189,9 @@ func extractComments(ctx context.Context, result interface{}, filePath string, m
 		}
 
 		return parseReviewComments(ctx, filePath, commentsStr, metric)
+
 	default:
 		return nil, fmt.Errorf("unexpected result type: %T", result)
-
 	}
 }
 
