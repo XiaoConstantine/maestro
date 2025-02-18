@@ -15,6 +15,7 @@ import (
 	"github.com/XiaoConstantine/dspy-go/pkg/core"
 	"github.com/XiaoConstantine/dspy-go/pkg/logging"
 	"github.com/google/go-github/v68/github"
+	"github.com/logrusorgru/aurora"
 )
 
 // RepoIndexer handles the indexing of repository content into the RAG store.
@@ -250,6 +251,51 @@ func (ri *RepoIndexer) getCommitDifferences(ctx context.Context, oldSHA, newSHA 
 func (ri *RepoIndexer) processChangedFiles(ctx context.Context, changes []*github.CommitFile, dbPath string) error {
 	logger := logging.GetLogger()
 
+	console := NewConsole(os.Stdout, logger, nil)
+	var totalChanges int
+	for _, file := range changes {
+		if !shouldSkipFile(file.GetFilename()) {
+			totalChanges++
+		}
+	}
+
+	if console.Color() {
+		console.Printf("%s %s %s\n",
+			aurora.Green("⚡").Bold(),
+			aurora.White(fmt.Sprintf("Starting incremental indexing for %d %s",
+				totalChanges,
+				pluralize("file", totalChanges))).Bold(),
+			aurora.Blue("...").String(),
+		)
+	} else {
+		console.Printf("⚡ Starting incremental indexing for %d %s...\n",
+			totalChanges,
+			pluralize("file", totalChanges))
+	}
+
+	var processedFiles int32
+	console.StartSpinner("Processing changed files...")
+
+	// Create a ticker for updating progress
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	// Start progress updates in background
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				current := atomic.LoadInt32(&processedFiles)
+				if totalChanges > 0 {
+					percentage := float64(current) / float64(totalChanges) * 100
+					console.UpdateSpinnerText(fmt.Sprintf("Processing changed files... %.1f%% (%d/%d files)",
+						percentage, current, totalChanges))
+				}
+			}
+		}
+	}()
+
 	for _, file := range changes {
 		if shouldSkipFile(file.GetFilename()) {
 			continue
@@ -259,8 +305,28 @@ func (ri *RepoIndexer) processChangedFiles(ctx context.Context, changes []*githu
 
 		// Process the file and update the index
 		if err := ri.processChangedFile(ctx, file, dbPath); err != nil {
+			console.StopSpinner()
+			console.FileError(file.GetFilename(), fmt.Errorf("failed to process file: %w", err))
 			return fmt.Errorf("failed to process file %s: %w", file.GetFilename(), err)
 		}
+
+		atomic.AddInt32(&processedFiles, 1)
+	}
+
+	console.StopSpinner()
+
+	// Show completion message
+	if console.Color() {
+		console.Printf("%s %s\n",
+			aurora.Green("✓").Bold(),
+			aurora.White(fmt.Sprintf("Successfully processed %d %s",
+				totalChanges,
+				pluralize("file", totalChanges))).Bold(),
+		)
+	} else {
+		console.Printf("✓ Successfully processed %d %s\n",
+			totalChanges,
+			pluralize("file", totalChanges))
 	}
 
 	return nil
