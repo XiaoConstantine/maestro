@@ -37,6 +37,9 @@ type ChunkConfig struct {
 	// Recommended range: 3-15. More context helps understanding but increases storage
 	ContextLines int
 
+	// MaxBytes is for byte-size limitingOptional byte limit, only used for specific cases
+	MaxBytes *int
+
 	// OverlapLines controls how many lines overlap between chunks
 	// Recommended range: 2-10. More overlap helps maintain context but increases storage
 	OverlapLines int
@@ -64,6 +67,7 @@ func NewChunkConfig(options ...ChunkConfigOption) (*ChunkConfig, error) {
 	config := &ChunkConfig{
 		Strategy:         ChunkBySize,
 		MaxTokens:        1500,
+		MaxBytes:         nil,
 		ContextLines:     5,
 		OverlapLines:     2,
 		MinChunkSize:     10,
@@ -113,6 +117,12 @@ func WithOverlapLines(lines int) ChunkConfigOption {
 func WithFilePattern(pattern string, config ChunkConfig) ChunkConfigOption {
 	return func(c *ChunkConfig) {
 		c.FilePatterns[pattern] = config
+	}
+}
+
+func WithMaxBytes(bytes int) ChunkConfigOption {
+	return func(c *ChunkConfig) {
+		c.MaxBytes = &bytes
 	}
 }
 
@@ -415,13 +425,15 @@ func chunkBySize(content string, config *ChunkConfig) ([]ReviewChunk, error) {
 	var chunks []ReviewChunk
 	var currentLines []string
 	currentTokens := 0
+	currentBytes := 0
 	chunkStartLine := 1
 
 	for i, line := range lines {
 		lineTokens := estimatetokens(line)
+		lineBytes := len(line)
 
 		// If adding this line would exceed max tokens, finish the current chunk
-		if currentTokens+lineTokens > config.MaxTokens && len(currentLines) > 0 {
+		if (currentTokens+lineTokens > config.MaxTokens || config.MaxBytes != nil && currentBytes+lineBytes > *config.MaxBytes) && len(currentLines) > 0 {
 			chunkContent := strings.Join(currentLines, "\n")
 
 			chunk := createCompleteChunk(
@@ -443,6 +455,8 @@ func chunkBySize(content string, config *ChunkConfig) ([]ReviewChunk, error) {
 		}
 
 		currentLines = append(currentLines, line)
+		currentTokens += lineTokens
+		currentBytes += lineBytes
 		currentTokens += lineTokens
 	}
 

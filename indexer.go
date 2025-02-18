@@ -86,7 +86,8 @@ func (ri *RepoIndexer) IndexRepository(ctx context.Context, branch, dbPath strin
 	// Process only the changed files
 	err = ri.processChangedFiles(ctx, changes, dbPath)
 	if err != nil {
-		return fmt.Errorf("failed to increment index")
+		logger.Info(ctx, "failed to increment index: %v", err)
+		return fmt.Errorf("failed to increment index: %v", err)
 	}
 	if err := ri.updateLastIndexedCommit(ctx, latestSHA); err != nil {
 		return fmt.Errorf("failed to update last indexed commit: %w", err)
@@ -274,7 +275,9 @@ func (ri *RepoIndexer) processChangedFile(ctx context.Context, file *github.Comm
 	}
 
 	// Configure chunking
-	config, err := NewChunkConfig()
+	config, err := NewChunkConfig(
+		WithMaxBytes(9000),
+	)
 	if err != nil {
 		return fmt.Errorf("failed to create chunk config: %w", err)
 	}
@@ -283,9 +286,8 @@ func (ri *RepoIndexer) processChangedFile(ctx context.Context, file *github.Comm
 		"file_type": filepath.Ext(file.GetFilename()),
 		"package":   filepath.Base(filepath.Dir(file.GetFilename())),
 	}
-
 	// Chunk the file content
-	chunks, err := chunkfile(ctx, content, "", config)
+	chunks, err := chunkfile(ctx, content, file.GetPatch(), config)
 	if err != nil {
 		return fmt.Errorf("failed to chunk file: %w", err)
 	}
