@@ -129,6 +129,7 @@ func NewReviewChainProcessor(ctx context.Context, metrics MetricsCollector, logg
 				{Field: core.Field{Name: "line_range"}},
 			},
 			[]core.OutputField{
+				{Field: core.NewField("potential_issues")},
 				{Field: core.NewField("context_valid")},
 				{Field: core.NewField("confidence")},
 				{Field: core.NewField("enhanced_context")},
@@ -155,6 +156,7 @@ func NewReviewChainProcessor(ctx context.Context, metrics MetricsCollector, logg
 				{Field: core.Field{Name: "context_valid"}},
 			},
 			[]core.OutputField{
+				{Field: core.NewField("potential_issues")},
 				{Field: core.NewField("rule_compliant")},
 				{Field: core.NewField("refined_suggestion")},
 			},

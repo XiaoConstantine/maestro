@@ -21,7 +21,7 @@ func (p *CodeReviewProcessor) Process(ctx context.Context, task agents.Task, con
 	logger := logging.GetLogger()
 	metadata, err := extractReviewMetadata(task.Metadata)
 	if err != nil {
-		return nil, fmt.Errorf("task %s: %w", task.ID, err)
+		return nil, fmt.Errorf("code_review task %s: %w", task.ID, err)
 	}
 
 	p.metrics.TrackReviewStart(ctx, metadata.Category)
@@ -171,6 +171,7 @@ func extractComments(ctx context.Context, result interface{}, filePath string, m
 			// Rule checker results need review filter processing - return empty slice
 			return []PRReviewComment{}, nil
 		}
+		logging.GetLogger().Info(ctx, "result: %v", v)
 
 		// Handle review filter results
 		if isReviewFilterResult(v) {
