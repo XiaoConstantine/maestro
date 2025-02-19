@@ -310,9 +310,6 @@ func NewPRReviewAgent(ctx context.Context, githubTool GitHubInterface, dbPath st
 	}
 
 	qaProcessor := NewRepoQAProcessor(store)
-	//	ruleChecker := NewRuleChecker(metrics, logger)
-	// TODO: fine grain context window
-	//	reviewFilter := NewReviewFilter(ctx, metrics, 15, logger)
 
 	config := agents.OrchestrationConfig{
 		MaxConcurrent:  5,
@@ -328,8 +325,6 @@ func NewPRReviewAgent(ctx context.Context, githubTool GitHubInterface, dbPath st
 			"comment_response": &CommentResponseProcessor{metrics: metrics},
 			"repo_qa":          qaProcessor,
 			"review_chain":     NewReviewChainProcessor(ctx, metrics, logger),
-			//			"rule_checker":     ruleChecker,
-			//			"review_filter":    reviewFilter,
 		},
 		Options: core.WithGenerateOptions(
 			core.WithTemperature(0.3),
@@ -658,7 +653,7 @@ func (a *PRReviewAgent) processChunksParallel(ctx context.Context, tasks []PRRev
 	processedChunks := atomic.NewInt32(0)
 
 	// Start worker pool
-	numWorkers := 1 // Configurable based on system resources
+	numWorkers := 3 // Configurable based on system resources
 	var wg sync.WaitGroup
 	for i := 0; i < numWorkers; i++ {
 		wg.Add(1)
