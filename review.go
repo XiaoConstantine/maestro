@@ -532,7 +532,6 @@ func (a *PRReviewAgent) performInitialReview(ctx context.Context, tasks []PRRevi
 func (a *PRReviewAgent) analyzePatterns(ctx context.Context, tasks []PRReviewTask, console ConsoleInterface) ([]*Content, []*Content, error) {
 	var repoPatterns []*Content
 	var guidelineMatches []*Content
-	return repoPatterns, guidelineMatches, nil
 
 	for _, task := range tasks {
 
@@ -696,31 +695,48 @@ func (a *PRReviewAgent) processChunksParallel(ctx context.Context, tasks []PRRev
 						work.chunkIdx+1, work.task.FilePath, err)
 					continue
 				}
+				logger := logging.GetLogger()
 
 				// Process results
 				for _, taskResult := range result.CompletedTasks {
-					comments, err := extractComments(ctx, taskResult, work.task.FilePath, a.Metrics(ctx))
+
 					taskMap, ok := taskResult.(map[string]interface{})
 					if !ok {
 						// If the conversion fails, log with the actual type for debugging
 						continue
 					}
 
-					// Now we can safely try to get the task type
-					if err != nil {
-						logging.GetLogger().Error(ctx, "Failed to extract comments from task %s: %v", taskMap["task_type"].(string), err)
+					taskType, _ := taskMap["task_type"].(string)
+
+					switch taskType {
+					case "review_chain":
+						// ReviewChain output will trigger new tasks - no comments to extract
+						// We can log the chain results for debugging
+						logger.Debug(ctx, "Processed review chain result: %v", taskMap)
 						continue
+
+					case "code_review", "comment_response":
+						// These are the tasks that actually generate comments
+						comments, err := extractComments(ctx, taskResult, work.task.FilePath, a.Metrics(ctx))
+						if err != nil {
+							logging.GetLogger().Error(ctx, "Failed to extract comments from task %s: %v", taskType, err)
+							continue
+						}
+
+						// Thread-safe updates
+						mu.Lock()
+						if len(comments) == 0 {
+							console.NoIssuesFound(work.task.FilePath, work.chunkIdx+1, len(work.task.Chunks))
+						} else {
+							console.ShowComments(comments, a.Metrics(ctx))
+						}
+						resultChan <- comments
+						mu.Unlock()
+
+					default:
+						logger.Warn(ctx, "Unknown task type: %s", taskType)
 					}
 
-					// Thread-safe updates
-					mu.Lock()
-					if len(comments) == 0 {
-						console.NoIssuesFound(work.task.FilePath, work.chunkIdx+1, len(work.task.Chunks))
-					} else {
-						console.ShowComments(comments, a.Metrics(ctx))
-					}
-					resultChan <- comments
-					mu.Unlock()
 				}
 
 				// Update progress
