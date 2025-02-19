@@ -454,7 +454,6 @@ func runInteractiveMode(cfg *config) error {
 		}
 
 		if useCustomModel {
-
 			titleCaser := cases.Title(language.English)
 			choices := getModelChoices()
 
@@ -547,6 +546,7 @@ Examples:
 		}
 	}
 
+	logger.Debug(ctx, "model config provider: %s, model name: %s, model config: %v", cfg.modelProvider, cfg.modelName, cfg.modelConfig)
 	modelID := constructModelID(cfg)
 
 	if err := core.ConfigureDefaultLLM(cfg.apiKey, modelID); err != nil {
