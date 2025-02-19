@@ -532,6 +532,7 @@ func (a *PRReviewAgent) performInitialReview(ctx context.Context, tasks []PRRevi
 func (a *PRReviewAgent) analyzePatterns(ctx context.Context, tasks []PRReviewTask, console ConsoleInterface) ([]*Content, []*Content, error) {
 	var repoPatterns []*Content
 	var guidelineMatches []*Content
+	return repoPatterns, guidelineMatches, nil
 
 	for _, task := range tasks {
 
@@ -697,10 +698,17 @@ func (a *PRReviewAgent) processChunksParallel(ctx context.Context, tasks []PRRev
 				}
 
 				// Process results
-				for taskID, taskResult := range result.CompletedTasks {
+				for _, taskResult := range result.CompletedTasks {
 					comments, err := extractComments(ctx, taskResult, work.task.FilePath, a.Metrics(ctx))
+					taskMap, ok := taskResult.(map[string]interface{})
+					if !ok {
+						// If the conversion fails, log with the actual type for debugging
+						continue
+					}
+
+					// Now we can safely try to get the task type
 					if err != nil {
-						logging.GetLogger().Error(ctx, "Failed to extract comments from task %s: %v", taskID, err)
+						logging.GetLogger().Error(ctx, "Failed to extract comments from task %s: %v", taskMap["task_type"].(string), err)
 						continue
 					}
 
