@@ -2,15 +2,14 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 
 	"github.com/XiaoConstantine/dspy-go/pkg/agents"
-	"github.com/XiaoConstantine/dspy-go/pkg/core"
 	"github.com/XiaoConstantine/dspy-go/pkg/logging"
-	"github.com/XiaoConstantine/dspy-go/pkg/modules"
+	"golang.org/x/exp/maps"
 )
 
 type CodeReviewProcessor struct {
@@ -18,94 +17,81 @@ type CodeReviewProcessor struct {
 }
 
 func (p *CodeReviewProcessor) Process(ctx context.Context, task agents.Task, context map[string]interface{}) (interface{}, error) {
-	logger := logging.GetLogger()
-	metadata, err := extractReviewMetadata(task.Metadata)
-	if err != nil {
-		return nil, fmt.Errorf("code_review task %s: %w", task.ID, err)
+	// Extract the handoff from metadata
+	handoffRaw, exists := task.Metadata["handoff"]
+	if !exists {
+		return nil, fmt.Errorf("missing review handoff in metadata")
 	}
 
-	p.metrics.TrackReviewStart(ctx, metadata.Category)
+	handoff, ok := handoffRaw.(*ReviewHandoff)
+	if !ok {
+		return nil, fmt.Errorf("invalid handoff type: %T", handoffRaw)
+	}
 
-	instruction := buildReviewInstruction(metadata.Guidelines)
-	// Create signature for code review
-	signature := core.NewSignature(
-		[]core.InputField{
-			{Field: core.Field{Name: "file_content"}},
-			{Field: core.Field{Name: "changes"}},
-			{Field: core.Field{Name: "guidelines"}},    // Added for best practices
-			{Field: core.Field{Name: "repo_patterns"}}, // Added for consistency
+	var comments []PRReviewComment
+
+	// Convert validated issues into well-formatted comments
+	for _, issue := range handoff.ValidatedIssues {
+		// Create base comment
+		comment := PRReviewComment{
+			FilePath:   issue.FilePath,
+			LineNumber: issue.LineRange.Start,
+			Category:   issue.Category,
+			Severity:   issue.Severity,
+			Content:    formatCommentContent(issue),
+			Suggestion: formatSuggestion(issue),
+		}
+
+		// Track metrics for the comment
+		p.metrics.TrackReviewComment(ctx, comment, true)
+		comments = append(comments, comment)
+	}
+
+	// Return the formatted comments
+	return map[string]interface{}{
+		"comments": comments,
+		"metadata": map[string]interface{}{
+			"validation_score": calculateValidationScore(handoff),
+			"issue_count":      len(comments),
+			"file_path":        handoff.ChainOutput.ReviewMetadata.FilePath,
 		},
-		[]core.OutputField{
-			{Field: core.NewField("comments")},
-			{Field: core.NewField("summary")},
-		},
-	).WithInstruction(instruction)
-	// 	).WithInstruction(`Review the code changes and provide specific, actionable feedback.
-	// Consider both best practices from guidelines and consistency with existing patterns.
-	// For each issue found, output in following format:
-	//
-	// comments:
-	//   file: [filename]
-	//   line: [specific line number where the issue occurs]
-	//   severity: [must be one of: critical, warning, suggestion]
-	//   category: [must be one of: error-handling, code-style, performance, security, documentation]
-	//   content: [clear explanation of the issue and why it matters]
-	//   suggestion: [specific code example or clear steps to fix the issue]
-	//
-	// Review for these specific issues:
-	// 1. Error Handling
-	//    - Missing error checks or ignored errors
-	//    - Inconsistent error handling patterns
-	//    - Silent failures
-	// 2. Code Quality
-	//    - Function complexity and length
-	//    - Code duplication
-	//    - Unclear logic or control flow
-	// 3. Documentation
-	//    - Missing documentation for exported items
-	//    - Unclear or incomplete comments
-	// 4. Performance
-	//    - Inefficient patterns
-	//    - Resource leaks
-	//    - Unnecessary allocations
-	// 5. Best Practices
-	//    - Go idioms and conventions
-	//    - Package organization
-	//    - Clear naming conventions`)
-	//
-	// Create predict module for review
-	predict := modules.NewPredict(signature)
-
-	if metadata.FileContent == "" && metadata.Changes == "" {
-		return nil, fmt.Errorf("both file content and changes cannot be empty for file %s", metadata.FilePath)
-	}
-	logger.Debug(ctx, "Extracted metadata for task %s: file_path=%s, content_length=%d",
-		task.ID, metadata.FilePath, len(metadata.FileContent))
-	// Process the review
-	result, err := predict.Process(ctx, map[string]interface{}{
-		"file_content":  metadata.FileContent,
-		"changes":       metadata.Changes,
-		"guidelines":    metadata.Guidelines,
-		"repo_patterns": metadata.ReviewPatterns,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("prediction failed: %w", err)
-	}
-
-	// Parse and format comments
-	comments, err := extractComments(ctx, result, metadata.FilePath, p.metrics)
-
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse comments for task %s: %w", task.ID, err)
-	}
-
-	logger.Debug(ctx, "Successfully processed review for task %s with %d comments",
-		task.ID, len(comments))
-
-	return comments, nil
+	}, nil
 }
 
-// Helper functions.
+// Helper function to format comment content with enhanced context.
+func formatCommentContent(issue ValidatedIssue) string {
+	var content strings.Builder
+
+	// Start with the core issue description
+	content.WriteString(issue.Context)
+
+	// Add validation context if confidence is high
+	if issue.Confidence > 0.9 {
+		content.WriteString("\n\nThis issue was validated with high confidence based on:")
+		content.WriteString("\n• Context analysis")
+		content.WriteString("\n• Rule compliance verification")
+		content.WriteString("\n• Impact assessment")
+	}
+
+	return content.String()
+}
+
+// Helper function to format actionable suggestions.
+func formatSuggestion(issue ValidatedIssue) string {
+	var suggestion strings.Builder
+
+	suggestion.WriteString("Recommended fix:\n")
+	suggestion.WriteString(issue.Suggestion)
+
+	// Add any additional context from rule compliance
+	if issue.ValidationDetails.RuleCompliant {
+		suggestion.WriteString("\n\nThis suggestion follows established patterns and best practices.")
+	}
+
+	return suggestion.String()
+}
+
+// // Helper functions.
 func parseReviewComments(ctx context.Context, filePath string, commentsStr string, metric MetricsCollector) ([]PRReviewComment, error) {
 	var comments []PRReviewComment
 
@@ -160,33 +146,56 @@ func parseReviewComments(ctx context.Context, filePath string, commentsStr strin
 }
 
 func extractComments(ctx context.Context, result interface{}, filePath string, metric MetricsCollector) ([]PRReviewComment, error) {
+	logger := logging.GetLogger()
+	logger.Debug(ctx, "Extracting comments from result type: %T", result)
 	switch v := result.(type) {
-	case []RuleCheckResult:
-		// Rule checker results need review filter processing - return empty slice
-		return []PRReviewComment{}, nil
-
 	case map[string]interface{}:
-		// Check if this is a rule checker result
-		if _, ok := v["potential_issues"]; ok {
-			// Rule checker results need review filter processing - return empty slice
-			return []PRReviewComment{}, nil
-		}
-		logging.GetLogger().Info(ctx, "result: %v", v)
-
-		// Handle review filter results
-		if isReviewFilterResult(v) {
-			return extractFilteredComments(result, filePath, metric)
+		logger.Debug(ctx, "Processing map result with keys: %v", maps.Keys(v))
+		// First check if this is a direct comment result
+		if comments, ok := v["comments"].([]PRReviewComment); ok {
+			return comments, nil
 		}
 
-		// Handle regular review comments
+		// Check for handoff in metadata
+		if metadata, ok := v["metadata"].(map[string]interface{}); ok {
+
+			logger.Debug(ctx, "Found metadata with keys: %v", maps.Keys(metadata))
+			if handoffRaw, ok := metadata["handoff"]; ok {
+
+				logger.Debug(ctx, "Found handoff of type: %T", handoffRaw)
+				handoff, ok := handoffRaw.(*ReviewHandoff)
+				if !ok {
+					return nil, fmt.Errorf("invalid handoff type: %T", handoffRaw)
+				}
+
+				// Convert validated issues into comments
+				var comments []PRReviewComment
+				for _, issue := range handoff.ValidatedIssues {
+					comment := PRReviewComment{
+						FilePath:   issue.FilePath,
+						LineNumber: issue.LineRange.Start,
+						Content:    issue.Context,
+						Severity:   issue.Severity,
+						Category:   issue.Category,
+						Suggestion: issue.Suggestion,
+					}
+
+					metric.TrackReviewComment(ctx, comment, true)
+					comments = append(comments, comment)
+				}
+				return comments, nil
+			}
+		}
+
+		// Legacy format handling for string-based comments
 		commentsRaw, exists := v["comments"]
 		if !exists {
-			return nil, fmt.Errorf("prediction result missing 'comments' field")
+			return nil, fmt.Errorf("missing comments in result")
 		}
 
 		commentsStr, ok := commentsRaw.(string)
 		if !ok {
-			return nil, fmt.Errorf("comments must be string, got %T", commentsRaw)
+			return nil, fmt.Errorf("invalid comments format: %T", commentsRaw)
 		}
 
 		return parseReviewComments(ctx, filePath, commentsStr, metric)
@@ -195,110 +204,6 @@ func extractComments(ctx context.Context, result interface{}, filePath string, m
 		return nil, fmt.Errorf("unexpected result type: %T", result)
 	}
 }
-
-func extractReviewMetadata(metadata map[string]interface{}) (*ReviewMetadata, error) {
-	rm := &ReviewMetadata{}
-
-	// Extract category (always required)
-	categoryRaw, exists := metadata["category"]
-	if !exists {
-		return nil, fmt.Errorf("missing required field 'category' in metadata")
-	}
-	category, ok := categoryRaw.(string)
-	if !ok {
-		return nil, fmt.Errorf("field 'category' must be string, got %T", categoryRaw)
-	}
-	rm.Category = category
-
-	filePathRaw, exists := metadata["file_path"]
-	if !exists {
-		return nil, fmt.Errorf("missing required field 'file_path' for file review")
-	}
-	filePath, ok := filePathRaw.(string)
-	if !ok {
-		return nil, fmt.Errorf("field 'file_path' must be string, got %T", filePathRaw)
-	}
-	rm.FilePath = filePath
-
-	// Extract changes (required for file reviews)
-	changesRaw, exists := metadata["changes"]
-	if !exists {
-		return nil, fmt.Errorf("missing required field 'changes' for file review")
-	}
-	changes, ok := changesRaw.(string)
-	if !ok {
-		return nil, fmt.Errorf("field 'changes' must be string, got %T", changesRaw)
-	}
-	rm.Changes = changes
-
-	if fileContent, ok := metadata["file_content"]; ok {
-		if str, ok := fileContent.(string); ok {
-			rm.FileContent = str
-		}
-	}
-	if start, ok := getIntFromMetadata(metadata, "chunk_start"); ok {
-		rm.LineRange.Start = start
-	}
-
-	if end, ok := getIntFromMetadata(metadata, "chunk_end"); ok {
-		rm.LineRange.End = end
-	}
-
-	if chunkNum, ok := getIntFromMetadata(metadata, "chunk_number"); ok {
-		rm.ChunkNumber = chunkNum
-	}
-	if totalChunks, ok := getIntFromMetadata(metadata, "total_chunks"); ok {
-		rm.TotalChunks = totalChunks
-	}
-
-	if rangeData, ok := metadata["line_range"].(map[string]interface{}); ok {
-		startLine, startOk := getIntFromMetadata(rangeData, "start")
-		endLine, endOk := getIntFromMetadata(rangeData, "end")
-		if !startOk || !endOk {
-			return nil, fmt.Errorf("invalid line range format: start and end must be integers")
-		}
-
-		rm.LineRange = LineRange{
-			Start: startLine,
-			End:   endLine,
-			File:  rm.FilePath,
-		}
-
-		if !rm.LineRange.IsValid() {
-			return nil, fmt.Errorf("invalid line range: %v", rm.LineRange)
-		}
-	}
-	// Validate chunk information
-	if rm.LineRange.Start == 0 || rm.LineRange.End == 0 {
-		return nil, fmt.Errorf("missing or invalid chunk line range")
-	}
-	if rm.ChunkNumber == 0 || rm.TotalChunks == 0 {
-		return nil, fmt.Errorf("missing or invalid chunk numbering")
-	}
-	if patternsRaw, exists := metadata["repo_patterns"]; exists {
-		if patterns, ok := patternsRaw.([]*Content); ok {
-			rm.ReviewPatterns = patterns
-		} else {
-			// Log a warning but don't fail - patterns are optional
-			logging.GetLogger().Warn(context.Background(),
-				"Invalid repo_patterns type: %T, expected []*Content", patternsRaw)
-		}
-	}
-
-	// Extract guidelines for best practices checking
-	if guidelinesRaw, exists := metadata["guidelines"]; exists {
-		if guidelines, ok := guidelinesRaw.([]*Content); ok {
-			rm.Guidelines = guidelines
-		} else {
-			// Log a warning but don't fail - guidelines are optional
-			logging.GetLogger().Warn(context.Background(),
-				"Invalid guidelines type: %T, expected []*Content", guidelinesRaw)
-		}
-	}
-
-	return rm, nil
-}
-
 func validateSeverity(severity string) string {
 	validSeverities := map[string]bool{
 		"critical":   true,
@@ -354,150 +259,40 @@ func isValidComment(comment PRReviewComment) bool {
 	return true
 }
 
-func getIntFromMetadata(metadata map[string]interface{}, key string) (int, bool) {
-	if val, exists := metadata[key]; exists {
-		switch v := val.(type) {
-		case int:
-			return v, true
-		case float64:
-			return int(v), true
-		case string:
-			if num, err := strconv.Atoi(v); err == nil {
-				return num, true
-			}
-		case json.Number:
-			if i, err := v.Int64(); err == nil {
-				return int(i), true
-			}
+// A helper function to calculate an overall validation score from the review handoff.
+// This provides a numerical measure of how confident we are in our review findings.
+func calculateValidationScore(handoff *ReviewHandoff) float64 {
+	if len(handoff.ValidatedIssues) == 0 {
+		return 0.0
+	}
+
+	// We'll calculate a weighted average considering multiple factors:
+	// - Individual issue confidence scores
+	// - Validation completeness
+	// - Number of validated issues
+
+	var totalScore float64
+	for _, issue := range handoff.ValidatedIssues {
+		// Start with the base confidence score
+		issueScore := issue.Confidence
+
+		// Weight the score based on validation completeness
+		if issue.ValidationDetails.ContextValid {
+			issueScore *= 0.4 // Context validation carries 40% weight
 		}
-	}
-	return 0, false
-}
-
-func buildReviewInstruction(guidelines []*Content) string {
-	var builder strings.Builder
-
-	builder.WriteString(`Review the code changes following these specific guidelines:
-
-For each potential issue, provide:
-- Precise location (file and line number)
-- Clear explanation of the issue
-- Specific suggestion for improvement
-- Reference to the relevant guideline
-
-Focus on these key aspects based on the matched guidelines:
-`)
-
-	// Add specific guidance from each relevant guideline
-	for _, guideline := range guidelines {
-		builder.WriteString(fmt.Sprintf("\n• %s:\n", guideline.Metadata["category"]))
-		builder.WriteString(extractKeyPoints(guideline.Text))
-	}
-
-	return builder.String()
-}
-
-// extractKeyPoints analyzes guideline text and extracts the most important points
-// for code review. It looks for specific patterns that indicate key requirements,
-// common issues, and best practices.
-func extractKeyPoints(content string) string {
-	// Split content into sections based on common headers
-	sections := strings.Split(content, "\n")
-	var keyPoints strings.Builder
-
-	inRelevantSection := false
-	for _, line := range sections {
-		// Look for sections that typically contain key review points
-		if strings.Contains(line, "Review Criteria:") ||
-			strings.Contains(line, "Best Practice Guidelines:") {
-			inRelevantSection = true
-			continue
+		if issue.ValidationDetails.RuleCompliant {
+			issueScore *= 0.3 // Rule compliance carries 30% weight
+		}
+		if issue.ValidationDetails.IsActionable {
+			issueScore *= 0.3 // Actionability carries 30% weight
 		}
 
-		// Stop extracting when we hit examples or other sections
-		if strings.Contains(line, "Examples:") ||
-			strings.Contains(line, "Implementation:") {
-			inRelevantSection = false
-		}
-
-		// Collect bullet points and key statements
-		if inRelevantSection && strings.TrimSpace(line) != "" {
-			// Clean up the line and add indentation for readability
-			cleanLine := strings.TrimPrefix(strings.TrimSpace(line), "-")
-			cleanLine = strings.TrimPrefix(cleanLine, "•")
-			cleanLine = strings.TrimSpace(cleanLine)
-
-			if cleanLine != "" {
-				keyPoints.WriteString("  • " + cleanLine + "\n")
-			}
-		}
+		totalScore += issueScore
 	}
 
-	return keyPoints.String()
-}
+	// Calculate the average score across all issues
+	// This gives us a final score between 0.0 and 1.0
+	averageScore := totalScore / float64(len(handoff.ValidatedIssues))
 
-func extractFilteredComments(result interface{}, filePath string, metric MetricsCollector) ([]PRReviewComment, error) {
-	// First try to convert the result to our expected format
-	resultMap, ok := result.(map[string]interface{})
-	if !ok {
-		return nil, fmt.Errorf("invalid review filter result type: %T", result)
-	}
-
-	// Extract the comments from the result
-	commentsRaw, exists := resultMap["comments"]
-	if !exists {
-		return nil, fmt.Errorf("review filter result missing 'comments' field")
-	}
-
-	// Handle different possible comment formats
-	var comments []PRReviewComment
-	switch v := commentsRaw.(type) {
-	case string:
-		// If comments are provided as a formatted string, parse them
-		return parseReviewComments(context.Background(), filePath, v, metric)
-	case []PRReviewComment:
-		// If comments are already in the correct format
-		comments = v
-	case []interface{}:
-		// If comments are a generic array, convert each item
-		comments = make([]PRReviewComment, 0, len(v))
-		for _, item := range v {
-			if commentMap, ok := item.(map[string]interface{}); ok {
-				comment := PRReviewComment{
-					FilePath:   filePath,
-					LineNumber: getIntOrZero(commentMap["line_number"]),
-					Content:    getStringOrEmpty(commentMap["content"]),
-					Severity:   validateSeverity(getStringOrEmpty(commentMap["severity"])),
-					Category:   validateCategory(getStringOrEmpty(commentMap["category"])),
-					Suggestion: getStringOrEmpty(commentMap["suggestion"]),
-				}
-				if isValidComment(comment) {
-					comments = append(comments, comment)
-					metric.TrackReviewComment(context.Background(), comment, true)
-				}
-			}
-		}
-	default:
-		return nil, fmt.Errorf("unexpected comments format: %T", v)
-	}
-
-	return comments, nil
-}
-
-// isReviewFilterResult examines the structure of the result to determine
-// if it came from the review filter stage.
-func isReviewFilterResult(result map[string]interface{}) bool {
-	comments, ok := result["comments"].([]interface{})
-	if !ok || len(comments) == 0 {
-		return false
-	}
-
-	// Look at the first comment's structure
-	if firstComment, ok := comments[0].(map[string]interface{}); ok {
-		// Review filter results will have these distinctive fields
-		_, hasConfidence := firstComment["confidence"]
-		_, hasValidated := firstComment["validated"]
-		return hasConfidence || hasValidated
-	}
-	return false
+	return math.Round(averageScore*100) / 100 // Round to 2 decimal places
 }

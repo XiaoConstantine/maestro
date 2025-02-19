@@ -368,24 +368,6 @@ func pluralize(word string, count int) string {
 	return word + "s"
 }
 
-func getIntOrZero(v interface{}) int {
-	switch num := v.(type) {
-	case int:
-		return num
-	case float64:
-		return int(num)
-	default:
-		return 0
-	}
-}
-
-func getStringOrEmpty(v interface{}) string {
-	if str, ok := v.(string); ok {
-		return str
-	}
-	return ""
-}
-
 // IsEmptyResult safely checks if a result contains no items, handling different
 // potential result types that could come from our review stages. This helps us
 // distinguish between valid empty results and errors.

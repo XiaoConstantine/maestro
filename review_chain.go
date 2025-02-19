@@ -18,6 +18,7 @@ type ReviewChainResult struct {
 	Category          string             // Review category
 }
 
+// From review_chain.go.
 type ReviewChainOutput struct {
 	// Core review findings
 	DetectedIssues []PotentialIssue `json:"detected_issues"`
@@ -40,7 +41,6 @@ type ReviewChainOutput struct {
 		Severity        string `json:"severity"`
 	} `json:"practical_impact"`
 
-	// Metadata for downstream processing
 	ReviewMetadata struct {
 		FilePath  string    `json:"file_path"`
 		LineRange LineRange `json:"line_range"`
@@ -50,7 +50,7 @@ type ReviewChainOutput struct {
 	} `json:"review_metadata"`
 }
 
-// ValidationResult represents the outcome of each validation step
+// ValidationResult represents the outcome of each validation step.
 type ValidationResult struct {
 	Step       string  // Name of the validation step
 	Passed     bool    // Whether validation passed
@@ -67,6 +67,11 @@ type ReviewChainProcessor struct {
 func NewReviewChainProcessor(ctx context.Context, metrics MetricsCollector, logger *logging.Logger) *ReviewChainProcessor {
 	// Create the chain workflow
 	workflow := workflows.NewChainWorkflow(agents.NewInMemoryStore())
+
+	processor := &ReviewChainProcessor{
+		metrics: metrics,
+		logger:  logger,
+	}
 	ruleSignature := core.NewSignature(
 		[]core.InputField{
 			{Field: core.Field{Name: "file_content"}},
@@ -192,17 +197,38 @@ func NewReviewChainProcessor(ctx context.Context, metrics MetricsCollector, logg
         Focus on providing practical value to developers.`)),
 	}
 
-	// Add steps in sequence
-	workflow.AddStep(ruleCheckStep)
-	workflow.AddStep(contextValidationStep)
-	workflow.AddStep(ruleComplianceStep)
-	workflow.AddStep(practicalImpactStep)
-
-	return &ReviewChainProcessor{
-		workflow: workflow,
-		metrics:  metrics,
-		logger:   logger,
+	addStepWithErrorHandling := func(step *workflows.Step, stepName string) error {
+		if err := workflow.AddStep(step); err != nil {
+			// Log the specific step that failed
+			logger.Error(ctx, "Failed to add %s step to workflow: %v", stepName, err)
+			return fmt.Errorf("failed to add %s step: %w", stepName, err)
+		}
+		logger.Debug(ctx, "Successfully added %s step to workflow", stepName)
+		return nil
 	}
+	steps := []struct {
+		step *workflows.Step
+		name string
+	}{
+		{ruleCheckStep, "rule checking"},
+		{contextValidationStep, "context validation"},
+		{ruleComplianceStep, "rule compliance"},
+		{practicalImpactStep, "practical impact"},
+	}
+	// Add each step and handle any errors
+	for _, s := range steps {
+		if err := addStepWithErrorHandling(s.step, s.name); err != nil {
+			// Return a partially initialized processor with error logging
+			// This allows caller to handle the error appropriately
+			logger.Error(ctx, "Review chain processor initialization failed: %v", err)
+			return processor
+		}
+	}
+	processor.workflow = workflow
+
+	logger.Debug(ctx, "Successfully initialized review chain processor with all steps")
+	return processor
+
 }
 
 func (p *ReviewChainProcessor) Process(ctx context.Context, task agents.Task, context map[string]interface{}) (interface{}, error) {
@@ -228,36 +254,61 @@ func (p *ReviewChainProcessor) Process(ctx context.Context, task agents.Task, co
 		return nil, fmt.Errorf("failed to parse workflow results: %w", err)
 	}
 
-	// Now format the output in a way the analyzer expects
-	analyzerOutput := formatForAnalyzer(chainOutput, metadata)
+	handoff := &ReviewHandoff{
+		ChainOutput:     *chainOutput,
+		ValidatedIssues: make([]ValidatedIssue, 0),
+	}
+	// Process each detected issue that passed validation
+	for _, detectedIssue := range chainOutput.DetectedIssues {
+		// Only include issues that passed all validation steps
+		if chainOutput.ContextValidation.Valid &&
+			chainOutput.RuleCompliance.Compliant &&
+			chainOutput.PracticalImpact.IsActionable {
 
-	// Track metrics before returning
+			validatedIssue := ValidatedIssue{
+				// Use the specific information from the detected issue
+				FilePath: detectedIssue.FilePath,
+				LineRange: LineRange{
+					Start: detectedIssue.LineNumber,
+					End:   detectedIssue.LineNumber,
+					File:  detectedIssue.FilePath,
+				},
+				Category: detectedIssue.Category,
+				// Combine the original issue content with enhanced context
+				Context: fmt.Sprintf("%s\n\nOriginal Issue: %s",
+					chainOutput.ContextValidation.EnhancedContext,
+					detectedIssue.Content,
+				),
+				// Use the refined suggestion if available, otherwise fall back to original
+				Suggestion: chainOutput.RuleCompliance.RefinedSuggestion,
+				// Use the severity from practical impact assessment
+				Severity:   chainOutput.PracticalImpact.Severity,
+				Confidence: chainOutput.ContextValidation.Confidence,
+			}
 
-	return analyzerOutput, nil
-	// // Convert the raw result into our structured type
-	// result := &ReviewChainResult{
-	// 	DetectedIssues:    make([]PotentialIssue, 0),
-	// 	ValidationResults: make([]ValidationResult, 0),
-	// }
-	// // Parse the rule checking results
-	// if issues, ok := rawResult["potential_issues"].([]PotentialIssue); ok {
-	// 	result.DetectedIssues = issues
-	// }
-	//
-	// // Parse validation results
-	// if validationMap, ok := rawResult["validation_results"].(map[string]interface{}); ok {
-	// 	result.ValidationPassed = validationMap["passed"].(bool)
-	// 	result.Category = validationMap["category"].(string)
-	// }
-	//
-	// // Track metrics using the parsed results
-	// p.metrics.TrackDetectionResults(ctx, len(result.DetectedIssues))
-	//
-	// // Determine category from metadata or result
-	// category := determineCategory(metadata, result)
-	// p.metrics.TrackValidationResult(ctx, category, result.ValidationPassed)
-	//
-	// return result, nil
+			validatedIssue.ValidationDetails.ContextValid = chainOutput.ContextValidation.Valid
+			validatedIssue.ValidationDetails.RuleCompliant = chainOutput.RuleCompliance.Compliant
+			validatedIssue.ValidationDetails.IsActionable = chainOutput.PracticalImpact.IsActionable
+
+			handoff.ValidatedIssues = append(handoff.ValidatedIssues, validatedIssue)
+		}
+	}
+
+	nextTaskType := determineNextTaskType(&handoff.ChainOutput)
+
+	logger := logging.GetLogger()
+	logger.Debug(ctx, "Created handoff with %d validated issues", len(handoff.ValidatedIssues))
+	// Format for the analyzer to determine next steps
+	return map[string]interface{}{
+		"task_type":   nextTaskType,
+		"processor":   nextTaskType,
+		"description": "Process validated review findings",
+		"metadata": map[string]interface{}{
+			"handoff":   handoff,
+			"file_path": chainOutput.ReviewMetadata.FilePath,
+			"category":  chainOutput.ReviewMetadata.Category,
+		},
+	}, nil
 }
 
 func extractChainMetadata(metadata map[string]interface{}) (*RuleCheckerMetadata, error) {
@@ -319,53 +370,6 @@ func extractChainMetadata(metadata map[string]interface{}) (*RuleCheckerMetadata
 	}
 
 	return rcm, nil
-}
-
-func determineCategory(metadata *RuleCheckerMetadata, result *ReviewChainResult) string {
-	// First try to get category from the result
-	if result.Category != "" {
-		return result.Category
-	}
-
-	// Fall back to inferring from guidelines if available
-	if len(metadata.Guidelines) > 0 {
-		// Get category from the first applicable guideline
-		for _, guideline := range metadata.Guidelines {
-			if category, ok := guideline.Metadata["category"]; ok {
-				return category
-			}
-		}
-	}
-
-	// Default category if none found
-	return "code-style"
-}
-
-func formatForAnalyzer(output *ReviewChainOutput, metadata *RuleCheckerMetadata) map[string]interface{} {
-	// The format here needs to match what we defined in the analyzer configuration
-	// This will be used by the analyzer to generate the next task XML
-	return map[string]interface{}{
-		"task_type":   determineNextTaskType(output),
-		"processor":   determineNextTaskType(output), // Same as task_type
-		"description": "Process review findings",
-		"metadata": map[string]interface{}{
-			"file_path": metadata.FilePath,
-			"line_range": map[string]int{
-				"start": metadata.LineRange.Start,
-				"end":   metadata.LineRange.End,
-			},
-			"category":        output.ReviewMetadata.Category,
-			"severity":        output.PracticalImpact.Severity,
-			"suggestion":      output.PracticalImpact.FinalSuggestion,
-			"context":         output.ContextValidation.EnhancedContext,
-			"detected_issues": output.DetectedIssues,
-			"validation_results": map[string]interface{}{
-				"context_valid":  output.ContextValidation.Valid,
-				"rule_compliant": output.RuleCompliance.Compliant,
-				"is_actionable":  output.PracticalImpact.IsActionable,
-			},
-		},
-	}
 }
 
 func determineNextTaskType(output *ReviewChainOutput) string {
