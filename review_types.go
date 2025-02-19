@@ -28,3 +28,29 @@ type ValidatedIssue struct {
 		ImpactScore   float64
 	}
 }
+
+type RuleCheckerMetadata struct {
+	FilePath       string
+	FileContent    string
+	Changes        string
+	Guidelines     []*Content
+	ReviewPatterns []*Content
+	LineRange      LineRange
+	ChunkNumber    int
+	TotalChunks    int
+
+	Category string
+}
+
+// PotentialIssue represents a detected but unvalidated code issue.
+type PotentialIssue struct {
+	FilePath   string
+	LineNumber int
+	RuleID     string            // Reference to the rule that detected this
+	Confidence float64           // Initial confidence score
+	Content    string            // Detected problematic code
+	Context    map[string]string // Surrounding code context
+	Suggestion string            // Initial suggested fix
+	Category   string
+	Metadata   map[string]interface{}
+}
