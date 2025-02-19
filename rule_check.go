@@ -29,6 +29,8 @@ type RuleCheckerMetadata struct {
 	LineRange      LineRange
 	ChunkNumber    int
 	TotalChunks    int
+
+	Category string
 }
 
 // RuleCheckResult represents a structured issue found during analysis.
