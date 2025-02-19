@@ -35,14 +35,19 @@ func constructModelID(cfg *config) core.ModelID {
 	parts = append(parts, cfg.modelProvider)
 
 	if cfg.modelName != "" {
-		parts = append(parts, cfg.modelName)
+		if cfg.modelName == "llamacpp:" {
+			parts = append(parts, "")
+		} else {
+			parts = append(parts, cfg.modelName)
+		}
+
 	}
 
 	if cfg.modelConfig != "" {
 		parts = append(parts, cfg.modelConfig)
 	}
 
-	if cfg.modelProvider == "ollama" || cfg.modelProvider == "llamacpp:" {
+	if cfg.modelProvider == "ollama" || cfg.modelProvider == "llamacpp" {
 		return core.ModelID(strings.Join(parts, ":"))
 	} else {
 		return core.ModelID(cfg.modelName)
@@ -60,7 +65,7 @@ func validateModelConfig(cfg *config) error {
 	}
 	// Validate provider
 	switch cfg.modelProvider {
-	case "llamacpp:", "ollama", "anthropic", "google":
+	case "llamacpp:", "ollama", "anthropic", "google", "llamacpp":
 		// Valid providers
 	default:
 		return fmt.Errorf("unsupported model provider: %s", cfg.modelProvider)
