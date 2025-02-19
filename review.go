@@ -264,21 +264,19 @@ func NewPRReviewAgent(ctx context.Context, githubTool GitHubInterface, dbPath st
 	analyzerConfig := agents.AnalyzerConfig{
 		BaseInstruction: `Analyze the input and determine the appropriate task type:
 		First, examine if this is new code or follow-up interaction:
+    For new code review:
+    - Create a review_chain task to handle both issue detection and validation
+    - Only after review_chain completes successfully, create a code_review task
+    
+    For interaction with existing reviews:
+    - Create a comment_response task when processing replies to previous comments
+    
+    For repository exploration:
+    - Create a repo_qa task when answering questions about code patterns
 
-		For new code review:
-		- Create a rule_checker task if examining code against our taxonomy of review rules
-		- Only after rule_checker completes, create a review_filter task to validate potential issues
-		- The final code_review task should only be created after both rule checking and filtering are complete
-
-		For interaction with existing reviews:
-		- Create a comment_response task when processing replies to previous review comments
-		- This includes handling developer questions, clarifications, or pushback on previous comments
-
-		For repository exploration:
-		- Create a repo_qa task when answering questions about code patterns, architecture, or general repository information
-		- This applies when the query is about understanding existing code rather than reviewing changes
 
 		IMPORTANT FORMAT RULES:
+                0.Always ensure review_chain task completes before creating code_review/comment_response tasks.
 		1. Start fields exactly with 'analysis:' or 'tasks:' (no markdown formatting)
 		2. Provide raw XML directly after 'tasks:' without any wrapping
 		3. Keep the exact field prefix format - no decorations or modifications
@@ -305,15 +303,16 @@ func NewPRReviewAgent(ctx context.Context, githubTool GitHubInterface, dbPath st
 		       <item key="chunk_end">{chunk_end}</item>
                        <item key="chunk_number">{chunk_number}</item>
                        <item key="total_chunks">{total_chunks}</item>
+			<!-- Additional metadata -->
 	           </metadata>
 	       </task>
 	   </tasks>`,
 	}
 
 	qaProcessor := NewRepoQAProcessor(store)
-	ruleChecker := NewRuleChecker(metrics, logger)
+	//	ruleChecker := NewRuleChecker(metrics, logger)
 	// TODO: fine grain context window
-	reviewFilter := NewReviewFilter(ctx, metrics, 15, logger)
+	//	reviewFilter := NewReviewFilter(ctx, metrics, 15, logger)
 
 	config := agents.OrchestrationConfig{
 		MaxConcurrent:  5,
@@ -328,8 +327,9 @@ func NewPRReviewAgent(ctx context.Context, githubTool GitHubInterface, dbPath st
 			"code_review":      &CodeReviewProcessor{metrics: metrics},
 			"comment_response": &CommentResponseProcessor{metrics: metrics},
 			"repo_qa":          qaProcessor,
-			"rule_checker":     ruleChecker,
-			"review_filter":    reviewFilter,
+			"review_chain":     NewReviewChainProcessor(ctx, metrics, logger),
+			//			"rule_checker":     ruleChecker,
+			//			"review_filter":    reviewFilter,
 		},
 		Options: core.WithGenerateOptions(
 			core.WithTemperature(0.3),
@@ -658,7 +658,7 @@ func (a *PRReviewAgent) processChunksParallel(ctx context.Context, tasks []PRRev
 	processedChunks := atomic.NewInt32(0)
 
 	// Start worker pool
-	numWorkers := 5 // Configurable based on system resources
+	numWorkers := 1 // Configurable based on system resources
 	var wg sync.WaitGroup
 	for i := 0; i < numWorkers; i++ {
 		wg.Add(1)
