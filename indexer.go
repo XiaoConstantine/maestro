@@ -141,6 +141,9 @@ func (ri *RepoIndexer) walkDirectory(
 
 // processFile handles the indexing of a single file.
 func (ri *RepoIndexer) processFile(ctx context.Context, file *github.RepositoryContent, branch string) error {
+	if shouldSkipFile(file.GetName()) {
+		return nil
+	}
 	content, err := ri.githubTools.GetFileContent(ctx, file.GetPath())
 
 	if err != nil {
@@ -148,7 +151,7 @@ func (ri *RepoIndexer) processFile(ctx context.Context, file *github.RepositoryC
 	}
 
 	// Configure chunking
-	config, err := NewChunkConfig()
+	config, err := NewChunkConfig(WithMaxBytes(9000))
 	if err != nil {
 		return fmt.Errorf("failed to create chunk config: %w", err)
 	}

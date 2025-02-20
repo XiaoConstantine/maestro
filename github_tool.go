@@ -603,6 +603,10 @@ func newFileFilterRules() *fileFilterRules {
 		".git",
 		"dist/",
 		"build/",
+		".gitignore",
+		"ENV",
+		".github",
+		".devcontainer",
 	}
 
 	// Direct extension matches
@@ -618,6 +622,11 @@ func newFileFilterRules() *fileFilterRules {
 		".sum",     // Checksum files
 		".min.js",  // Minified JavaScript
 		".min.css", // Minified CSS
+		".gif",
+		".png",
+		".nix",
+		".bat",
+		".npmrc",
 	}
 
 	// Complex patterns that need regex
