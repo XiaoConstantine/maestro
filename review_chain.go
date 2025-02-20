@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"fmt"
+	"strings"
+	"time"
 
 	"github.com/XiaoConstantine/dspy-go/pkg/agents"
 	"github.com/XiaoConstantine/dspy-go/pkg/agents/workflows"
@@ -47,6 +49,45 @@ type ReviewChainOutput struct {
 		Category  string    `json:"category"`
 		ThreadID  *int64    `json:"thread_id,omitempty"`
 		InReplyTo *int64    `json:"in_reply_to,omitempty"`
+		// Enhanced thread context with detailed conversation tracking
+		ThreadContext struct {
+			// Participant information
+			OriginalAuthor string   `json:"original_author"`
+			LastResponder  string   `json:"last_responder,omitempty"`
+			Participants   []string `json:"participants"`
+
+			// Timing and status
+			CreatedAt        time.Time         `json:"created_at"`
+			LastUpdate       time.Time         `json:"last_update"`
+			Status           ThreadStatus      `json:"status"`
+			ResolutionStatus ResolutionOutcome `json:"resolution_status"`
+
+			// Conversation history and context
+			ConversationFlow []PRReviewComment `json:"conversation_flow"`
+			RelatedChanges   []ReviewChunk     `json:"related_changes"`
+
+			// Conversation metrics and analysis
+			InteractionCount   int `json:"interaction_count"`
+			ResolutionAttempts []struct {
+				Timestamp time.Time `json:"timestamp"`
+				Proposal  string    `json:"proposal"`
+				Outcome   string    `json:"outcome"`
+			} `json:"resolution_attempts"`
+
+			// Context tracking
+			ContextualMetrics struct {
+				CategoryFrequency map[string]int `json:"category_frequency"`
+				TopicEvolution    []string       `json:"topic_evolution"`
+				RelatedThreads    []int64        `json:"related_threads"`
+			} `json:"contextual_metrics"`
+
+			// Quality metrics
+			QualityIndicators struct {
+				ResponseLatency    []time.Duration `json:"response_latency"`
+				ResolutionProgress float64         `json:"resolution_progress"`
+				EffectivenesScore  float64         `json:"effectiveness_score"`
+			} `json:"quality_indicators"`
+		} `json:"thread_context"`
 	} `json:"review_metadata"`
 }
 
@@ -379,6 +420,42 @@ func extractChainMetadata(metadata map[string]interface{}) (*RuleCheckerMetadata
 		rcm.Category = "code-style"
 	}
 
+	// Get thread information
+	if threadID, exists := metadata["thread_id"]; exists {
+		switch v := threadID.(type) {
+		case int64:
+			rcm.ThreadID = &v
+		case float64:
+			val := int64(v)
+			rcm.ThreadID = &val
+		}
+	}
+	if history, ok := metadata["thread_history"].([]PRReviewComment); ok {
+		rcm.ThreadHistory = history
+
+		// Initialize conversation context when we have history
+		if len(history) > 0 {
+			rcm.ConversationContext.OriginalAuthor = history[0].Author
+			rcm.ConversationContext.LastUpdate = history[len(history)-1].Timestamp
+
+			// Determine conversation status
+			if isThreadResolved(history) {
+				rcm.ConversationContext.Status = ThreadResolved
+			} else if isThreadStale(history) {
+				rcm.ConversationContext.Status = ThreadStale
+			} else {
+				rcm.ConversationContext.Status = ThreadInProgress
+			}
+
+			// Collect previous responses
+			for _, comment := range history {
+				rcm.ConversationContext.PreviousResponses = append(
+					rcm.ConversationContext.PreviousResponses,
+					comment.Content)
+			}
+		}
+	}
+
 	return rcm, nil
 }
 
@@ -472,4 +549,26 @@ func (p *ReviewChainProcessor) parseWorkflowResults(workflowResult map[string]in
 	}
 
 	return nil
+}
+
+func isThreadResolved(history []PRReviewComment) bool {
+	if len(history) == 0 {
+		return false
+	}
+
+	// Check if the last comment indicates resolution
+	lastComment := history[len(history)-1]
+	return lastComment.Resolved ||
+		strings.Contains(strings.ToLower(lastComment.Content), "resolved") ||
+		strings.Contains(strings.ToLower(lastComment.Content), "fixed")
+}
+
+func isThreadStale(history []PRReviewComment) bool {
+	if len(history) == 0 {
+		return false
+	}
+
+	lastComment := history[len(history)-1]
+	// Consider a thread stale if no activity for 7 days
+	return time.Since(lastComment.Timestamp) > 7*24*time.Hour
 }
