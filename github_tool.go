@@ -179,24 +179,38 @@ func (g *GitHubTools) GetPullRequestChanges(ctx context.Context, prNumber int) (
 		}
 		fileChange.Hunks = hunks
 
-		// Get file content if needed
-		if file.GetStatus() != "removed" {
+		switch file.GetStatus() {
+		case "removed":
+			// For removed files, get the previous content
+			previousContent, err := g.getPreviousContent(ctx, file.GetFilename(), prNumber)
+			if err != nil {
+				logger.Warn(ctx, "Could not get previous content for deleted file %s: %v",
+					file.GetFilename(), err)
+				fileChange.FileContent = ""
+			} else {
+				fileChange.FileContent = previousContent
+			}
+		case "added":
+			// For new files, get content directly from the PR
+			if file.GetBlobURL() != "" {
+				content, _, err := g.client.Git.GetBlobRaw(ctx, g.owner, g.repo, file.GetSHA())
+				if err != nil {
+					return nil, fmt.Errorf("failed to get content for new file %s: %w",
+						file.GetFilename(), err)
+				}
+				fileChange.FileContent = string(content)
+			} else {
+				// Fallback to patch content if blob URL not available
+				fileChange.FileContent = file.GetPatch()
+			}
+		default:
+			// For modified files, get current content
 			content, err := g.GetFileContent(ctx, file.GetFilename())
 			if err != nil {
 				return nil, fmt.Errorf("failed to get content for %s: %w",
 					file.GetFilename(), err)
 			}
 			fileChange.FileContent = content
-		} else {
-			previousContent, err := g.getPreviousContent(ctx, file.GetFilename(), prNumber)
-			if err != nil {
-				logger.Warn(ctx, "Could not get previous content for deleted file %s: %v",
-					file.GetFilename(), err)
-				// Continue processing even if we can't get previous content
-				fileChange.FileContent = ""
-			} else {
-				fileChange.FileContent = previousContent
-			}
 		}
 
 		changes.Files = append(changes.Files, fileChange)
