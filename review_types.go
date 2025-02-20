@@ -1,5 +1,7 @@
 package main
 
+import "time"
+
 type ReviewHandoff struct {
 	// Original chain output for reference
 	ChainOutput ReviewChainOutput
@@ -40,6 +42,17 @@ type RuleCheckerMetadata struct {
 	TotalChunks    int
 
 	Category string
+
+	ThreadID            *int64
+	ThreadHistory       []PRReviewComment
+	ParentComment       *PRReviewComment
+	ConversationContext struct {
+		OriginalAuthor    string
+		LastUpdate        time.Time
+		Status            ThreadStatus
+		PreviousResponses []string
+		ResolutionStatus  ResolutionOutcome
+	}
 }
 
 // PotentialIssue represents a detected but unvalidated code issue.
