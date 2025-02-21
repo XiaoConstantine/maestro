@@ -489,6 +489,7 @@ func (a *PRReviewAgent) ReviewPR(ctx context.Context, prNumber int, tasks []PRRe
 			}
 		}
 	}
+	cancel()
 
 	return allComments, nil
 }
@@ -685,7 +686,7 @@ func (a *PRReviewAgent) processChunksParallel(ctx context.Context, tasks []PRRev
 				default:
 					chunkContext := map[string]interface{}{
 						"file_path": work.task.FilePath,
-						"chunk":     work.chunk.content,
+						"chunk":     escapeFileContent(ctx, work.chunk.content),
 						"context": map[string]string{
 							"leading":  work.chunk.leadingcontext,
 							"trailing": work.chunk.trailingcontext,
@@ -817,6 +818,7 @@ func (a *PRReviewAgent) processChunksParallel(ctx context.Context, tasks []PRRev
 			mu.Unlock()
 
 		case <-ctx.Done():
+			logging.GetLogger().Error(ctx, "Chunk processing canceled: %v", ctx.Err())
 			return nil, ctx.Err()
 		}
 
@@ -850,7 +852,7 @@ func (a *PRReviewAgent) processExistingComments(ctx context.Context, prNumber in
 	}
 	fileContents := make(map[string]string)
 	for _, change := range changes.Files {
-		fileContents[change.FilePath] = change.FileContent
+		fileContents[change.FilePath] = escapeFileContent(ctx, change.FileContent)
 	}
 	repoInfo := githubTools.GetRepositoryInfo(ctx)
 	comments, _, err := githubTools.Client().PullRequests.ListComments(ctx,

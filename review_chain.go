@@ -155,6 +155,7 @@ func NewReviewChainProcessor(ctx context.Context, metrics MetricsCollector, logg
         3. If the code pattern truly violates best practices
         
         Provide:
+	- potential_issues: same issues from input
         - context_valid: boolean indicating if issue is valid in context
         - confidence: float between 0-1 indicating confidence level
         - enhanced_context: any additional context that helps understand the issue`)),
@@ -175,10 +176,10 @@ func NewReviewChainProcessor(ctx context.Context, metrics MetricsCollector, logg
 				{Field: core.NewField("refined_suggestion")},
 			},
 		).WithInstruction(`Verify if the issue strictly complies with the review rules.
-        Consider:
-        1. Does the issue match the rule's criteria exactly?
-        2. Are there any edge cases or exceptions that should be considered?
-        3. Can the suggestion be improved based on the specific context?
+			Provide:
+			- potential_issues: same issues from input
+			- rule_compliant: whether the issue match rule's criteria exactly 
+			- refined_suggestion: Can the suggestion be improved based on the specific context
         
         Only mark as compliant if the issue is a clear violation of the rule.`)),
 	}
@@ -198,12 +199,10 @@ func NewReviewChainProcessor(ctx context.Context, metrics MetricsCollector, logg
 				{Field: core.NewField("severity")},
 			},
 		).WithInstruction(`Evaluate the practical impact and actionability of the issue.
-        Consider:
-        1. Will fixing this issue meaningfully improve the code?
-        2. Is the suggestion clear and actionable?
-        3. What is the appropriate severity level?
-        
-        Focus on providing practical value to developers.`)),
+			Provide:
+			- is_actionable: boolean indicating if the issue requires action
+			- final_suggestion: string with the final suggestion
+			- severity: string indicating severity level (low, medium, high)`)),
 	}
 
 	addStepWithErrorHandling := func(step *workflows.Step, stepName string) error {
@@ -392,14 +391,84 @@ func determineNextTaskType(output *ReviewChainOutput) string {
 }
 
 func (p *ReviewChainProcessor) parseWorkflowResults(workflowResult map[string]interface{}, output *ReviewChainOutput) error {
-	// A detailed parser that handles each workflow step's output
-	// and populates our structured output type
+	// Parse rule checking results - handles the initial issue detection
+	if ruleResult, ok := workflowResult["rule_checking"].(map[string]interface{}); ok {
+		if issues, ok := ruleResult["potential_issues"].([]interface{}); ok {
+			for _, issue := range issues {
+				if issueMap, ok := issue.(map[string]interface{}); ok {
+					// Create a new potential issue with safe type assertions
+					potentialIssue := PotentialIssue{
+						FilePath:   safeGetString(issueMap, "file_path"),
+						LineNumber: safeGetInt(issueMap, "line_number"),
+						RuleID:     safeGetString(issueMap, "rule_id"),
+						Content:    safeGetString(issueMap, "content"),
+						Category:   safeGetString(issueMap, "category"),
+						Suggestion: safeGetString(issueMap, "suggestion"),
+						Confidence: safeGetFloat(issueMap, "confidence"),
+					}
 
-	// Example for practical impact step:
+					// Handle the context map separately since it's nested
+					if contextMap, ok := issueMap["context"].(map[string]interface{}); ok {
+						potentialIssue.Context = map[string]string{
+							"before": safeGetString(contextMap, "before"),
+							"after":  safeGetString(contextMap, "after"),
+						}
+					}
+
+					// Handle metadata map
+					if metadataMap, ok := issueMap["metadata"].(map[string]interface{}); ok {
+						potentialIssue.Metadata = metadataMap
+					}
+
+					output.DetectedIssues = append(output.DetectedIssues, potentialIssue)
+				}
+			}
+		}
+	}
+
+	// Parse context validation results - handles contextual understanding
+	if contextResult, ok := workflowResult["context_validation"].(map[string]interface{}); ok {
+		output.ContextValidation.Valid = safeGetBool(contextResult, "context_valid")
+		output.ContextValidation.Confidence = safeGetFloat(contextResult, "confidence")
+		output.ContextValidation.EnhancedContext = safeGetString(contextResult, "enhanced_context")
+	}
+
+	// Parse rule compliance results - validates against established rules
+	if ruleCompResult, ok := workflowResult["rule_compliance"].(map[string]interface{}); ok {
+		output.RuleCompliance.Compliant = safeGetBool(ruleCompResult, "rule_compliant")
+		output.RuleCompliance.RefinedSuggestion = safeGetString(ruleCompResult, "refined_suggestion")
+	}
+
+	// Parse practical impact results - determines actionability and severity
 	if impactResult, ok := workflowResult["practical_impact"].(map[string]interface{}); ok {
-		output.PracticalImpact.IsActionable = impactResult["is_actionable"].(bool)
-		output.PracticalImpact.FinalSuggestion = impactResult["final_suggestion"].(string)
-		output.PracticalImpact.Severity = impactResult["severity"].(string)
+		output.PracticalImpact.IsActionable = safeGetBool(impactResult, "is_actionable")
+		output.PracticalImpact.FinalSuggestion = safeGetString(impactResult, "final_suggestion")
+		output.PracticalImpact.Severity = safeGetString(impactResult, "severity")
+	}
+
+	// Parse review metadata - captures file and thread information
+	if metadata, ok := workflowResult["metadata"].(map[string]interface{}); ok {
+		output.ReviewMetadata.FilePath = safeGetString(metadata, "file_path")
+		output.ReviewMetadata.Category = safeGetString(metadata, "category")
+
+		// Handle LineRange structure
+		if lineRange, ok := metadata["line_range"].(map[string]interface{}); ok {
+			output.ReviewMetadata.LineRange = LineRange{
+				Start: safeGetInt(lineRange, "start"),
+				End:   safeGetInt(lineRange, "end"),
+				File:  safeGetString(lineRange, "file"),
+			}
+		}
+
+		// Handle optional thread tracking fields
+		if threadID, ok := metadata["thread_id"].(float64); ok {
+			id := int64(threadID)
+			output.ReviewMetadata.ThreadID = &id
+		}
+		if replyTo, ok := metadata["in_reply_to"].(float64); ok {
+			reply := int64(replyTo)
+			output.ReviewMetadata.InReplyTo = &reply
+		}
 	}
 
 	return nil
