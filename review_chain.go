@@ -256,7 +256,7 @@ func (p *ReviewChainProcessor) Process(ctx context.Context, task agents.Task, co
 		"repo_patterns": metadata.ReviewPatterns,
 	})
 
-	logger.Info(ctx, "LLM response for rule checking: %+v", workflowResult)
+	logger.Debug(ctx, "LLM response for rule checking: %+v", workflowResult)
 	if err != nil {
 		return nil, fmt.Errorf("chain workflow failed: %w", err)
 	}
