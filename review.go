@@ -651,6 +651,8 @@ func (a *PRReviewAgent) processChunksParallel(ctx context.Context, tasks []PRRev
 		totalChunks += len(task.Chunks)
 	}
 	processedChunks := atomic.NewInt32(0)
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 
 	// Start worker pool
 	numWorkers := 3 // Configurable based on system resources
@@ -660,91 +662,98 @@ func (a *PRReviewAgent) processChunksParallel(ctx context.Context, tasks []PRRev
 		go func(workerID int) {
 			defer wg.Done()
 			for work := range workChan {
-				chunkContext := map[string]interface{}{
-					"file_path": work.task.FilePath,
-					"chunk":     work.chunk.content,
-					"context": map[string]string{
-						"leading":  work.chunk.leadingcontext,
-						"trailing": work.chunk.trailingcontext,
-					},
-					"changes":      work.chunk.changes,
-					"chunk_start":  work.chunk.startline,
-					"chunk_end":    work.chunk.endline,
-					"chunk_number": work.chunkIdx + 1,
-					"total_chunks": len(work.task.Chunks),
-					"line_range": map[string]int{
-						"start": work.chunk.startline,
-						"end":   work.chunk.endline,
-					},
-					"review_type":   "chunk_review",
-					"repo_patterns": repoPatterns,
-					"guidelines":    guidelineMatches,
-				}
-
-				// Process the chunk
-				result, err := a.orchestrator.Process(ctx,
-					fmt.Sprintf("Review chunk %d of %s", work.chunkIdx+1, work.task.FilePath),
-					chunkContext)
-				if err != nil {
-					errorChan <- fmt.Errorf("failed to process chunk %d of %s: %w",
-						work.chunkIdx+1, work.task.FilePath, err)
-					continue
-				}
-				logger := logging.GetLogger()
-
-				// Process results
-				for _, taskResult := range result.CompletedTasks {
-
-					taskMap, ok := taskResult.(map[string]interface{})
-					if !ok {
-						// If the conversion fails, log with the actual type for debugging
-						continue
+				select {
+				case <-ctx.Done():
+					return
+				default:
+					chunkContext := map[string]interface{}{
+						"file_path": work.task.FilePath,
+						"chunk":     work.chunk.content,
+						"context": map[string]string{
+							"leading":  work.chunk.leadingcontext,
+							"trailing": work.chunk.trailingcontext,
+						},
+						"changes":      work.chunk.changes,
+						"chunk_start":  work.chunk.startline,
+						"chunk_end":    work.chunk.endline,
+						"chunk_number": work.chunkIdx + 1,
+						"total_chunks": len(work.task.Chunks),
+						"line_range": map[string]int{
+							"start": work.chunk.startline,
+							"end":   work.chunk.endline,
+						},
+						"review_type":   "chunk_review",
+						"repo_patterns": repoPatterns,
+						"guidelines":    guidelineMatches,
 					}
 
-					taskType, _ := taskMap["task_type"].(string)
+					// Process the chunk
+					result, err := a.orchestrator.Process(ctx,
+						fmt.Sprintf("Review chunk %d of %s", work.chunkIdx+1, work.task.FilePath),
+						chunkContext)
+					if err != nil {
+						errorChan <- fmt.Errorf("failed to process chunk %d of %s: %w",
+							work.chunkIdx+1, work.task.FilePath, err)
+						cancel()
+						return
+					}
+					logger := logging.GetLogger()
 
-					switch taskType {
-					case "review_chain":
-						// ReviewChain output will trigger new tasks - no comments to extract
-						// We can log the chain results for debugging
-						logger.Debug(ctx, "Processed review chain result: %v", taskMap)
-						continue
+					// Process results
+					for _, taskResult := range result.CompletedTasks {
 
-					case "code_review", "comment_response":
-						// These are the tasks that actually generate comments
-						comments, err := extractComments(ctx, taskResult, work.task.FilePath, a.Metrics(ctx))
-						if err != nil {
-							logging.GetLogger().Error(ctx, "Failed to extract comments from task %s: %v", taskType, err)
+						taskMap, ok := taskResult.(map[string]interface{})
+						if !ok {
+							// If the conversion fails, log with the actual type for debugging
 							continue
 						}
 
-						// Thread-safe updates
-						mu.Lock()
-						if len(comments) == 0 {
-							console.NoIssuesFound(work.task.FilePath, work.chunkIdx+1, len(work.task.Chunks))
-						} else {
-							console.ShowComments(comments, a.Metrics(ctx))
-						}
-						resultChan <- comments
-						mu.Unlock()
+						taskType, _ := taskMap["task_type"].(string)
 
-					default:
-						logger.Warn(ctx, "Unknown task type: %s", taskType)
+						switch taskType {
+						case "review_chain":
+							// ReviewChain output will trigger new tasks - no comments to extract
+							// We can log the chain results for debugging
+							logger.Debug(ctx, "Processed review chain result: %v", taskMap)
+							continue
+
+						case "code_review", "comment_response":
+							// These are the tasks that actually generate comments
+							comments, err := extractComments(ctx, taskResult, work.task.FilePath, a.Metrics(ctx))
+							if err != nil {
+								logging.GetLogger().Error(ctx, "Failed to extract comments from task %s: %v", taskType, err)
+								continue
+							}
+
+							// Thread-safe updates
+							mu.Lock()
+							if len(comments) == 0 {
+								console.NoIssuesFound(work.task.FilePath, work.chunkIdx+1, len(work.task.Chunks))
+							} else {
+								console.ShowComments(comments, a.Metrics(ctx))
+							}
+							resultChan <- comments
+							mu.Unlock()
+
+						default:
+							logger.Warn(ctx, "Unknown task type: %s", taskType)
+						}
+
 					}
 
+					// Update progress
+					processed := processedChunks.Add(1)
+					percentage := float64(processed) / float64(totalChunks) * 100
+					console.UpdateSpinnerText(fmt.Sprintf("Processing chunks... %.1f%% (%d/%d)",
+						percentage, processed, totalChunks))
 				}
-
-				// Update progress
-				processed := processedChunks.Add(1)
-				percentage := float64(processed) / float64(totalChunks) * 100
-				console.UpdateSpinnerText(fmt.Sprintf("Processing chunks... %.1f%% (%d/%d)",
-					percentage, processed, totalChunks))
 			}
 		}(i)
 	}
 
 	// Distribute work
 	go func() {
+		defer close(workChan)
 		for taskIdx, task := range tasks {
 			for chunkIdx, chunk := range task.Chunks {
 				select {
@@ -760,7 +769,6 @@ func (a *PRReviewAgent) processChunksParallel(ctx context.Context, tasks []PRRev
 				}
 			}
 		}
-		close(workChan)
 	}()
 
 	// Collect results
@@ -780,6 +788,7 @@ func (a *PRReviewAgent) processChunksParallel(ctx context.Context, tasks []PRRev
 				continue
 			}
 			errors = append(errors, err)
+			cancel()
 
 		case comments, ok := <-resultChan:
 			if !ok {
