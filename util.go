@@ -5,6 +5,7 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/base64"
+	"encoding/xml"
 	"fmt"
 	"io"
 	"os"
@@ -13,6 +14,7 @@ import (
 	"strings"
 
 	"github.com/XiaoConstantine/dspy-go/pkg/core"
+	"github.com/XiaoConstantine/dspy-go/pkg/logging"
 	"github.com/logrusorgru/aurora"
 )
 
@@ -391,4 +393,49 @@ func IsEmptyResult(result interface{}) bool {
 		// expected result types
 		return true
 	}
+}
+
+// escapeFileContent safely escapes a string intended for XML's file_content field.
+// It ensures special characters like &, <, and > are properly escaped.
+func escapeFileContent(ctx context.Context, content string) string {
+	logger := logging.GetLogger()
+
+	var buf bytes.Buffer
+	if err := xml.EscapeText(&buf, []byte(content)); err != nil {
+		logger.Error(ctx, "Failed to escape file_content: %v, falling back to original content", err)
+		return content // Fallback to unescaped content (log and proceed)
+	}
+	escaped := buf.String()
+
+	logger.Debug(ctx, "Escaped file_content: original length=%d, escaped length=%d", len(content), len(escaped))
+	return escaped
+}
+
+// Helper functions for safe type assertions.
+func safeGetString(m map[string]interface{}, key string) string {
+	if val, ok := m[key].(string); ok {
+		return val
+	}
+	return ""
+}
+
+func safeGetInt(m map[string]interface{}, key string) int {
+	if val, ok := m[key].(float64); ok {
+		return int(val)
+	}
+	return 0
+}
+
+func safeGetFloat(m map[string]interface{}, key string) float64 {
+	if val, ok := m[key].(float64); ok {
+		return val
+	}
+	return 0.0
+}
+
+func safeGetBool(m map[string]interface{}, key string) bool {
+	if val, ok := m[key].(bool); ok {
+		return val
+	}
+	return false
 }
