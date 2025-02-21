@@ -84,6 +84,8 @@ func NewReviewChainProcessor(ctx context.Context, metrics MetricsCollector, logg
 		},
 	).WithInstruction(`Analyze the code for potential issues with high recall.
 		For each potential issue found, provide the information in the following XML format:
+
+		potential_issues:
 		<potential_issues>
 		<issue>
 		<file_path>string</file_path>
@@ -102,20 +104,27 @@ func NewReviewChainProcessor(ctx context.Context, metrics MetricsCollector, logg
 		<!-- Additional issues as needed --
 		</potential_issues>
 
-		Important format requirements
-		1. Use proper XML escaping for special characters in code conten
-		2. Ensure line numbers are valid integer
-		3. Keep confidence scores between 0.0 and 1.
-		4. Use standard category value
-		5. Provide specific, actionable suggestion
-		6. Include relevant context before/after the issue
-		7. Before inserting it into the XML, replace every '<' with '&lt; and every '>' with '&gt;', every & with &amp.
+		Important format requirements:
+		1. Return in XML format, DO NOT wrap response in JSON or MARKDOWN.
+		2. Start with the exact prefix 'potential_issues:' followed by the XML content on new lines.
+		3. Ensure proper indentation and structure in the XML.
+		4. Use proper XML escaping for special characters in all text fields (e.g., 'content', 'suggestion', 'before', 'after'):
+			- Replace every '&' with '&amp;', every '<' with '&lt;', and every '>' with '&gt;'.
+			- For example, if the content is "if (a < b && b > c)", it should become "if (a &lt; b &amp;&amp; b &gt; c)".
+		5. Ensure line numbers are valid integers.
+		6. Keep confidence scores between 0.0 and 1.0.
+		7. Use only the standard category values listed above.
+		8. Provide specific, actionable suggestions.
+		9. Include relevant context before and after the issue:
+			- The 'before' field must contain the exact lines of code from 'file_content' immediately preceding the line with the issue.
+			- The 'after' field must contain the exact lines of code from 'file_content' immediately following the line with the issue.
+		10. Apply the escaping rules from point 4 to all text content in the XML to ensure well-formedness.
 
-		Focus on finding
-		1. Error handling issue
-		2. Code style violation
-		3. Performance concern
-		4. Security vulnerabilitie
+		Focus on finding:
+		1. Error handling issues
+		2. Code style violations
+		3. Performance concerns
+		4. Security vulnerabilities
 		5. Documentation gaps
 		Only report issues with high confidence (>0.7) and clear impact.`)
 
@@ -232,6 +241,7 @@ func NewReviewChainProcessor(ctx context.Context, metrics MetricsCollector, logg
 }
 
 func (p *ReviewChainProcessor) Process(ctx context.Context, task agents.Task, context map[string]interface{}) (interface{}, error) {
+	logger := logging.GetLogger()
 	metadata, err := extractChainMetadata(task.Metadata)
 	if err != nil {
 		return nil, fmt.Errorf("failed to extract metadata: %w", err)
@@ -245,6 +255,8 @@ func (p *ReviewChainProcessor) Process(ctx context.Context, task agents.Task, co
 		"line_range":    metadata.LineRange,
 		"repo_patterns": metadata.ReviewPatterns,
 	})
+
+	logger.Info(ctx, "LLM response for rule checking: %+v", workflowResult)
 	if err != nil {
 		return nil, fmt.Errorf("chain workflow failed: %w", err)
 	}
@@ -296,7 +308,6 @@ func (p *ReviewChainProcessor) Process(ctx context.Context, task agents.Task, co
 
 	nextTaskType := determineNextTaskType(&handoff.ChainOutput)
 
-	logger := logging.GetLogger()
 	logger.Debug(ctx, "Created handoff with %d validated issues", len(handoff.ValidatedIssues))
 	// Format for the analyzer to determine next steps
 	return map[string]interface{}{

@@ -264,15 +264,16 @@ func NewPRReviewAgent(ctx context.Context, githubTool GitHubInterface, dbPath st
 	analyzerConfig := agents.AnalyzerConfig{
 		BaseInstruction: `Analyze the input and determine the appropriate task type:
 		First, examine if this is new code or follow-up interaction:
-    For new code review:
-    - Create a review_chain task to handle both issue detection and validation
-    - Only after review_chain completes successfully, create a code_review task
-    
-    For interaction with existing reviews:
-    - Create a comment_response task when processing replies to previous comments
-    
-    For repository exploration:
-    - Create a repo_qa task when answering questions about code patterns
+
+		For new code review:
+		- Create a review_chain task to handle both issue detection and validation
+		- Only after review_chain completes successfully, create a code_review task
+
+		For interaction with existing reviews:
+		- Create a comment_response task when processing replies to previous comments
+
+		For repository exploration:
+		- Create a repo_qa task when answering questions about code patterns
 
 
 		IMPORTANT FORMAT RULES:
@@ -282,9 +283,25 @@ func NewPRReviewAgent(ctx context.Context, githubTool GitHubInterface, dbPath st
 		3. Keep the exact field prefix format - no decorations or modifications
 		4. Ensure proper indentation and structure in the XML
 		5. When thread_id is present in the context, always create a comment_response task.
-		6 FOR TASK FIELD 'file_content':
-		- Before inserting it into the XML, replace every '<' with '&lt; and every '>' with '&gt;', every & with &amp.
-	        - For example, '<reasoning>' should become '&lt;reasoning&gt;' and '<answer>' should become '&lt;answer&gt;'.
+		6. FOR ALL TEXT CONTENT IN THE XML (including description, metadata items like file_content, original_comment, etc.):
+		- Before inserting text into the XML, replace the following special characters to ensure well-formed XML:
+			* Replace every '&' with '&amp;'
+			* Replace every '<' with '&lt;'
+			* Replace every '>' with '&gt;'
+		- This applies to all fields that contain text content, such as description, file_content, original_comment, etc.
+		- For attribute values (if any), additionally replace '"' with '&quot;' if the attribute is enclosed in double quotes, or ''' with '&apos;' if enclosed in single quotes.
+			- **Examples:**
+			* If file_content is:
+				if (a < b && b > c) { ... }
+			Then in the XML, it should be:
+				<item key="file_content">if (a < b && b > c) { ... }</item>
+			* If description is:
+			Check for errors & warnings in <file>.xml
+			Then in the XML, it should be:
+				<description>Check for errors & warnings in <file>.xml</description>
+			- **Important Notes:**
+			* Always replace '&' with '&amp;', even if it appears in code or text (e.g., '&&' should become '&amp;&amp;').
+			* Failing to escape these characters will result in invalid XML that cannot be parsed.
 		`,
 
 		FormatInstructions: `Format tasks section in following XML format:
@@ -655,7 +672,7 @@ func (a *PRReviewAgent) processChunksParallel(ctx context.Context, tasks []PRRev
 	defer cancel()
 
 	// Start worker pool
-	numWorkers := 3 // Configurable based on system resources
+	numWorkers := 1 // Configurable based on system resources
 	var wg sync.WaitGroup
 	for i := 0; i < numWorkers; i++ {
 		wg.Add(1)

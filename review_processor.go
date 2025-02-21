@@ -163,7 +163,9 @@ func extractComments(ctx context.Context, result interface{}, filePath string, m
 			if handoffRaw, ok := metadata["handoff"]; ok {
 
 				logger.Debug(ctx, "Found handoff of type: %T", handoffRaw)
+
 				handoff, ok := handoffRaw.(*ReviewHandoff)
+				logger.Debug(ctx, "Handoff: %v", handoff)
 				if !ok {
 					return nil, fmt.Errorf("invalid handoff type: %T", handoffRaw)
 				}
