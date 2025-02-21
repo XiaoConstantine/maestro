@@ -39,7 +39,7 @@ type config struct {
 
 const (
 	DefaultModelProvider = "llamacpp:"
-	DefaultModelName     = ""
+	DefaultModelName     = "llamacpp:"
 )
 
 type ModelChoice struct {
