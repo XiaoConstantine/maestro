@@ -712,8 +712,7 @@ func (a *PRReviewAgent) processChunksParallel(ctx context.Context, tasks []PRRev
 					if err != nil {
 						errorChan <- fmt.Errorf("failed to process chunk %d of %s: %w",
 							work.chunkIdx+1, work.task.FilePath, err)
-						cancel()
-						return
+						continue
 					}
 					logger := logging.GetLogger()
 
@@ -744,26 +743,23 @@ func (a *PRReviewAgent) processChunksParallel(ctx context.Context, tasks []PRRev
 							}
 
 							// Thread-safe updates
-							mu.Lock()
 							if len(comments) == 0 {
 								console.NoIssuesFound(work.task.FilePath, work.chunkIdx+1, len(work.task.Chunks))
 							} else {
 								console.ShowComments(comments, a.Metrics(ctx))
 							}
 							resultChan <- comments
-							mu.Unlock()
-
 						default:
 							logger.Warn(ctx, "Unknown task type: %s", taskType)
 						}
 
 					}
 
-					// Update progress
-					processed := processedChunks.Add(1)
-					percentage := float64(processed) / float64(totalChunks) * 100
-					console.UpdateSpinnerText(fmt.Sprintf("Processing chunks... %.1f%% (%d/%d)",
-						percentage, processed, totalChunks))
+					// // Update progress
+					// processed := processedChunks.Add(1)
+					// percentage := float64(processed) / float64(totalChunks) * 100
+					// console.UpdateSpinnerText(fmt.Sprintf("Processing chunks... %.1f%% (%d/%d)",
+					// 	percentage, processed, totalChunks))
 				}
 			}
 		}(i)
@@ -792,12 +788,14 @@ func (a *PRReviewAgent) processChunksParallel(ctx context.Context, tasks []PRRev
 	// Collect results
 	go func() {
 		wg.Wait()
+		logging.GetLogger().Debug(ctx, "All workers completed, closing channels")
 		close(resultChan)
 		close(errorChan)
 	}()
 
 	// Process results and errors
 	var errors []error
+	var errorsMu sync.Mutex
 	for {
 		select {
 		case err, ok := <-errorChan:
@@ -805,9 +803,9 @@ func (a *PRReviewAgent) processChunksParallel(ctx context.Context, tasks []PRRev
 				errorChan = nil
 				continue
 			}
+			errorsMu.Lock()
 			errors = append(errors, err)
-			cancel()
-
+			errorsMu.Unlock()
 		case comments, ok := <-resultChan:
 			if !ok {
 				resultChan = nil
@@ -815,6 +813,9 @@ func (a *PRReviewAgent) processChunksParallel(ctx context.Context, tasks []PRRev
 			}
 			mu.Lock()
 			allComments = append(allComments, comments...)
+			processed := processedChunks.Add(1)
+			percentage := float64(processed) / float64(totalChunks) * 100
+			console.UpdateSpinnerText(fmt.Sprintf("Processing chunks... %.1f%% (%d/%d)", percentage, processed, totalChunks))
 			mu.Unlock()
 
 		case <-ctx.Done():
@@ -823,6 +824,7 @@ func (a *PRReviewAgent) processChunksParallel(ctx context.Context, tasks []PRRev
 		}
 
 		if errorChan == nil && resultChan == nil {
+			logging.GetLogger().Debug(ctx, "error chan and result chain are nil, chunk processing completed with %d comments and %d errors", len(allComments), len(errors))
 			break
 		}
 	}
