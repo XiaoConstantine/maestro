@@ -647,6 +647,8 @@ func (a *PRReviewAgent) prepareChunks(ctx context.Context, tasks []PRReviewTask,
 
 // processChunksParallel handles parallel chunk processing.
 func (a *PRReviewAgent) processChunksParallel(ctx context.Context, tasks []PRReviewTask, repoPatterns []*Content, guidelineMatches []*Content, console ConsoleInterface) ([]PRReviewComment, error) {
+	logger := logging.GetLogger()
+
 	var allComments []PRReviewComment
 	var mu sync.Mutex // For thread-safe comment aggregation
 
@@ -714,7 +716,6 @@ func (a *PRReviewAgent) processChunksParallel(ctx context.Context, tasks []PRRev
 							work.chunkIdx+1, work.task.FilePath, err)
 						continue
 					}
-					logger := logging.GetLogger()
 
 					// Process results
 					for _, taskResult := range result.CompletedTasks {
@@ -788,7 +789,7 @@ func (a *PRReviewAgent) processChunksParallel(ctx context.Context, tasks []PRRev
 	// Collect results
 	go func() {
 		wg.Wait()
-		logging.GetLogger().Debug(ctx, "All workers completed, closing channels")
+		logger.Debug(ctx, "All workers completed, closing channels")
 		close(resultChan)
 		close(errorChan)
 	}()
@@ -819,20 +820,22 @@ func (a *PRReviewAgent) processChunksParallel(ctx context.Context, tasks []PRRev
 			mu.Unlock()
 
 		case <-ctx.Done():
-			logging.GetLogger().Error(ctx, "Chunk processing canceled: %v", ctx.Err())
+			logger.Error(ctx, "Chunk processing canceled: %v", ctx.Err())
 			return nil, ctx.Err()
 		}
 
 		if errorChan == nil && resultChan == nil {
-			logging.GetLogger().Debug(ctx, "error chan and result chain are nil, chunk processing completed with %d comments and %d errors", len(allComments), len(errors))
+			logger.Debug(ctx, "error chan and result chain are nil, chunk processing completed with %d comments and %d errors", len(allComments), len(errors))
 			break
 		}
 	}
 
 	if len(errors) > 0 {
+		logger.Debug(ctx, "Chunk processing failed with %d errors: %v", len(errors), errors)
 		return nil, fmt.Errorf("encountered errors during parallel processing: %v", errors)
 	}
 
+	logger.Debug(ctx, "Chunk processing completed with %d comments", len(allComments))
 	return allComments, nil
 }
 
