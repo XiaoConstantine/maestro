@@ -868,7 +868,7 @@ func (a *PRReviewAgent) processExistingComments(ctx context.Context, prNumber in
 		fileContents[change.FilePath] = escapeFileContent(ctx, change.FileContent)
 	}
 	repoInfo := githubTools.GetRepositoryInfo(ctx)
-	comments, _, err := githubTools.Client().PullRequests.ListComments(ctx,
+	comments, _, err := githubTools.ListPullRequestComments(ctx,
 		repoInfo.Owner, repoInfo.Name, prNumber,
 		&github.PullRequestListCommentsOptions{})
 	if err != nil {

@@ -27,6 +27,13 @@ type GitHubInterface interface {
 
 	GetAuthenticatedUser(ctx context.Context) string
 	GetRepositoryInfo(ctx context.Context) RepositoryInfo
+	ListPullRequestComments(ctx context.Context, owner, repo string, prNumber int, opts *github.PullRequestListCommentsOptions) ([]*github.PullRequestComment, *github.Response, error)
+
+	GetPullRequest(ctx context.Context, owner, repo string, prNumber int) (*github.PullRequest, *github.Response, error)
+	GetRepository(ctx context.Context, owner, repo string) (*github.Repository, *github.Response, error)
+	GetRepositoryContents(ctx context.Context, owner, repo, path string, opts *github.RepositoryContentGetOptions) (*github.RepositoryContent, []*github.RepositoryContent, *github.Response, error)
+	CompareCommits(ctx context.Context, owner, repo, base, head string, opts *github.ListOptions) (*github.CommitsComparison, *github.Response, error)
+	ListLanguages(ctx context.Context, owner, repo string) (map[string]int, *github.Response, error)
 	Client() *github.Client
 }
 
@@ -570,6 +577,30 @@ func (g *GitHubTools) PreviewReview(ctx context.Context, console ConsoleInterfac
 	}
 
 	return true, nil
+}
+
+func (g *GitHubTools) ListPullRequestComments(ctx context.Context, owner, repo string, prNumber int, opts *github.PullRequestListCommentsOptions) ([]*github.PullRequestComment, *github.Response, error) {
+	return g.client.PullRequests.ListComments(ctx, owner, repo, prNumber, opts)
+}
+
+func (g *GitHubTools) GetPullRequest(ctx context.Context, owner, repo string, prNumber int) (*github.PullRequest, *github.Response, error) {
+	return g.client.PullRequests.Get(ctx, owner, repo, prNumber)
+}
+
+func (g *GitHubTools) GetRepository(ctx context.Context, owner, repo string) (*github.Repository, *github.Response, error) {
+	return g.client.Repositories.Get(ctx, owner, repo)
+}
+
+func (g *GitHubTools) GetRepositoryContents(ctx context.Context, owner, repo, path string, opts *github.RepositoryContentGetOptions) (*github.RepositoryContent, []*github.RepositoryContent, *github.Response, error) {
+	return g.client.Repositories.GetContents(ctx, owner, repo, path, opts)
+}
+
+func (g *GitHubTools) CompareCommits(ctx context.Context, owner, repo, base, head string, opts *github.ListOptions) (*github.CommitsComparison, *github.Response, error) {
+	return g.client.Repositories.CompareCommits(ctx, owner, repo, base, head, opts)
+}
+
+func (g *GitHubTools) ListLanguages(ctx context.Context, owner, repo string) (map[string]int, *github.Response, error) {
+	return g.client.Repositories.ListLanguages(ctx, owner, repo)
 }
 
 // getPreviousContent retrieves the content of a file from the base branch.
