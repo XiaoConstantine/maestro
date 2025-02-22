@@ -68,7 +68,7 @@ func (ri *RepoIndexer) IndexRepository(ctx context.Context, branch, dbPath strin
 		logger.Debug(ctx, "=======================")
 		if branch == "" {
 			// Get repository information to find default branch
-			repo, _, err := ri.githubTools.Client().Repositories.Get(ctx, repoInfo.Owner, repoInfo.Name)
+			repo, _, err := ri.githubTools.GetRepository(ctx, repoInfo.Owner, repoInfo.Name)
 			if err != nil {
 				return fmt.Errorf("failed to get repository info: %w", err)
 			}
@@ -115,7 +115,7 @@ func (ri *RepoIndexer) walkDirectory(
 			// Get contents of subdirectory
 
 			repoInfo := ri.githubTools.GetRepositoryInfo(ctx)
-			_, subContents, _, err := ri.githubTools.Client().Repositories.GetContents(
+			_, subContents, _, err := ri.githubTools.GetRepositoryContents(
 				ctx,
 				repoInfo.Owner,
 				repoInfo.Name,
@@ -236,7 +236,7 @@ func (ri *RepoIndexer) SearchSimilarCode(ctx context.Context, query string, limi
 
 func (ri *RepoIndexer) getCommitDifferences(ctx context.Context, oldSHA, newSHA string) ([]*github.CommitFile, error) {
 	repoInfo := ri.githubTools.GetRepositoryInfo(ctx)
-	comparison, _, err := ri.githubTools.Client().Repositories.CompareCommits(
+	comparison, _, err := ri.githubTools.CompareCommits(
 		ctx,
 		repoInfo.Owner,
 		repoInfo.Name,
@@ -406,7 +406,7 @@ func (ri *RepoIndexer) detectRepositoryLanguage(ctx context.Context) (string, er
 
 	repoInfo := ri.githubTools.GetRepositoryInfo(ctx)
 	// Get repository language statistics from GitHub API
-	langs, _, err := ri.githubTools.Client().Repositories.ListLanguages(
+	langs, _, err := ri.githubTools.ListLanguages(
 		ctx,
 		repoInfo.Owner,
 		repoInfo.Name,
@@ -476,7 +476,7 @@ func (ri *RepoIndexer) fullIndex(ctx context.Context, branch, latestSHA string) 
 	var directoryContent []*github.RepositoryContent
 	repoInfo := ri.githubTools.GetRepositoryInfo(ctx)
 	err = console.WithSpinner(ctx, "Fetching repository contents...", func() error {
-		_, content, _, err := ri.githubTools.Client().Repositories.GetContents(
+		_, content, _, err := ri.githubTools.GetRepositoryContents(
 			ctx,
 			repoInfo.Owner,
 			repoInfo.Name,
