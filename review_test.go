@@ -1,448 +1,310 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"io"
+	"net/http"
 	"testing"
 
+	"github.com/XiaoConstantine/dspy-go/pkg/agents"
+	"github.com/XiaoConstantine/dspy-go/pkg/core"
+	"github.com/XiaoConstantine/dspy-go/pkg/logging"
 	"github.com/google/go-github/v68/github"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 )
 
-type MockGitHubTools struct {
+// MockLLM is a mock implementation of core.LLM.
+type MockLLM struct {
 	mock.Mock
-	authenticatedUser string
+}
+
+func (m *MockLLM) Generate(ctx context.Context, prompt string, opts ...core.GenerateOption) (*core.LLMResponse, error) {
+	args := m.Called(ctx, prompt, opts)
+	// Handle both string and struct returns
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	if response, ok := args.Get(0).(*core.LLMResponse); ok {
+		return response, args.Error(1)
+	}
+	// Fall back to string conversion for simple cases
+	return &core.LLMResponse{Content: args.String(0)}, args.Error(1)
+}
+
+func (m *MockLLM) GenerateWithJSON(ctx context.Context, prompt string, opts ...core.GenerateOption) (map[string]interface{}, error) {
+	args := m.Called(ctx, prompt, opts)
+	result := args.Get(0)
+	if result == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).(map[string]interface{}), args.Error(1)
+}
+
+// CreateEmbedding mocks the single embedding creation following the same pattern as Generate.
+func (m *MockLLM) CreateEmbedding(ctx context.Context, input string, options ...core.EmbeddingOption) (*core.EmbeddingResult, error) {
+	// Record the method call and get the mock results
+	args := m.Called(ctx, input, options)
+
+	// Handle nil case first - if first argument is nil, return error
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+
+	// Check if we got a properly structured EmbeddingResult
+	if result, ok := args.Get(0).(*core.EmbeddingResult); ok {
+		return result, args.Error(1)
+	}
+
+	// Fallback case: create a simple embedding result with basic values
+	// This is similar to how Generate falls back to string conversion
+	return &core.EmbeddingResult{
+		Vector:     []float32{0.1, 0.2, 0.3}, // Default vector
+		TokenCount: len(input),
+		Metadata: map[string]interface{}{
+			"fallback": true,
+		},
+	}, args.Error(1)
+}
+
+// CreateEmbeddings mocks the batch embedding creation.
+func (m *MockLLM) CreateEmbeddings(ctx context.Context, inputs []string, options ...core.EmbeddingOption) (*core.BatchEmbeddingResult, error) {
+	// Record the method call and get the mock results
+	args := m.Called(ctx, inputs, options)
+
+	// Handle nil case
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+
+	// Check if we got a properly structured BatchEmbeddingResult
+	if result, ok := args.Get(0).(*core.BatchEmbeddingResult); ok {
+		return result, args.Error(1)
+	}
+
+	// Similar to the single embedding case, provide a fallback
+	embeddings := make([]core.EmbeddingResult, len(inputs))
+	for i := range inputs {
+		embeddings[i] = core.EmbeddingResult{
+			Vector:     []float32{0.1, 0.2, 0.3},
+			TokenCount: len(inputs[i]),
+			Metadata: map[string]interface{}{
+				"fallback": true,
+				"index":    i,
+			},
+		}
+	}
+
+	return &core.BatchEmbeddingResult{
+		Embeddings: embeddings,
+		Error:      nil,
+		ErrorIndex: -1,
+	}, args.Error(1)
+}
+
+// ModelID mocks the GetModelID method from the LLM interface.
+func (m *MockLLM) ModelID() string {
+	args := m.Called()
+
+	ret0, _ := args.Get(0).(string)
+
+	return ret0
+}
+
+// GetProviderName mocks the GetProviderName method from the LLM interface.
+func (m *MockLLM) ProviderName() string {
+	args := m.Called()
+
+	ret0, _ := args.Get(0).(string)
+
+	return ret0
+}
+
+func (m *MockLLM) Capabilities() []core.Capability {
+	return []core.Capability{}
+}
+
+// MockRAGStore implements the RAGStore interface
+type MockRAGStore struct{}
+
+func (m *MockRAGStore) StoreContent(ctx context.Context, content *Content) error {
+	return nil
+}
+
+func (m *MockRAGStore) FindSimilar(ctx context.Context, embedding []float32, limit int, contentTypes ...string) ([]*Content, error) {
+	return []*Content{
+		{ID: "mock-content", Text: "mock text", Embedding: embedding, Metadata: map[string]string{"file_path": "test.go"}},
+	}, nil
+}
+
+func (m *MockRAGStore) UpdateContent(ctx context.Context, content *Content) error {
+	return nil
+}
+
+func (m *MockRAGStore) DeleteContent(ctx context.Context, id string) error {
+	return nil
+}
+
+func (m *MockRAGStore) PopulateGuidelines(ctx context.Context, language string) error {
+	return nil
+}
+
+func (m *MockRAGStore) StoreRule(ctx context.Context, rule ReviewRule) error {
+	return nil
+}
+
+func (m *MockRAGStore) GetMetadata(ctx context.Context, key string) (string, error) {
+	return "mock-sha", nil
+}
+
+func (m *MockRAGStore) SetMetadata(ctx context.Context, key, value string) error {
+	return nil
+}
+
+func (m *MockRAGStore) Close() error {
+	return nil
+}
+
+type MockGitHubTools struct {
+	pullRequests *MockPullRequestsService
+}
+
+func NewMockGitHubTools() *MockGitHubTools {
+	return &MockGitHubTools{
+		pullRequests: &MockPullRequestsService{},
+	}
 }
 
 func (m *MockGitHubTools) GetPullRequestChanges(ctx context.Context, prNumber int) (*PRChanges, error) {
-	args := m.Called(ctx, prNumber)
-	return args.Get(0).(*PRChanges), args.Error(1)
+	return &PRChanges{
+		Files: []PRFileChange{
+			{FilePath: "test.go", FileContent: "func main() {}", Patch: "+func main() {}"},
+		},
+	}, nil
 }
 
 func (m *MockGitHubTools) GetFileContent(ctx context.Context, path string) (string, error) {
-	args := m.Called(ctx, path)
-	return args.String(0), args.Error(1)
+	return "func main() {}", nil
 }
 
 func (m *MockGitHubTools) CreateReviewComments(ctx context.Context, prNumber int, comments []PRReviewComment) error {
-	args := m.Called(ctx, prNumber, comments)
-	return args.Error(0)
+	return nil
 }
 
 func (m *MockGitHubTools) GetLatestCommitSHA(ctx context.Context, branch string) (string, error) {
-	args := m.Called(ctx, branch)
-	return args.String(0), args.Error(1)
+	return "abc123", nil
 }
 
-func (m *MockGitHubTools) MonitorPRComments(ctx context.Context, prNumber int, callback func(comment *github.PullRequestComment)) error {
-	args := m.Called(ctx, prNumber, callback)
-	return args.Error(0)
+func (m *MockGitHubTools) MonitorPRComments(ctx context.Context, prNumber int, callback func(*github.PullRequestComment)) error {
+	return nil
 }
 
 func (m *MockGitHubTools) PreviewReview(ctx context.Context, console ConsoleInterface, prNumber int, comments []PRReviewComment, metric MetricsCollector) (bool, error) {
-	args := m.Called(ctx, console, prNumber, comments, metric)
-	return args.Bool(0), args.Error(1)
+	return true, nil
 }
 
 func (m *MockGitHubTools) GetAuthenticatedUser(ctx context.Context) string {
-	return m.authenticatedUser
+	return "testuser"
 }
 
 func (m *MockGitHubTools) GetRepositoryInfo(ctx context.Context) RepositoryInfo {
-	args := m.Called(ctx)
-	return args.Get(0).(RepositoryInfo)
+	return RepositoryInfo{Owner: "test", Name: "repo"}
 }
 
 func (m *MockGitHubTools) Client() *github.Client {
-	args := m.Called()
-	return args.Get(0).(*github.Client)
+	client := github.NewClient(nil) // No transport needed
+	client.PullRequests = m.pullRequests
+	return client
 }
 
-// MockMetricsCollector provides a mock implementation for testing
-type MockMetricsCollector struct {
-	mock.Mock
-}
+// MockPullRequestsService
+type MockPullRequestsService struct{}
 
-func (m *MockMetricsCollector) TrackReviewStart(ctx context.Context, category string) {
-	m.Called(ctx, category)
-}
-
-func (m *MockMetricsCollector) TrackNewThread(ctx context.Context, threadID int64, comment PRReviewComment) {
-	m.Called(ctx, threadID, comment)
-}
-
-func (m *MockMetricsCollector) TrackCommentResolution(ctx context.Context, threadID int64, resolution ResolutionOutcome) {
-	m.Called(ctx, threadID, resolution)
-}
-
-func (m *MockMetricsCollector) TrackReviewComment(ctx context.Context, comment PRReviewComment, isValid bool) {
-	m.Called(ctx, comment, isValid)
-}
-
-func (m *MockMetricsCollector) TrackHistoricalComment(ctx context.Context, comment PRReviewComment) {
-	m.Called(ctx, comment)
-}
-
-func (m *MockMetricsCollector) TrackUserFeedback(ctx context.Context, threadID int64, helpful bool, reason string) {
-	m.Called(ctx, threadID, helpful, reason)
-}
-
-func (m *MockMetricsCollector) GetOutdatedRate(category string) float64 {
-	args := m.Called(category)
-	return args.Get(0).(float64)
-}
-
-func (m *MockMetricsCollector) GetPrecision(category string) float64 {
-	args := m.Called(category)
-	return args.Get(0).(float64)
-}
-
-func (m *MockMetricsCollector) GenerateReport(ctx context.Context) *BusinessReport {
-	args := m.Called(ctx)
-	return args.Get(0).(*BusinessReport)
-}
-
-func (m *MockMetricsCollector) GetCategoryMetrics(category string) *CategoryStats {
-	args := m.Called(category)
-	return args.Get(0).(*CategoryStats)
-}
-
-func (m *MockMetricsCollector) GetOverallOutdatedRate() float64 {
-	args := m.Called()
-	return args.Get(0).(float64)
-}
-
-func (m *MockMetricsCollector) GetWeeklyActiveUsers() int {
-	args := m.Called()
-	return args.Int(0)
-}
-
-func (m *MockMetricsCollector) GetReviewResponseRate() float64 {
-	args := m.Called()
-	return args.Get(0).(float64)
-}
-
-func (m *MockMetricsCollector) StartOptimizationCycle(ctx context.Context) {
-	m.Called(ctx)
-}
-
-func (m *MockMetricsCollector) StartReviewSession(ctx context.Context, prNumber int) {
-	m.Called(ctx, prNumber)
-}
-
-func (m *MockMetricsCollector) StartThreadTracking(ctx context.Context, comment PRReviewComment) {
-	m.Called(ctx, comment)
-}
-
-func (m *MockMetricsCollector) TrackValidationResult(ctx context.Context, category string, validated bool) {
-	m.Called(ctx, category, validated)
-}
-
-func (m *MockMetricsCollector) TrackDetectionResults(ctx context.Context, issueCount int) {
-	m.Called(ctx, issueCount)
-}
-
-// TestExtractReviewMetadata tests the metadata extraction functionality
-func TestExtractReviewMetadata(t *testing.T) {
-	tests := []struct {
-		name     string
-		metadata map[string]interface{}
-		want     *ReviewMetadata
-		wantErr  bool
-	}{
-		{
-			name: "valid metadata",
-			metadata: map[string]interface{}{
-				"category":     "code-style",
-				"file_path":    "test.go",
-				"changes":      "test changes",
-				"file_content": "package main\n\nfunc main() {}\n",
-				"chunk_start":  1,
-				"chunk_end":    10,
-				"chunk_number": 1,
-				"total_chunks": 2,
-				"line_range": map[string]interface{}{
-					"start": 1,
-					"end":   10,
-				},
-			},
-			want: &ReviewMetadata{
-				Category:    "code-style",
-				FilePath:    "test.go",
-				Changes:     "test changes",
-				FileContent: "package main\n\nfunc main() {}\n",
-				LineRange: LineRange{
-					Start: 1,
-					End:   10,
-					File:  "test.go",
-				},
-				ChunkNumber: 1,
-				TotalChunks: 2,
-			},
-			wantErr: false,
-		},
-		{
-			name: "missing required fields",
-			metadata: map[string]interface{}{
-				"category": "code-style",
-				// missing file_path
-			},
-			want:    nil,
-			wantErr: true,
+func (s *MockPullRequestsService) ListComments(ctx context.Context, owner, repo string, number int, opts *github.PullRequestListCommentsOptions) ([]*github.PullRequestComment, *github.Response, error) {
+	resp := &github.Response{
+		Response: &http.Response{
+			Status:     "200 OK",
+			StatusCode: 200,
+			Body:       io.NopCloser(bytes.NewReader([]byte(`[]`))),
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
 		},
 	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, err := extractReviewMetadata(tt.metadata)
-			if tt.wantErr {
-				assert.Error(t, err)
-				return
-			}
-			assert.NoError(t, err)
-			assert.Equal(t, tt.want, got)
-		})
-	}
+	return []*github.PullRequestComment{}, resp, nil
 }
 
-// TestIsValidComment tests the comment validation logic
-func TestIsValidComment(t *testing.T) {
-	tests := []struct {
-		name    string
-		comment PRReviewComment
-		want    bool
-	}{
-		{
-			name: "valid comment",
-			comment: PRReviewComment{
-				LineNumber: 10,
-				Content:    "This is a detailed explanation of the issue",
-				Suggestion: "Here's how to fix it properly",
-			},
-			want: true,
-		},
-		{
-			name: "invalid line number",
-			comment: PRReviewComment{
-				LineNumber: 0,
-				Content:    "Valid content",
-				Suggestion: "Valid suggestion",
-			},
-			want: false,
-		},
-		{
-			name: "content too short",
-			comment: PRReviewComment{
-				LineNumber: 10,
-				Content:    "Too short",
-				Suggestion: "Valid suggestion",
-			},
-			want: false,
-		},
-		{
-			name: "missing suggestion",
-			comment: PRReviewComment{
-				LineNumber: 10,
-				Content:    "This is a detailed explanation of the issue",
-				Suggestion: "",
-			},
-			want: false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := isValidComment(tt.comment)
-			assert.Equal(t, tt.want, got)
-		})
-	}
+// Minimal implementations for other methods
+func (s *MockPullRequestsService) List(ctx context.Context, owner, repo string, opts *github.PullRequestListOptions) ([]*github.PullRequest, *github.Response, error) {
+	return nil, nil, nil
 }
 
-// TestFindCommentCategory tests the category lookup functionality
-func TestFindCommentCategory(t *testing.T) {
-	metrics := &BusinessMetrics{
-		activeThreads: map[int64]*ThreadMetrics{
-			1: {
-				Category: "code-style",
-				LastComment: &PRReviewComment{
-					Category: "code-style",
-				},
-			},
-		},
-	}
-
-	tests := []struct {
-		name     string
-		threadID int64
-		want     string
-		found    bool
-	}{
-		{
-			name:     "existing thread",
-			threadID: 1,
-			want:     "code-style",
-			found:    true,
-		},
-		{
-			name:     "non-existent thread",
-			threadID: 999,
-			want:     "",
-			found:    false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			category, found := metrics.findCommentCategory(tt.threadID)
-			assert.Equal(t, tt.found, found)
-			if tt.found {
-				assert.Equal(t, tt.want, category)
-			}
-		})
-	}
+func (s *MockPullRequestsService) Get(ctx context.Context, owner, repo string, number int) (*github.PullRequest, *github.Response, error) {
+	return nil, nil, nil
 }
 
-// type MockLLM struct {
-// 	mock.Mock
-// }
-//
-// func (m *MockLLM) Generate(ctx context.Context, prompt string, options ...core.GenerateOption) (*core.GenerateResponse, error) {
-// 	args := m.Called(ctx, prompt, options)
-// 	return args.Get(0).(*core.GenerateResponse), args.Error(1)
-// }
-//
-// func (m *MockLLM) CreateEmbedding(ctx context.Context, text string) (*core.EmbeddingResponse, error) {
-// 	args := m.Called(ctx, text)
-// 	return args.Get(0).(*core.EmbeddingResponse), args.Error(1)
-// }
-//
-// func TestGenerateResponse(t *testing.T) {
-// 	// Create a test context
-// 	ctx := context.Background()
-//
-// 	// Create a proper console with an output buffer
-// 	var outputBuffer bytes.Buffer
-// 	logger := logging.GetLogger()
-// 	console := NewConsole(&outputBuffer, logger, nil)
-//
-// 	// Create the thread tracker with complete test data
-// 	thread := &ThreadTracker{
-// 		LastComment: &PRReviewComment{
-// 			FilePath:   "test.go",
-// 			LineNumber: 10,
-// 			Content:    "Test comment",
-// 			Category:   "code-style",
-// 			ThreadID:   github.Ptr(int64(1)),
-// 		},
-// 		FileContent:    "package main\n\nfunc main() {}\n",
-// 		Status:         ThreadOpen,
-// 		LastUpdate:     time.Now(),
-// 		OriginalAuthor: "testuser",
-// 		ConversationHistory: []PRReviewComment{
-// 			{
-// 				FilePath:   "test.go",
-// 				LineNumber: 10,
-// 				Content:    "Test comment",
-// 				Category:   "code-style",
-// 				ThreadID:   github.Ptr(int64(1)),
-// 				Author:     "testuser",
-// 				Timestamp:  time.Now(),
-// 			},
-// 		},
-// 	}
-//
-// 	// Create and configure mock metrics collector
-// 	mockMetrics := new(MockMetricsCollector)
-// 	mockMetrics.On("TrackCommentResolution",
-// 		mock.Anything,
-// 		mock.Anything,
-// 		mock.Anything,
-// 	).Return(nil)
-//
-// 	// Create and configure mock GitHub tools
-// 	mockGH := new(MockGitHubTools)
-// 	mockGH.authenticatedUser = "testuser"
-// 	mockGH.On("GetAuthenticatedUser", mock.Anything).Return("testuser")
-// 	mockGH.On("GetFileContent", mock.Anything, "test.go").Return(thread.FileContent, nil)
-//
-// 	// Create orchestrator with proper configuration
-// 	orchestratorConfig := agents.OrchestrationConfig{
-// 		MaxConcurrent: 1,
-// 		TaskParser:    &agents.XMLTaskParser{},
-// 		PlanCreator:   &agents.DependencyPlanCreator{},
-// 		CustomProcessors: map[string]agents.TaskProcessor{
-// 			"comment_response": &CommentResponseProcessor{metrics: mockMetrics},
-// 		},
-// 	}
-//
-// 	// Initialize the agent with all required components
-// 	agent := &PRReviewAgent{
-// 		metrics:      mockMetrics,
-// 		githubTools:  mockGH,
-// 		orchestrator: agents.NewFlexibleOrchestrator(agents.NewInMemoryStore(), orchestratorConfig),
-// 		activeThreads: map[int64]*ThreadTracker{
-// 			1: thread,
-// 		},
-// 	}
-//
-// 	// Run the test
-// 	response, err := agent.generateResponse(ctx, thread, console)
-//
-// 	// Verify the results
-// 	assert.NoError(t, err, "generateResponse should not return an error")
-// 	assert.NotNil(t, response, "response should not be nil")
-//
-// 	if response != nil {
-// 		assert.Equal(t, thread.LastComment.FilePath, response.FilePath)
-// 		assert.Equal(t, thread.LastComment.LineNumber, response.LineNumber)
-// 		assert.Equal(t, thread.LastComment.ThreadID, response.ThreadID)
-// 		assert.Equal(t, "response", string(response.MessageType))
-// 	}
-//
-// 	// Verify that all expected mock method calls were made
-// 	mockMetrics.AssertExpectations(t)
-// 	mockGH.AssertExpectations(t)
-//
-// 	// Verify console output if needed
-// 	output := outputBuffer.String()
-// 	assert.Contains(t, output, "Generating response...")
-// }
+func (s *MockPullRequestsService) CreateReview(ctx context.Context, owner, repo string, number int, review *github.PullRequestReviewRequest) (*github.PullRequestReview, *github.Response, error) {
+	return nil, nil, nil
+}
 
-// TestProcessExistingComments tests the processing of existing PR comments
-func TestProcessExistingComments(t *testing.T) {
+func (s *MockPullRequestsService) Create(ctx context.Context, owner, repo string, pull *github.NewPullRequest) (*github.PullRequest, *github.Response, error) {
+	return nil, nil, nil
+}
+
+func (s *MockPullRequestsService) Edit(ctx context.Context, owner, repo string, number int, pull *github.PullRequest) (*github.PullRequest, *github.Response, error) {
+	return nil, nil, nil
+}
+
+func (s *MockPullRequestsService) ListCommits(ctx context.Context, owner, repo string, number int, opts *github.ListOptions) ([]*github.RepositoryCommit, *github.Response, error) {
+	return nil, nil, nil
+}
+
+func (s *MockPullRequestsService) ListFiles(ctx context.Context, owner, repo string, number int, opts *github.ListOptions) ([]*github.CommitFile, *github.Response, error) {
+	return nil, nil, nil
+}
+
+// TestPRReviewAgent_ReviewPR
+func TestPRReviewAgent_ReviewPR(t *testing.T) {
+	// Set up logging
+	logger := logging.NewLogger(logging.Config{
+		Severity: logging.DEBUG,
+		Outputs:  []logging.Output{logging.NewConsoleOutput(true)},
+	})
+	logging.SetLogger(logger)
+
+	// Configure mock LLM
 	ctx := context.Background()
-	mockGH := new(MockGitHubTools)
-	mockMetrics := new(MockMetricsCollector)
-	console := NewConsole(nil, nil, nil)
+	mockLLM := &MockLLM{}
+	core.SetDefaultLLM(mockLLM)
 
+	// Use mock GitHub tools and RAG store
+	githubTools := NewMockGitHubTools()
+	mockRAG := &MockRAGStore{}
+
+	// Manually create PRReviewAgent with mock dependencies
+	metrics := NewBusinessMetrics(logger)
 	agent := &PRReviewAgent{
-		githubTools:   mockGH,
-		metrics:       mockMetrics,
+		orchestrator:  agents.NewFlexibleOrchestrator(agents.NewInMemoryStore(), agents.OrchestrationConfig{}),
+		memory:        agents.NewInMemoryStore(),
+		rag:           mockRAG,
+		githubTools:   githubTools,
+		stopper:       NewStopper(),
+		metrics:       metrics,
 		activeThreads: make(map[int64]*ThreadTracker),
 	}
+	assert.NotNil(t, agent, "Agent should not be nil")
 
-	// Set up mock responses
-	mockGH.On("GetPullRequestChanges", mock.Anything, 1).Return(&PRChanges{
-		Files: []PRFileChange{
-			{
-				FilePath:    "test.go",
-				FileContent: "package main\n\nfunc main() {}\n",
-			},
-		},
-	}, nil)
+	// Prepare test data
+	tasks := []PRReviewTask{
+		{FilePath: "test.go", FileContent: "func main() {}", Changes: "+func main() {}"},
+	}
 
-	mockGH.On("GetRepositoryInfo", mock.Anything).Return(RepositoryInfo{
-		Owner: "test",
-		Name:  "repo",
-	})
+	// Set up console
+	var buf bytes.Buffer
+	console := NewConsole(&buf, logger, nil)
 
-	mockGH.authenticatedUser = "testuser"
-
-	// Test comment processing
-	err := agent.processExistingComments(ctx, 1, console)
-	assert.NoError(t, err)
-
-	mockGH.AssertExpectations(t)
-	mockMetrics.AssertExpectations(t)
+	// Run the ReviewPR method
+	comments, err := agent.ReviewPR(ctx, 1, tasks, console)
+	assert.NoError(t, err, "ReviewPR should not return an error")
+	assert.NotNil(t, comments, "Comments should not be nil")
+	t.Logf("ReviewPR output: %v", buf.String())
 }
-

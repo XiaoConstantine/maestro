@@ -867,10 +867,13 @@ func (a *PRReviewAgent) processExistingComments(ctx context.Context, prNumber in
 	for _, change := range changes.Files {
 		fileContents[change.FilePath] = escapeFileContent(ctx, change.FileContent)
 	}
+	logger.Info(ctx, "got file content: %v", fileContents)
 	repoInfo := githubTools.GetRepositoryInfo(ctx)
 	comments, _, err := githubTools.ListPullRequestComments(ctx,
 		repoInfo.Owner, repoInfo.Name, prNumber,
 		&github.PullRequestListCommentsOptions{})
+
+	logger.Info(ctx, "got comments: %v", comments)
 	if err != nil {
 		return fmt.Errorf("failed to fetch existing comments: %w", err)
 	}
