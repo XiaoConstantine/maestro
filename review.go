@@ -798,34 +798,42 @@ func (a *PRReviewAgent) processChunksParallel(ctx context.Context, tasks []PRRev
 	var errors []error
 	var errorsMu sync.Mutex
 	for {
+		logger.Debug(ctx, "Channel status - errorChan: %v, resultChan: %v",
+			errorChan == nil, resultChan == nil)
 		select {
 		case err, ok := <-errorChan:
 			if !ok {
+
+				logger.Debug(ctx, "Error channel closed, setting to nil")
 				errorChan = nil
-				continue
+			} else {
+				errorsMu.Lock()
+				errors = append(errors, err)
+				errorsMu.Unlock()
 			}
-			errorsMu.Lock()
-			errors = append(errors, err)
-			errorsMu.Unlock()
 		case comments, ok := <-resultChan:
 			if !ok {
+
+				logger.Debug(ctx, "Error channel closed, setting to nil")
 				resultChan = nil
-				continue
+			} else {
+				mu.Lock()
+				allComments = append(allComments, comments...)
+				processed := processedChunks.Add(1)
+				percentage := float64(processed) / float64(totalChunks) * 100
+				console.UpdateSpinnerText(fmt.Sprintf("Processing chunks... %.1f%% (%d/%d)", percentage, processed, totalChunks))
+				mu.Unlock()
 			}
-			mu.Lock()
-			allComments = append(allComments, comments...)
-			processed := processedChunks.Add(1)
-			percentage := float64(processed) / float64(totalChunks) * 100
-			console.UpdateSpinnerText(fmt.Sprintf("Processing chunks... %.1f%% (%d/%d)", percentage, processed, totalChunks))
-			mu.Unlock()
 
 		case <-ctx.Done():
-			logger.Error(ctx, "Chunk processing canceled: %v", ctx.Err())
+
+			logger.Debug(ctx, "Context cancelled, exiting loop")
 			return nil, ctx.Err()
 		}
 
 		if errorChan == nil && resultChan == nil {
-			logger.Debug(ctx, "error chan and result chain are nil, chunk processing completed with %d comments and %d errors", len(allComments), len(errors))
+			logger.Debug(ctx, "Both channels nil, exiting loop with %d comments and %d errors",
+				len(allComments), len(errors))
 			break
 		}
 	}
