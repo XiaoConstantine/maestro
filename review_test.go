@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"testing"
@@ -10,6 +11,7 @@ import (
 	"github.com/XiaoConstantine/dspy-go/pkg/agents"
 	"github.com/XiaoConstantine/dspy-go/pkg/core"
 	"github.com/XiaoConstantine/dspy-go/pkg/logging"
+	"github.com/briandowns/spinner"
 	"github.com/google/go-github/v68/github"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
@@ -125,7 +127,7 @@ func (m *MockLLM) Capabilities() []core.Capability {
 	return []core.Capability{}
 }
 
-// MockRAGStore implements the RAGStore interface
+// MockRAGStore implements the RAGStore interface.
 type MockRAGStore struct{}
 
 func (m *MockRAGStore) StoreContent(ctx context.Context, content *Content) error {
@@ -214,11 +216,40 @@ func (m *MockGitHubTools) GetRepositoryInfo(ctx context.Context) RepositoryInfo 
 
 func (m *MockGitHubTools) Client() *github.Client {
 	client := github.NewClient(nil) // No transport needed
-	client.PullRequests = m.pullRequests
 	return client
 }
 
-// MockPullRequestsService
+func (m *MockGitHubTools) ListPullRequestComments(ctx context.Context, owner, repo string, prNumber int, opts *github.PullRequestListCommentsOptions) ([]*github.PullRequestComment, *github.Response, error) {
+	return []*github.PullRequestComment{}, &github.Response{Response: &http.Response{StatusCode: 200}}, nil
+}
+
+func (m *MockGitHubTools) GetRepositoryContents(ctx context.Context, owner, repo, path string, opts *github.RepositoryContentGetOptions) (*github.RepositoryContent, []*github.RepositoryContent, *github.Response, error) {
+	if path == "" {
+		return nil, []*github.RepositoryContent{
+			{Path: github.Ptr("test.go"), Type: github.Ptr("file")},
+			{Path: github.Ptr("README.md"), Type: github.Ptr("file")},
+		}, &github.Response{Response: &http.Response{StatusCode: 200}}, nil
+	}
+	return nil, []*github.RepositoryContent{{Path: github.Ptr(path)}}, &github.Response{Response: &http.Response{StatusCode: 200}}, nil
+}
+
+func (m *MockGitHubTools) ListLanguages(ctx context.Context, owner, repo string) (map[string]int, *github.Response, error) {
+	return map[string]int{"Go": 1000}, &github.Response{Response: &http.Response{StatusCode: 200}}, nil
+}
+
+func (m *MockGitHubTools) GetPullRequest(ctx context.Context, owner, repo string, prNumber int) (*github.PullRequest, *github.Response, error) {
+	return &github.PullRequest{Number: github.Ptr(prNumber)}, &github.Response{Response: &http.Response{StatusCode: 200}}, nil
+}
+
+func (m *MockGitHubTools) GetRepository(ctx context.Context, owner, repo string) (*github.Repository, *github.Response, error) {
+	return &github.Repository{Name: github.Ptr(repo)}, &github.Response{Response: &http.Response{StatusCode: 200}}, nil
+}
+
+func (m *MockGitHubTools) CompareCommits(ctx context.Context, owner, repo, base, head string, opts *github.ListOptions) (*github.CommitsComparison, *github.Response, error) {
+	return &github.CommitsComparison{}, &github.Response{Response: &http.Response{StatusCode: 200}}, nil
+}
+
+// MockPullRequestsService.
 type MockPullRequestsService struct{}
 
 func (s *MockPullRequestsService) ListComments(ctx context.Context, owner, repo string, number int, opts *github.PullRequestListCommentsOptions) ([]*github.PullRequestComment, *github.Response, error) {
@@ -233,7 +264,7 @@ func (s *MockPullRequestsService) ListComments(ctx context.Context, owner, repo 
 	return []*github.PullRequestComment{}, resp, nil
 }
 
-// Minimal implementations for other methods
+// Minimal implementations for other methods.
 func (s *MockPullRequestsService) List(ctx context.Context, owner, repo string, opts *github.PullRequestListOptions) ([]*github.PullRequest, *github.Response, error) {
 	return nil, nil, nil
 }
@@ -262,7 +293,99 @@ func (s *MockPullRequestsService) ListFiles(ctx context.Context, owner, repo str
 	return nil, nil, nil
 }
 
-// TestPRReviewAgent_ReviewPR
+type MockConsole struct {
+	Buffer *bytes.Buffer
+}
+
+func NewMockConsole() *MockConsole {
+	return &MockConsole{Buffer: &bytes.Buffer{}}
+}
+
+func (m *MockConsole) StartSpinner(message string) {
+	fmt.Fprintf(m.Buffer, "Starting spinner: %s\n", message)
+}
+
+func (m *MockConsole) StopSpinner() {
+	fmt.Fprintln(m.Buffer, "Stopping spinner")
+}
+
+func (m *MockConsole) WithSpinner(ctx context.Context, message string, fn func() error) error {
+	fmt.Fprintf(m.Buffer, "%s...\n", message)
+	err := fn() // Execute the function directly, no goroutine
+	return err
+}
+
+func (m *MockConsole) ShowComments(comments []PRReviewComment, metric MetricsCollector) {
+	fmt.Fprintf(m.Buffer, "Showing %d comments\n", len(comments))
+}
+
+func (m *MockConsole) ShowSummary(comments []PRReviewComment, metric MetricsCollector) {
+	fmt.Fprintf(m.Buffer, "Summary: %d comments\n", len(comments))
+}
+
+func (m *MockConsole) StartReview(pr *github.PullRequest) {
+	fmt.Fprintf(m.Buffer, "Starting review for PR #%d\n", *pr.Number)
+}
+
+func (m *MockConsole) ReviewingFile(file string, current, total int) {
+	fmt.Fprintf(m.Buffer, "Reviewing file %s (%d/%d)\n", file, current, total)
+}
+
+func (m *MockConsole) ConfirmReviewPost(commentCount int) (bool, error) {
+	fmt.Fprintf(m.Buffer, "Confirming post of %d comments\n", commentCount)
+	return true, nil // Always confirm in mock
+}
+
+func (m *MockConsole) ReviewComplete() {
+	fmt.Fprintln(m.Buffer, "Review complete")
+}
+
+func (m *MockConsole) UpdateSpinnerText(text string) {
+	fmt.Fprintf(m.Buffer, "Updating spinner: %s\n", text)
+}
+
+func (m *MockConsole) ShowReviewMetrics(metrics MetricsCollector, comments []PRReviewComment) {
+	fmt.Fprintf(m.Buffer, "Showing metrics for %d comments\n", len(comments))
+}
+
+func (m *MockConsole) Confirm(opts PromptOptions) (bool, error) {
+	fmt.Fprintf(m.Buffer, "Confirming prompt: %s\n", opts.Message)
+	return true, nil // Always confirm in mock
+}
+
+func (m *MockConsole) FileError(filepath string, err error) {
+	fmt.Fprintf(m.Buffer, "Error in file %s: %v\n", filepath, err)
+}
+
+func (m *MockConsole) Printf(format string, a ...interface{}) {
+	fmt.Fprintf(m.Buffer, format, a...)
+}
+
+func (m *MockConsole) Println(a ...interface{}) {
+	fmt.Fprintln(m.Buffer, a...)
+}
+
+func (m *MockConsole) PrintHeader(text string) {
+	fmt.Fprintf(m.Buffer, "=== %s ===\n", text)
+}
+
+func (m *MockConsole) NoIssuesFound(file string, chunkNumber, totalChunks int) {
+	fmt.Fprintf(m.Buffer, "No issues found in %s (%d/%d)\n", file, chunkNumber, totalChunks)
+}
+
+func (m *MockConsole) SeverityIcon(severity string) string {
+	return fmt.Sprintf("[%s]", severity)
+}
+
+func (m *MockConsole) Color() bool {
+	return false // No color in mock
+}
+
+func (m *MockConsole) Spinner() *spinner.Spinner {
+	return nil // No real spinner in mock
+}
+
+// TestPRReviewAgent_ReviewPR.
 func TestPRReviewAgent_ReviewPR(t *testing.T) {
 	// Set up logging
 	logger := logging.NewLogger(logging.Config{
@@ -299,12 +422,10 @@ func TestPRReviewAgent_ReviewPR(t *testing.T) {
 	}
 
 	// Set up console
-	var buf bytes.Buffer
-	console := NewConsole(&buf, logger, nil)
-
+	console := NewMockConsole()
 	// Run the ReviewPR method
 	comments, err := agent.ReviewPR(ctx, 1, tasks, console)
 	assert.NoError(t, err, "ReviewPR should not return an error")
 	assert.NotNil(t, comments, "Comments should not be nil")
-	t.Logf("ReviewPR output: %v", buf.String())
+	t.Logf("ReviewPR output: %v", console.Buffer.String())
 }
