@@ -1,13 +1,13 @@
 package main
 
-import "time"
-
 type ReviewHandoff struct {
 	// Original chain output for reference
 	ChainOutput ReviewChainOutput
 
 	// Preprocessed validation results ready for comment generation
 	ValidatedIssues []ValidatedIssue
+
+	ThreadStatus ThreadStatus
 }
 
 type ValidatedIssue struct {
@@ -43,16 +43,8 @@ type RuleCheckerMetadata struct {
 
 	Category string
 
-	ThreadID            *int64
-	ThreadHistory       []PRReviewComment
-	ParentComment       *PRReviewComment
-	ConversationContext struct {
-		OriginalAuthor    string
-		LastUpdate        time.Time
-		Status            ThreadStatus
-		PreviousResponses []string
-		ResolutionStatus  ResolutionOutcome
-	}
+	ThreadContext []PRReviewComment // Thread conversation history
+	ThreadStatus  ThreadStatus      // Current thread state
 }
 
 // PotentialIssue represents a detected but unvalidated code issue.
