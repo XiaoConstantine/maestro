@@ -59,8 +59,10 @@ tasks:
         </metadata>
     </task>
 </tasks>`}, nil)
+	// Rule Checking step
 	m.On("Generate", mock.Anything, mock.MatchedBy(func(prompt string) bool {
-		return strings.Contains(prompt, "'potential_issues'")
+		return strings.Contains(prompt, "produce the fields 'potential_issues'") &&
+			!strings.Contains(prompt, "context_valid")
 	}), mock.Anything).Return(&core.LLMResponse{
 		Content: `potential_issues:
 <potential_issues>
@@ -80,6 +82,71 @@ tasks:
     </issue>
 </potential_issues>`}, nil)
 
+	// Context Validation step
+	m.On("Generate", mock.Anything, mock.MatchedBy(func(prompt string) bool {
+		return strings.Contains(prompt, "context_valid") &&
+			strings.Contains(prompt, "confidence") &&
+			strings.Contains(prompt, "enhanced_context")
+	}), mock.Anything).Return(&core.LLMResponse{
+		Content: `potential_issues:
+<potential_issues>
+    <issue>
+        <file_path>test.go</file_path>
+        <line_number>1</line_number>
+        <rule_id>DOC_001</rule_id>
+        <confidence>0.9</confidence>
+        <content>Empty main function without documentation</content>
+        <context>
+            <before></before>
+            <after></after>
+        </context>
+        <suggestion>Add function documentation explaining the purpose of main</suggestion>
+        <category>documentation</category>
+        <metadata></metadata>
+    </issue>
+</potential_issues>
+context_valid: true
+confidence: 0.95
+enhanced_context: The main function is the entry point of the program but lacks any documentation explaining its purpose or behavior.`}, nil)
+
+	// Rule Compliance step
+	// m.On("Generate", mock.Anything, mock.MatchedBy(func(prompt string) bool {
+	// 	logging.GetLogger().Info(context.Background(), "=================Rule Compliance Prompt: %s", prompt)
+	// 	return strings.Contains(prompt, "rule_compliant") ||
+	// 		strings.Contains(prompt, "rule_compliance") ||
+	// 		strings.Contains(prompt, "refined_suggestion")
+	// }), mock.Anything).Return(&core.LLMResponse{
+
+	m.On("Generate", mock.Anything, mock.Anything, mock.Anything).Return(&core.LLMResponse{
+		Content: `potential_issues:
+<potential_issues>
+    <issue>
+        <file_path>test.go</file_path>
+        <line_number>1</line_number>
+        <rule_id>DOC_001</rule_id>
+        <confidence>0.9</confidence>
+        <content>Empty main function without documentation</content>
+        <context>
+            <before></before>
+            <after></after>
+        </context>
+        <suggestion>Add function documentation explaining the purpose of main</suggestion>
+        <category>documentation</category>
+        <metadata></metadata>
+    </issue>
+</potential_issues>
+rule_compliant: true
+refined_suggestion: Add a comprehensive comment block above main() that explains the program's entry point and describes its overall purpose and functionality`}, nil)
+	// Practical Impact step
+	m.On("Generate", mock.Anything, mock.MatchedBy(func(prompt string) bool {
+		return strings.Contains(prompt, "is_actionable") ||
+			strings.Contains(prompt, "final_suggestion") ||
+			strings.Contains(prompt, "severity")
+	}), mock.Anything).Return(&core.LLMResponse{
+		Content: `
+is_actionable: true
+final_suggestion: Add a docstring above main() describing the program's purpose and entry point behavior
+severity: suggestion`}, nil)
 	m.On("GenerateWithJSON", mock.Anything, mock.Anything, mock.Anything).Return(map[string]interface{}{"response": "mock"}, nil)
 	m.On("CreateEmbeddings", mock.Anything, mock.Anything, mock.Anything).Return(&core.BatchEmbeddingResult{
 		Embeddings: []core.EmbeddingResult{{Vector: []float32{0.1, 0.2, 0.3}, TokenCount: 14}},
@@ -116,17 +183,16 @@ func (m *MockLLM) GenerateWithJSON(ctx context.Context, prompt string, opts ...c
 func (m *MockLLM) CreateEmbedding(ctx context.Context, input string, options ...core.EmbeddingOption) (*core.EmbeddingResult, error) {
 	// Record the method call and get the mock results
 	args := m.Called(ctx, input, options)
-	fmt.Println("ccccccccccc")
 
 	// Handle nil case first - if first argument is nil, return error
 	if args.Get(0) == nil {
 		return nil, args.Error(1)
 	}
 
-	// // Check if we got a properly structured EmbeddingResult
-	// if result, ok := args.Get(0).(*core.EmbeddingResult); ok {
-	// 	return result, args.Error(1)
-	// }
+	// Check if we got a properly structured EmbeddingResult
+	if result, ok := args.Get(0).(*core.EmbeddingResult); ok {
+		return result, args.Error(1)
+	}
 
 	// Fallback case: create a simple embedding result with basic values
 	// This is similar to how Generate falls back to string conversion
@@ -510,12 +576,10 @@ func TestPRReviewAgent_ReviewPR(t *testing.T) {
 	tasks := []PRReviewTask{
 		{FilePath: "test.go", FileContent: "func main() {}", Changes: "+func main() {}"},
 	}
-
 	// Set up console
 	console := NewMockConsole()
 	// Run the ReviewPR method
 	comments, err := agent.ReviewPR(ctx, 1, tasks, console)
 	assert.NoError(t, err, "ReviewPR should not return an error")
 	assert.NotNil(t, comments, "Comments should not be nil")
-	t.Logf("ReviewPR output: %v", console.Buffer.String())
 }

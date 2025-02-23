@@ -221,10 +221,15 @@ func NewReviewChainProcessor(ctx context.Context, metrics MetricsCollector, logg
 				{Field: core.NewField("refined_suggestion")},
 			},
 		).WithInstruction(`Verify if the issue strictly complies with the review rules.
-			Provide:
-			- potential_issues: same issues from input
-			- rule_compliant: whether the issue match rule's criteria exactly 
-			- refined_suggestion: Can the suggestion be improved based on the specific context
+       Consider:
+        1. Does the issue match the rule's criteria exactly?
+        2. Are there any edge cases or exceptions that should be considered?
+        3. Can the suggestion be improved based on the specific context?
+
+		Provide:
+		- potential_issues: same issues from input
+		- rule_compliant: whether the issue match rule's criteria exactly 
+		- refined_suggestion: Can the suggestion be improved based on the specific context
         
         Only mark as compliant if the issue is a clear violation of the rule.`)),
 	}
