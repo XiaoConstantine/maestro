@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/XiaoConstantine/dspy-go/pkg/agents"
 	"github.com/XiaoConstantine/dspy-go/pkg/core"
@@ -20,6 +22,72 @@ import (
 // MockLLM is a mock implementation of core.LLM.
 type MockLLM struct {
 	mock.Mock
+}
+
+func NewMockLLM() *MockLLM {
+	m := &MockLLM{}
+	// No need for Test(t) here; setting expectations will initialize the mock
+	// Define default behavior for CreateEmbedding
+	m.On("CreateEmbedding", mock.Anything, mock.Anything, mock.Anything).Return(
+		&core.EmbeddingResult{
+			Vector:     []float32{0.1, 0.2, 0.3},
+			TokenCount: 14, // Default for "func main() {}" length
+			Metadata:   map[string]interface{}{"fallback": true},
+		}, nil,
+	)
+	m.On("Generate", mock.Anything, mock.MatchedBy(func(prompt string) bool {
+		return strings.Contains(prompt, "produce the fields 'analysis, tasks'")
+	}), mock.Anything).Return(&core.LLMResponse{
+		Content: `analysis:
+Reviewing a simple main function in test.go for code quality and best practices.
+
+tasks:
+<tasks>
+    <task id="1" type="review_chain" processor="review_chain" priority="1">
+        <description>Review test.go for code quality</description>
+        <metadata>
+            <item key="file_path">test.go</item>
+            <item key="category">code-style</item>
+            <item key="file_content">func main() {}</item>
+	    <item key="changes">{changes}</item>
+		       <item key="line_range">0-100</item>
+		       <item key="chunk_start">0</item>
+		       <item key="chunk_end">0</item>
+                       <item key="chunk_number">1</item>
+                       <item key="total_chunks">1</item>
+            <item key="category">code-style</item>
+        </metadata>
+    </task>
+</tasks>`}, nil)
+	m.On("Generate", mock.Anything, mock.MatchedBy(func(prompt string) bool {
+		return strings.Contains(prompt, "'potential_issues'")
+	}), mock.Anything).Return(&core.LLMResponse{
+		Content: `potential_issues:
+<potential_issues>
+    <issue>
+        <file_path>test.go</file_path>
+        <line_number>1</line_number>
+        <rule_id>DOC_001</rule_id>
+        <confidence>0.9</confidence>
+        <content>Empty main function without documentation</content>
+        <context>
+            <before></before>
+            <after></after>
+        </context>
+        <suggestion>Add function documentation explaining the purpose of main</suggestion>
+        <category>documentation</category>
+        <metadata></metadata>
+    </issue>
+</potential_issues>`}, nil)
+
+	m.On("GenerateWithJSON", mock.Anything, mock.Anything, mock.Anything).Return(map[string]interface{}{"response": "mock"}, nil)
+	m.On("CreateEmbeddings", mock.Anything, mock.Anything, mock.Anything).Return(&core.BatchEmbeddingResult{
+		Embeddings: []core.EmbeddingResult{{Vector: []float32{0.1, 0.2, 0.3}, TokenCount: 14}},
+	}, nil)
+	m.On("ModelID").Return("mock-model")
+	m.On("ProviderName").Return("mock-provider")
+	m.On("Capabilities").Return([]core.Capability{})
+	return m
 }
 
 func (m *MockLLM) Generate(ctx context.Context, prompt string, opts ...core.GenerateOption) (*core.LLMResponse, error) {
@@ -48,16 +116,17 @@ func (m *MockLLM) GenerateWithJSON(ctx context.Context, prompt string, opts ...c
 func (m *MockLLM) CreateEmbedding(ctx context.Context, input string, options ...core.EmbeddingOption) (*core.EmbeddingResult, error) {
 	// Record the method call and get the mock results
 	args := m.Called(ctx, input, options)
+	fmt.Println("ccccccccccc")
 
 	// Handle nil case first - if first argument is nil, return error
 	if args.Get(0) == nil {
 		return nil, args.Error(1)
 	}
 
-	// Check if we got a properly structured EmbeddingResult
-	if result, ok := args.Get(0).(*core.EmbeddingResult); ok {
-		return result, args.Error(1)
-	}
+	// // Check if we got a properly structured EmbeddingResult
+	// if result, ok := args.Get(0).(*core.EmbeddingResult); ok {
+	// 	return result, args.Error(1)
+	// }
 
 	// Fallback case: create a simple embedding result with basic values
 	// This is similar to how Generate falls back to string conversion
@@ -382,7 +451,7 @@ func (m *MockConsole) Color() bool {
 }
 
 func (m *MockConsole) Spinner() *spinner.Spinner {
-	return nil // No real spinner in mock
+	return spinner.New(spinner.CharSets[14], 100*time.Millisecond) // Return a real but unused spinner
 }
 
 // TestPRReviewAgent_ReviewPR.
@@ -396,8 +465,10 @@ func TestPRReviewAgent_ReviewPR(t *testing.T) {
 
 	// Configure mock LLM
 	ctx := context.Background()
-	mockLLM := &MockLLM{}
+	mockLLM := NewMockLLM()
 	core.SetDefaultLLM(mockLLM)
+	core.GlobalConfig.DefaultLLM = mockLLM
+	assert.NotNil(t, core.GetDefaultLLM(), "Default LLM should be set")
 
 	// Use mock GitHub tools and RAG store
 	githubTools := NewMockGitHubTools()
@@ -405,8 +476,27 @@ func TestPRReviewAgent_ReviewPR(t *testing.T) {
 
 	// Manually create PRReviewAgent with mock dependencies
 	metrics := NewBusinessMetrics(logger)
+	config := agents.OrchestrationConfig{
+		MaxConcurrent: 1,
+		TaskParser:    &agents.XMLTaskParser{},
+		PlanCreator:   &agents.DependencyPlanCreator{},
+		RetryConfig: &agents.RetryConfig{
+			MaxAttempts:       2,
+			BackoffMultiplier: 2.0,
+		},
+		CustomProcessors: map[string]agents.TaskProcessor{
+			"code_review":      &CodeReviewProcessor{metrics: metrics},
+			"comment_response": &CommentResponseProcessor{metrics: metrics},
+			"review_chain":     NewReviewChainProcessor(ctx, metrics, logger),
+		},
+		Options: core.WithGenerateOptions(
+			core.WithTemperature(0.3),
+			core.WithMaxTokens(8192),
+		),
+	}
+
 	agent := &PRReviewAgent{
-		orchestrator:  agents.NewFlexibleOrchestrator(agents.NewInMemoryStore(), agents.OrchestrationConfig{}),
+		orchestrator:  agents.NewFlexibleOrchestrator(agents.NewInMemoryStore(), config),
 		memory:        agents.NewInMemoryStore(),
 		rag:           mockRAG,
 		githubTools:   githubTools,

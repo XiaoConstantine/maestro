@@ -560,7 +560,6 @@ func (a *PRReviewAgent) analyzePatterns(ctx context.Context, tasks []PRReviewTas
 		var totalRepoMatches, totalGuidelineMatches int
 		err = console.WithSpinner(ctx, message, func() error {
 			for i, chunk := range chunks {
-
 				console.Spinner().Suffix = fmt.Sprintf(" (chunk %d/%d) of %s", i+1, len(chunks), task.FilePath)
 				fileEmbedding, err := llm.CreateEmbedding(ctx, chunk)
 				if err != nil {
