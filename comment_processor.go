@@ -12,22 +12,6 @@ import (
 	"github.com/XiaoConstantine/dspy-go/pkg/modules"
 )
 
-// Extend ThreadContext to include more detailed tracking.
-type ThreadContext struct {
-	// Existing fields
-	OriginalConcern    string
-	ConversationFlow   []PRReviewComment
-	RelatedChanges     []ReviewChunk
-	ResolutionAttempts []ResolutionAttempt
-	LastInteraction    time.Time
-
-	// New fields for enhanced context
-	Status          ThreadStatus
-	Participants    []string
-	RelatedThreads  []int64        // IDs of related discussion threads
-	CategoryMetrics map[string]int // Track frequency of issue categories
-}
-
 type ThreadStatus string
 
 const (
@@ -51,7 +35,7 @@ type ResolutionAttempt struct {
 	Outcome   ResolutionOutcome
 	Timestamp time.Time
 	Feedback  string
-	Changes   []ReviewChunk // Use ReviewChunk instead of CodeChange
+	Changes   []ReviewChunk
 }
 
 type ResolutionOutcome string
@@ -65,21 +49,82 @@ const (
 )
 
 type CommentResponseProcessor struct {
-	previousContext string
-	metrics         MetricsCollector
+	metrics MetricsCollector
 }
 
 func (p *CommentResponseProcessor) Process(ctx context.Context, task agents.Task, context map[string]interface{}) (interface{}, error) {
 	logger := logging.GetLogger()
-	// Ensure we have valid thread context
+
+	// Check for handoff from ReviewChainProcessor
+	handoffRaw, hasHandoff := task.Metadata["handoff"]
+	if hasHandoff {
+		handoff, ok := handoffRaw.(*ReviewHandoff)
+		if !ok {
+			return nil, fmt.Errorf("invalid handoff type: %T", handoffRaw)
+		}
+		return p.processFromHandoff(ctx, task, handoff)
+	}
+
+	logger.Warn(ctx, "No ReviewHandoff provided for comment_response task; falling back to standalone processing. This may indicate a misconfiguration as review_chain should always run first.")
+	// Fallback to standalone processing
+	return p.processStandalone(ctx, task, context)
+}
+
+func (p *CommentResponseProcessor) processFromHandoff(ctx context.Context, task agents.Task, handoff *ReviewHandoff) (interface{}, error) {
+	logger := logging.GetLogger()
+
+	// Handle case with no validated issues but thread status
+	if len(handoff.ValidatedIssues) == 0 && handoff.ThreadStatus != ThreadOpen {
+		logger.Debug(ctx, "No validated issues in handoff and thread not open, returning nil comment")
+		return nil, nil
+	}
+
+	metadata, err := extractResponseMetadata(task.Metadata)
+	if err != nil {
+		return nil, fmt.Errorf("failed to extract metadata: %w", err)
+	}
+
+	var issue *ValidatedIssue
+	if len(handoff.ValidatedIssues) > 0 {
+		issue = &handoff.ValidatedIssues[0] // Single-issue assumption
+	}
+
+	// Construct response
+	resolutionStatus := string(handoff.ThreadStatus)
+	responseContent := metadata.OriginalComment
+	var actionItems []string
+	if issue != nil {
+		responseContent = issue.Context // Includes thread history if present
+		actionItems = extractActionItems(issue.Suggestion)
+		if issue.ValidationDetails.IsActionable {
+			resolutionStatus = "needs_work"
+		} else if issue.Confidence > 0.9 && issue.ValidationDetails.RuleCompliant {
+			resolutionStatus = "resolved"
+		}
+	}
+
+	response := ResponseResult{
+		Response:         responseContent,
+		ResolutionStatus: resolutionStatus,
+		ActionItems:      actionItems,
+	}
+
+	comment := p.createCommentFromResponse(ctx, metadata, &response, issue)
+	logger.Debug(ctx, "Generated comment from handoff: %+v", comment)
+	return comment, nil
+}
+
+func (p *CommentResponseProcessor) processStandalone(ctx context.Context, task agents.Task, context map[string]interface{}) (interface{}, error) {
+	logger := logging.GetLogger()
+
+	// Ensure thread_context is set
 	if _, exists := context["thread_context"]; !exists {
 		logger.Debug(ctx, "No thread context found in request")
 		context["thread_context"] = []PRReviewComment{}
 	}
 
-	threadContext, exists := context["thread_context"].([]PRReviewComment)
-	if exists && len(threadContext) > 0 {
-		// Build conversation history
+	var previousContext string
+	if threadContext, exists := context["thread_context"].([]PRReviewComment); exists && len(threadContext) > 0 {
 		var conversationHistory strings.Builder
 		for _, comment := range threadContext {
 			conversationHistory.WriteString(fmt.Sprintf("Author: %s\n", comment.Author))
@@ -89,11 +134,10 @@ func (p *CommentResponseProcessor) Process(ctx context.Context, task agents.Task
 			}
 			conversationHistory.WriteString("---\n")
 		}
-		p.previousContext = conversationHistory.String()
-
-		logger.Debug(ctx, "Built conversation history: %s", p.previousContext)
+		previousContext = conversationHistory.String()
+		logger.Debug(ctx, "Built conversation history: %s", previousContext)
 	}
-	// Define our signature with clear input and output expectations
+
 	signature := core.NewSignature(
 		[]core.InputField{
 			{Field: core.Field{Name: "original_comment"}},
@@ -125,52 +169,48 @@ For needs_clarification responses, focus on asking specific questions about what
 For needs_work responses, always provide specific action items
 `)
 
-	// Create predict module for generating responses
 	predict := modules.NewPredict(signature)
-
-	logger.Info(ctx, "Raw task Meta: %v", task.Metadata)
-
-	// Extract metadata from the task
 	metadata, err := extractResponseMetadata(task.Metadata)
 	if err != nil {
 		return nil, fmt.Errorf("failed to extract metadata: %w", err)
 	}
 
-	// Log the context we're working with
-	logger.Debug(ctx, "Processing response for comment thread with %d messages",
-		len(metadata.ThreadContext))
-
+	logger.Debug(ctx, "Processing response for comment thread with %d messages", len(metadata.ThreadContext))
 	logger.Info(ctx, "Comment Processing response with line number: %v", metadata.LineRange)
-	// Process the response
+
 	result, err := predict.Process(ctx, map[string]interface{}{
 		"original_comment": metadata.OriginalComment,
 		"thread_context":   metadata.ThreadContext,
-		//"file_content":     escapeXMLContent(metadata.FileContent),
-		"file_content":   metadata.FileContent,
-		"review_history": p.previousContext,
-		"line_range":     metadata.LineRange,
-		"file_path":      metadata.FilePath,
+		"file_content":     metadata.FileContent,
+		"review_history":   previousContext,
+		"line_range":       metadata.LineRange,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("prediction failed: %w", err)
 	}
 
-	// Parse and validate the response
 	response, err := parseResponseResult(result)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse response: %w", err)
 	}
 
-	if metadata.ThreadID != nil {
-		resolution := mapResponseStatusToResolution(response.ResolutionStatus)
-		p.metrics.TrackCommentResolution(ctx, *metadata.ThreadID, resolution)
+	return p.createCommentFromResponse(ctx, metadata, response, nil), nil
+}
+
+func (p *CommentResponseProcessor) createCommentFromResponse(ctx context.Context, metadata *ResponseMetadata, response *ResponseResult, issue *ValidatedIssue) PRReviewComment {
+	var severity string
+	if issue != nil && issue.Severity != "" {
+		severity = issue.Severity
+	} else {
+		severity = deriveSeverity(response.ResolutionStatus)
 	}
+
 	comment := PRReviewComment{
 		FilePath:   metadata.FilePath,
 		LineNumber: metadata.LineRange.Start,
 		Content:    response.Response,
-		Severity:   deriveSeverity(response.ResolutionStatus),
-		Category:   "code-style",
+		Severity:   severity,
+		Category:   metadata.Category,
 		InReplyTo:  metadata.InReplyTo,
 		ThreadID:   metadata.ThreadID,
 		Resolved:   response.ResolutionStatus == "resolved",
@@ -180,22 +220,12 @@ For needs_work responses, always provide specific action items
 		comment.Suggestion = formatActionItems(response.ActionItems)
 	}
 
-	return comment, nil
-}
+	if metadata.ThreadID != nil {
+		resolution := mapResponseStatusToResolution(response.ResolutionStatus)
+		p.metrics.TrackCommentResolution(ctx, *metadata.ThreadID, resolution)
+	}
 
-// CommentThread represents a series of related comments.
-type CommentThread struct {
-	Comments   []string
-	Timestamps []time.Time
-	Authors    []string
-}
-
-// ReviewAction represents an action taken in the review.
-type ReviewAction struct {
-	Type      string // comment, suggestion, resolution
-	Content   string
-	Timestamp time.Time
-	Author    string
+	return comment
 }
 
 type ResponseResult struct {
@@ -204,18 +234,17 @@ type ResponseResult struct {
 	ActionItems      []string
 }
 
-// Extract metadata from the task context.
 func extractResponseMetadata(metadata map[string]interface{}) (*ResponseMetadata, error) {
 	rm := &ResponseMetadata{}
 
 	// Get original comment details
-	if comment, ok := metadata["original_comment"].(string); ok {
+	if comment, ok := metadata["original_comment"].(string); ok && comment != "" {
 		rm.OriginalComment = comment
 	} else {
 		return nil, fmt.Errorf("missing or invalid original comment")
 	}
 
-	// Get thread context
+	// Get thread context (default empty slice handled upstream)
 	if thread, ok := metadata["thread_context"].([]PRReviewComment); ok {
 		rm.ThreadContext = thread
 	}
@@ -243,41 +272,26 @@ func extractResponseMetadata(metadata map[string]interface{}) (*ResponseMetadata
 	if rangeData, ok := metadata["line_range"].(map[string]interface{}); ok {
 		startLine, startOk := rangeData["start"].(int)
 		endLine, endOk := rangeData["end"].(int)
-
 		if !startOk || !endOk {
 			return nil, fmt.Errorf("invalid line range format: start and end must be integers")
 		}
-
-		rm.LineRange = LineRange{
-			Start: startLine,
-			End:   endLine,
-			File:  rm.FilePath,
-		}
-
-		if !rm.LineRange.IsValid() {
-			return nil, fmt.Errorf("invalid line range: %v", rm.LineRange)
-		}
+		rm.LineRange = LineRange{Start: startLine, End: endLine, File: rm.FilePath}
+	} else if line, ok := metadata["line_number"].(int); ok {
+		rm.LineRange = LineRange{Start: line, End: line, File: rm.FilePath}
 	} else {
-		// For backward compatibility, check for single line number
-		if line, ok := metadata["line_number"].(int); ok {
-			rm.LineRange = LineRange{
-				Start: line,
-				End:   line,
-				File:  rm.FilePath,
-			}
-		} else {
-			return nil, fmt.Errorf("missing or invalid line range information")
-		}
+		return nil, fmt.Errorf("missing or invalid line range information")
 	}
 
 	if replyTo, ok := metadata["in_reply_to"].(*int64); ok {
 		rm.InReplyTo = replyTo
 	}
 
-	// Get category
 	if category, ok := metadata["category"].(string); ok {
 		rm.Category = category
+	} else {
+		rm.Category = "code-style" // Default if not provided
 	}
+
 	if rm.LineRange.Start == 0 {
 		return nil, fmt.Errorf("failed to extract valid line number from metadata: %+v", metadata)
 	}
@@ -305,14 +319,12 @@ func parseResponseResult(result interface{}) (*ResponseResult, error) {
 
 	response := &ResponseResult{}
 
-	// Extract response content
 	if respContent, ok := resultMap["response"].(string); ok {
 		response.Response = respContent
 	} else {
 		return nil, fmt.Errorf("missing or invalid response content, got %T", resultMap["response"])
 	}
 
-	// Extract resolution status
 	if status, ok := resultMap["resolution_status"].(string); ok {
 		status = strings.ToLower(status)
 		validStatuses := map[string]bool{
@@ -328,7 +340,6 @@ func parseResponseResult(result interface{}) (*ResponseResult, error) {
 		}
 	}
 
-	// Extract action items
 	if items, ok := resultMap["action_items"].([]interface{}); ok {
 		response.ActionItems = make([]string, 0, len(items))
 		for _, item := range items {
@@ -346,12 +357,10 @@ func validateResponse(response *ResponseResult) error {
 		return fmt.Errorf("empty response content")
 	}
 
-	// Ensure response maintains professional tone
 	if containsUnprofessionalContent(response.Response) {
 		return fmt.Errorf("response contains unprofessional content")
 	}
 
-	// Validate action items if status indicates work needed
 	if response.ResolutionStatus == "needs_work" && len(response.ActionItems) == 0 {
 		return fmt.Errorf("status indicates work needed but no action items provided")
 	}
@@ -360,7 +369,6 @@ func validateResponse(response *ResponseResult) error {
 }
 
 func containsUnprofessionalContent(content string) bool {
-	// Check for unprofessional language or tone
 	unprofessionalTerms := []string{
 		"stupid",
 		"lazy",
@@ -368,14 +376,12 @@ func containsUnprofessionalContent(content string) bool {
 		"terrible",
 		"awful",
 	}
-
 	lowered := strings.ToLower(content)
 	for _, term := range unprofessionalTerms {
 		if strings.Contains(lowered, term) {
 			return true
 		}
 	}
-
 	return false
 }
 
@@ -392,7 +398,6 @@ func deriveSeverity(status string) string {
 	}
 }
 
-// Helper function to format action items into a suggestion.
 func formatActionItems(items []string) string {
 	var sb strings.Builder
 	sb.WriteString("Suggested actions:\n")
@@ -415,4 +420,16 @@ func mapResponseStatusToResolution(status string) ResolutionOutcome {
 	default:
 		return ResolutionInProgress
 	}
+}
+
+func extractActionItems(suggestion string) []string {
+	lines := strings.Split(suggestion, "\n")
+	var items []string
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "- ") || strings.HasPrefix(line, "* ") {
+			items = append(items, strings.TrimPrefix(strings.TrimPrefix(line, "- "), "* "))
+		}
+	}
+	return items
 }

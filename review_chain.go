@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/XiaoConstantine/dspy-go/pkg/agents"
@@ -119,11 +118,16 @@ func NewReviewChainProcessor(ctx context.Context, metrics MetricsCollector, logg
 			{Field: core.Field{Name: "changes"}},
 			{Field: core.Field{Name: "guidelines"}},
 			{Field: core.Field{Name: "repo_patterns"}},
+			{Field: core.Field{Name: "thread_context"}},
 		},
 		[]core.OutputField{
 			{Field: core.NewField("potential_issues")},
 		},
 	).WithInstruction(`Analyze the code for potential issues with high recall.
+		If thread_context is provided, consider existing comments to:
+		- Avoid repeating issues already raised
+		- Validate if prior suggestions were implemented
+
 		For each potential issue found, provide the information in the following XML format:
 
 		potential_issues:
@@ -289,12 +293,12 @@ func (p *ReviewChainProcessor) Process(ctx context.Context, task agents.Task, co
 
 	// Execute the workflow
 	workflowResult, err := p.workflow.Execute(ctx, map[string]interface{}{
-		"file_content":  metadata.FileContent,
-		"changes":       metadata.Changes,
-		"guidelines":    metadata.Guidelines,
-		"line_range":    metadata.LineRange,
-		"repo_patterns": metadata.ReviewPatterns,
-	})
+		"file_content":   metadata.FileContent,
+		"changes":        metadata.Changes,
+		"guidelines":     metadata.Guidelines,
+		"line_range":     metadata.LineRange,
+		"repo_patterns":  metadata.ReviewPatterns,
+		"thread_context": metadata.ThreadContext})
 
 	logger.Debug(ctx, "LLM response for rule checking: %+v", workflowResult)
 	if err != nil {
@@ -309,6 +313,7 @@ func (p *ReviewChainProcessor) Process(ctx context.Context, task agents.Task, co
 	handoff := &ReviewHandoff{
 		ChainOutput:     *chainOutput,
 		ValidatedIssues: make([]ValidatedIssue, 0),
+		ThreadStatus:    metadata.ThreadStatus,
 	}
 	// Process each detected issue that passed validation
 	for _, detectedIssue := range chainOutput.DetectedIssues {
@@ -316,7 +321,17 @@ func (p *ReviewChainProcessor) Process(ctx context.Context, task agents.Task, co
 		if chainOutput.ContextValidation.Valid &&
 			chainOutput.RuleCompliance.Compliant &&
 			chainOutput.PracticalImpact.IsActionable {
+			contextStr := fmt.Sprintf("%s\n\nOriginal Issue: %s", chainOutput.ContextValidation.EnhancedContext, detectedIssue.Content)
 
+			if len(metadata.ThreadContext) > 0 {
+				contextStr += "\n\nThread History:\n"
+				for _, tc := range metadata.ThreadContext {
+					contextStr += fmt.Sprintf("- %s: %s\n", tc.Author, tc.Content)
+					if tc.Suggestion != "" {
+						contextStr += fmt.Sprintf("  Suggestion: %s\n", tc.Suggestion)
+					}
+				}
+			}
 			validatedIssue := ValidatedIssue{
 				// Use the specific information from the detected issue
 				FilePath: detectedIssue.FilePath,
@@ -327,10 +342,7 @@ func (p *ReviewChainProcessor) Process(ctx context.Context, task agents.Task, co
 				},
 				Category: detectedIssue.Category,
 				// Combine the original issue content with enhanced context
-				Context: fmt.Sprintf("%s\n\nOriginal Issue: %s",
-					chainOutput.ContextValidation.EnhancedContext,
-					detectedIssue.Content,
-				),
+				Context: contextStr,
 				// Use the refined suggestion if available, otherwise fall back to original
 				Suggestion: chainOutput.RuleCompliance.RefinedSuggestion,
 				// Use the severity from practical impact assessment
@@ -345,7 +357,7 @@ func (p *ReviewChainProcessor) Process(ctx context.Context, task agents.Task, co
 			handoff.ValidatedIssues = append(handoff.ValidatedIssues, validatedIssue)
 		}
 	}
-
+	handoff.ThreadStatus = metadata.ThreadStatus
 	nextTaskType := determineNextTaskType(&handoff.ChainOutput)
 
 	logger.Debug(ctx, "Created handoff with %d validated issues", len(handoff.ValidatedIssues))
@@ -363,7 +375,10 @@ func (p *ReviewChainProcessor) Process(ctx context.Context, task agents.Task, co
 }
 
 func extractChainMetadata(metadata map[string]interface{}) (*RuleCheckerMetadata, error) {
-	rcm := &RuleCheckerMetadata{}
+	rcm := &RuleCheckerMetadata{
+		ThreadContext: []PRReviewComment{}, // Default empty slice
+		ThreadStatus:  ThreadOpen,          // Default status for new reviews
+	}
 
 	// Extract file information
 	if filePath, ok := metadata["file_path"].(string); ok {
@@ -420,42 +435,15 @@ func extractChainMetadata(metadata map[string]interface{}) (*RuleCheckerMetadata
 		rcm.Category = "code-style"
 	}
 
-	// Get thread information
-	if threadID, exists := metadata["thread_id"]; exists {
-		switch v := threadID.(type) {
-		case int64:
-			rcm.ThreadID = &v
-		case float64:
-			val := int64(v)
-			rcm.ThreadID = &val
-		}
+	if threadContext, ok := metadata["thread_context"].([]PRReviewComment); ok {
+		rcm.ThreadContext = threadContext
 	}
-	if history, ok := metadata["thread_history"].([]PRReviewComment); ok {
-		rcm.ThreadHistory = history
-
-		// Initialize conversation context when we have history
-		if len(history) > 0 {
-			rcm.ConversationContext.OriginalAuthor = history[0].Author
-			rcm.ConversationContext.LastUpdate = history[len(history)-1].Timestamp
-
-			// Determine conversation status
-			if isThreadResolved(history) {
-				rcm.ConversationContext.Status = ThreadResolved
-			} else if isThreadStale(history) {
-				rcm.ConversationContext.Status = ThreadStale
-			} else {
-				rcm.ConversationContext.Status = ThreadInProgress
-			}
-
-			// Collect previous responses
-			for _, comment := range history {
-				rcm.ConversationContext.PreviousResponses = append(
-					rcm.ConversationContext.PreviousResponses,
-					comment.Content)
-			}
-		}
+	if threadStatus, ok := metadata["thread_status"].(string); ok {
+		rcm.ThreadStatus = ThreadStatus(threadStatus)
+	} else if resolved, ok := metadata["resolved"].(bool); ok && resolved {
+		// Fallback to infer from resolved status if available
+		rcm.ThreadStatus = ThreadResolved
 	}
-
 	return rcm, nil
 }
 
@@ -549,26 +537,4 @@ func (p *ReviewChainProcessor) parseWorkflowResults(workflowResult map[string]in
 	}
 
 	return nil
-}
-
-func isThreadResolved(history []PRReviewComment) bool {
-	if len(history) == 0 {
-		return false
-	}
-
-	// Check if the last comment indicates resolution
-	lastComment := history[len(history)-1]
-	return lastComment.Resolved ||
-		strings.Contains(strings.ToLower(lastComment.Content), "resolved") ||
-		strings.Contains(strings.ToLower(lastComment.Content), "fixed")
-}
-
-func isThreadStale(history []PRReviewComment) bool {
-	if len(history) == 0 {
-		return false
-	}
-
-	lastComment := history[len(history)-1]
-	// Consider a thread stale if no activity for 7 days
-	return time.Since(lastComment.Timestamp) > 7*24*time.Hour
 }
