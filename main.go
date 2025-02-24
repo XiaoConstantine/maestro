@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -35,6 +36,9 @@ type config struct {
 	modelProvider string
 	modelName     string
 	modelConfig   string // For additional model-specific configuration
+
+	indexWorkers  int // Number of concurrent workers for indexing
+	reviewWorkers int // Number of concurrent workers for review
 }
 
 const (
@@ -249,6 +253,11 @@ and impl changes through interactive learning sessions.`,
 	rootCmd.PersistentFlags().StringVar(&cfg.modelProvider, "provider", DefaultModelProvider, "Model provider (llamacpp, ollama, anthropic)")
 	rootCmd.PersistentFlags().StringVar(&cfg.modelName, "model-name", DefaultModelName, "Specific model name")
 	rootCmd.PersistentFlags().StringVar(&cfg.modelConfig, "model-config", "", "Additional model configuration")
+
+	rootCmd.PersistentFlags().IntVar(&cfg.indexWorkers, "index-workers", runtime.NumCPU(), "Number of concurrent workers for repository indexing")
+
+	rootCmd.PersistentFlags().IntVar(&cfg.reviewWorkers, "review-workers", runtime.NumCPU(), "Number of concurrent workers for parallel review")
+
 	// Mark required flags
 	rootCmd.PersistentPreRun = func(cmd *cobra.Command, args []string) {
 		if cfg.githubToken == "" {
@@ -308,7 +317,10 @@ func runCLI(cfg *config) error {
 	if err != nil {
 		panic(err)
 	}
-	agent, err := NewPRReviewAgent(ctx, githubTools, dbPath)
+	agent, err := NewPRReviewAgent(ctx, githubTools, dbPath, &AgentConfig{
+		IndexWorkers:  cfg.indexWorkers,
+		ReviewWorkers: cfg.reviewWorkers,
+	})
 	if err != nil {
 		panic(err)
 	}
@@ -438,6 +450,40 @@ func runInteractiveMode(cfg *config) error {
 		}
 		if err := survey.AskOne(repoPrompt, &cfg.repo); err != nil {
 			return fmt.Errorf("failed to get repo: %w", err)
+		}
+	}
+
+	var customizeConcurrency bool
+	concurrencyPrompt := &survey.Confirm{
+		Message: fmt.Sprintf("Customize concurrency settings? (currently using %d workers)", runtime.NumCPU()),
+		Default: false,
+	}
+	if err := survey.AskOne(concurrencyPrompt, &customizeConcurrency); err != nil {
+		return fmt.Errorf("failed to get concurrency preference: %w", err)
+	}
+
+	if customizeConcurrency {
+		workersPrompt := &survey.Input{
+			Message: fmt.Sprintf("Enter number of concurrent workers for indexing (current: %d):", cfg.indexWorkers),
+			Default: strconv.Itoa(cfg.indexWorkers),
+		}
+		var workersStr string
+		if err := survey.AskOne(workersPrompt, &workersStr); err != nil {
+			return fmt.Errorf("failed to get worker count: %w", err)
+		}
+		if workers, err := strconv.Atoi(workersStr); err == nil && workers > 0 {
+			cfg.indexWorkers = workers
+		}
+
+		workersPrompt = &survey.Input{
+			Message: fmt.Sprintf("Enter number of concurrent workers for review (current: %d):", cfg.reviewWorkers),
+			Default: strconv.Itoa(cfg.reviewWorkers),
+		}
+		if err := survey.AskOne(workersPrompt, &workersStr); err != nil {
+			return fmt.Errorf("failed to get worker count: %w", err)
+		}
+		if workers, err := strconv.Atoi(workersStr); err == nil && workers > 0 {
+			cfg.reviewWorkers = workers
 		}
 	}
 
@@ -621,7 +667,10 @@ func initializeAndAskQuestions(ctx context.Context, cfg *config, console Console
 	if err != nil {
 		return fmt.Errorf("failed to create storage path: %w", err)
 	}
-	agent, err := NewPRReviewAgent(ctx, githubTools, dbPath)
+	agent, err := NewPRReviewAgent(ctx, githubTools, dbPath, &AgentConfig{
+		IndexWorkers:  cfg.indexWorkers,
+		ReviewWorkers: cfg.reviewWorkers,
+	})
 	if err != nil {
 		return fmt.Errorf("Failed to initiliaze agent due to : %v", err)
 	}
