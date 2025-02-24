@@ -23,6 +23,8 @@ type RepoIndexer struct {
 	githubTools GitHubInterface
 	ragStore    RAGStore
 	logger      *logging.Logger
+
+	workers int
 }
 
 type LanguageStats struct {
@@ -32,11 +34,12 @@ type LanguageStats struct {
 }
 
 // NewRepoIndexer creates a new repository indexer.
-func NewRepoIndexer(githubTools GitHubInterface, ragStore RAGStore) *RepoIndexer {
+func NewRepoIndexer(githubTools GitHubInterface, ragStore RAGStore, workers int) *RepoIndexer {
 	return &RepoIndexer{
 		githubTools: githubTools,
 		ragStore:    ragStore,
 		logger:      logging.GetLogger(),
+		workers:     workers,
 	}
 }
 
@@ -509,7 +512,7 @@ func (ri *RepoIndexer) fullIndex(ctx context.Context, branch, latestSHA string) 
 	}
 	countWg.Wait()
 	// Process files concurrently with a worker pool
-	const maxWorkers = 5
+	maxWorkers := ri.workers
 	filesChan := make(chan *github.RepositoryContent)
 	errChan := make(chan error, maxWorkers)
 	workerCtx, cancel := context.WithCancel(ctx)

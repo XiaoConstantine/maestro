@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -107,6 +108,15 @@ type ReviewAgent interface {
 	Close() error
 }
 
+// AgentConfig contains configuration options for the review agent.
+type AgentConfig struct {
+	// IndexWorkers controls concurrent workers for repository indexing
+	IndexWorkers int
+
+	// ReviewWorkers controls concurrent workers for parallel code review
+	ReviewWorkers int
+}
+
 // PRReviewAgent handles code review using dspy-go.
 type PRReviewAgent struct {
 	orchestrator  *agents.FlexibleOrchestrator
@@ -117,6 +127,7 @@ type PRReviewAgent struct {
 	githubTools GitHubInterface // Add this field
 	stopper     *Stopper
 	metrics     MetricsCollector
+	workers     *AgentConfig
 }
 
 type ThreadTracker struct {
@@ -227,10 +238,13 @@ func ExtractRelevantChanges(changes string, startline, endline int) string {
 }
 
 // NewPRReviewAgent creates a new PR review agent.
-func NewPRReviewAgent(ctx context.Context, githubTool GitHubInterface, dbPath string) (ReviewAgent, error) {
+func NewPRReviewAgent(ctx context.Context, githubTool GitHubInterface, dbPath string, config *AgentConfig) (ReviewAgent, error) {
 	logger := logging.GetLogger()
 
 	logger.Debug(ctx, "Starting agent initialization with dbPath: %s", dbPath)
+	if config == nil {
+		config = defaultAgentConfig()
+	}
 	db, err := sql.Open("sqlite3", dbPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize sqlite db: %v", err)
@@ -247,7 +261,7 @@ func NewPRReviewAgent(ctx context.Context, githubTool GitHubInterface, dbPath st
 
 	metrics.StartOptimizationCycle(ctx)
 	logger.Debug(ctx, "Successfully created RAG store")
-	indexer := NewRepoIndexer(githubTool, store)
+	indexer := NewRepoIndexer(githubTool, store, config.IndexWorkers)
 
 	logger.Debug(ctx, "Starting repository indexing")
 	if err := indexer.IndexRepository(ctx, "", dbPath); err != nil {
@@ -328,7 +342,7 @@ func NewPRReviewAgent(ctx context.Context, githubTool GitHubInterface, dbPath st
 
 	qaProcessor := NewRepoQAProcessor(store)
 
-	config := agents.OrchestrationConfig{
+	orchConfig := agents.OrchestrationConfig{
 		MaxConcurrent:  5,
 		TaskParser:     &agents.XMLTaskParser{},
 		PlanCreator:    &agents.DependencyPlanCreator{},
@@ -349,7 +363,7 @@ func NewPRReviewAgent(ctx context.Context, githubTool GitHubInterface, dbPath st
 		),
 	}
 
-	orchestrator := agents.NewFlexibleOrchestrator(memory, config)
+	orchestrator := agents.NewFlexibleOrchestrator(memory, orchConfig)
 
 	logger.Debug(ctx, "Successfully created orchestrator")
 	return &PRReviewAgent{
@@ -359,6 +373,7 @@ func NewPRReviewAgent(ctx context.Context, githubTool GitHubInterface, dbPath st
 		githubTools:  githubTool,
 		stopper:      stopper,
 		metrics:      metrics,
+		workers:      config,
 	}, nil
 }
 
@@ -645,6 +660,10 @@ func (a *PRReviewAgent) prepareChunks(ctx context.Context, tasks []PRReviewTask,
 	return fileData, processedTasks, nil
 }
 
+func (a *PRReviewAgent) Config() *AgentConfig {
+	return a.workers
+}
+
 // processChunksParallel handles parallel chunk processing.
 func (a *PRReviewAgent) processChunksParallel(ctx context.Context, tasks []PRReviewTask, repoPatterns []*Content, guidelineMatches []*Content, console ConsoleInterface) ([]PRReviewComment, error) {
 	logger := logging.GetLogger()
@@ -675,7 +694,10 @@ func (a *PRReviewAgent) processChunksParallel(ctx context.Context, tasks []PRRev
 	defer cancel()
 
 	// Start worker pool
-	numWorkers := 1 // Configurable based on system resources
+	numWorkers := a.Config().ReviewWorkers // Configurable based on system resources
+	if numWorkers < 1 {
+		numWorkers = 1
+	}
 	var wg sync.WaitGroup
 	for i := 0; i < numWorkers; i++ {
 		wg.Add(1)
@@ -1226,4 +1248,12 @@ func isReplyToMyComment(comment *github.PullRequestComment,
 		return parent.GetUser().GetLogin() == botUser
 	}
 	return false
+}
+
+// defaultAgentConfig provides sensible defaults for the agent configuration.
+func defaultAgentConfig() *AgentConfig {
+	return &AgentConfig{
+		IndexWorkers:  runtime.NumCPU(), // Default to CPU count for indexing
+		ReviewWorkers: runtime.NumCPU(), // Default to CPU count for review
+	}
 }
