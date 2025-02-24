@@ -4,8 +4,8 @@ github.com/Netflix/go-expect v0.0.0-20220104043353-73e0943537d2 h1:+vx7roKuyA63n
 github.com/Netflix/go-expect v0.0.0-20220104043353-73e0943537d2/go.mod h1:HBCaDeC1lPdgDeDbhX8XFpy1jqjK0IBG8W5K+xYqA0w=
 github.com/XiaoConstantine/anthropic-go v0.0.7 h1:rHTZeyKH0Eq8jDzcIrW1ZPSRybEQ6ePLlEcBwSIgmD0=
 github.com/XiaoConstantine/anthropic-go v0.0.7/go.mod h1:ARxRchhwI8HCfEFJtFCIRET3K2QqoyGyuvMra/6nfoI=
-github.com/XiaoConstantine/dspy-go v0.17.6 h1:vc+eJ7woc36ubAmpjDkHRpdzgdkSprrDPsUaLCFr1RQ=
-github.com/XiaoConstantine/dspy-go v0.17.6/go.mod h1:mjJLWZFKXk1YukIyp0M7LL9mF3dw8RTLLvzLhDCvfWs=
+github.com/XiaoConstantine/dspy-go v0.18.0 h1:eCt5up7wEU/2D4tvRkn4kbOJ7ujJGa3+sQF6K4GC49c=
+github.com/XiaoConstantine/dspy-go v0.18.0/go.mod h1:mjJLWZFKXk1YukIyp0M7LL9mF3dw8RTLLvzLhDCvfWs=
 github.com/asg017/sqlite-vec-go-bindings v0.1.6 h1:Nx0jAzyS38XpkKznJ9xQjFXz2X9tI7KqjwVxV8RNoww=
 github.com/asg017/sqlite-vec-go-bindings v0.1.6/go.mod h1:A8+cTt/nKFsYCQF6OgzSNpKZrzNo5gQsXBTfsXHXY0Q=
 github.com/briandowns/spinner v1.23.2 h1:Zc6ecUnI+YzLmJniCfDNaMbW0Wid1d5+qcTq4L2FW8w=
