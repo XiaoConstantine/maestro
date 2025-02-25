@@ -16,6 +16,7 @@ import (
 	"github.com/XiaoConstantine/dspy-go/pkg/logging"
 	"github.com/logrusorgru/aurora"
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 	"golang.org/x/text/cases"
 	"golang.org/x/text/language"
 
@@ -205,6 +206,81 @@ You can also set this via environment variables:
 	return nil
 }
 
+func printMaestroBanner() {
+	// Get a colored output that works with your terminal
+	au := aurora.NewAurora(true)
+
+	width, _, err := term.GetSize(0) // Increased to accommodate our ASCII art
+	if err != nil {
+		fmt.Println("====")
+		width = 132 // Fallback
+	}
+	frameWidth := width - 2 // Account for borders
+	// Define box drawing characters
+	topBorderStr := "╭" + strings.Repeat("─", frameWidth) + "╮"
+	bottomBorderStr := "╰" + strings.Repeat("─", frameWidth) + "╯"
+	sideStr := "│"
+
+	// Welcome message with padding
+	welcomeMsg := "✨ Welcome to Maestro - Your AI Code Assistant! ✨"
+
+	// Print the top border with coral color
+	fmt.Println(au.Index(209, topBorderStr))
+
+	// Center the welcome message
+
+	msgPadding := max(0, (frameWidth-len(welcomeMsg))/2)
+	paddedWelcome := strings.Repeat(" ", msgPadding) + welcomeMsg
+	if len(paddedWelcome) > frameWidth {
+		paddedWelcome = paddedWelcome[:frameWidth]
+	} else {
+		// Add right padding to fill the frame
+		paddedWelcome += strings.Repeat(" ", frameWidth-len(paddedWelcome))
+	}
+	fmt.Printf("%s %s %s\n",
+		au.Index(209, sideStr),
+		paddedWelcome,
+		au.Index(209, sideStr))
+	fmt.Printf("%s%s%s\n",
+		au.Index(209, sideStr),
+		strings.Repeat(" ", 72),
+		au.Index(209, sideStr))
+	// Print a separator line
+
+	// The thick ASCII art for MAESTRO using block characters for a layered effect
+	maestroThick := []string{
+		"███╗   ███╗ █████╗ ███████╗███████╗████████╗██████╗  ██████╗ ",
+		"████╗ ████║██╔══██╗██╔════╝██╔════╝╚══██╔══╝██╔══██╗██╔═══██╗",
+		"██╔████╔██║███████║█████╗  ███████╗   ██║   ██████╔╝██║   ██║",
+		"██║╚██╔╝██║██╔══██║██╔══╝  ╚════██║   ██║   ██╔══██╗██║   ██║",
+		"██║ ╚═╝ ██║██║  ██║███████╗███████║   ██║   ██║  ██║╚██████╔╝",
+		"╚═╝     ╚═╝╚═╝  ╚═╝╚══════╝╚══════╝   ╚═╝   ╚═╝  ╚═╝ ╚═════╝ ",
+	}
+
+	// Print each line of the ASCII art, centered within the frame
+	for _, line := range maestroThick {
+
+		linePadding := max(0, (frameWidth-len(line))/2)
+
+		paddedLine := strings.Repeat(" ", linePadding) + line
+		if len(paddedLine) > frameWidth {
+			paddedLine = paddedLine[:frameWidth]
+		} else {
+			// Add right padding to fill the frame
+			rightPadding := max(0, frameWidth-len(paddedLine))
+			paddedLine += strings.Repeat(" ", rightPadding)
+		}
+
+		fmt.Printf("%s%s%s\n",
+			au.Index(209, sideStr),
+			au.Index(209, paddedLine), // Color the ASCII art too
+			au.Index(209, sideStr))
+	}
+
+	// Print the bottom border
+	fmt.Println(au.Index(209, bottomBorderStr))
+}
+
 func main() {
 	cfg := &config{}
 	sqlite_vec.Auto()
@@ -272,6 +348,7 @@ and impl changes through interactive learning sessions.`,
 }
 
 func runCLI(cfg *config) error {
+	printMaestroBanner()
 	ctx := core.WithExecutionState(context.Background())
 	output := logging.NewConsoleOutput(true, logging.WithColor(true))
 	logLevel := logging.INFO
@@ -423,6 +500,7 @@ func runCLI(cfg *config) error {
 }
 
 func runInteractiveMode(cfg *config) error {
+	printMaestroBanner()
 	ctx := core.WithExecutionState(context.Background())
 	output := logging.NewConsoleOutput(true, logging.WithColor(true))
 	logLevel := logging.INFO
