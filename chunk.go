@@ -170,6 +170,7 @@ func chunkfile(ctx context.Context, content string, changes string, config *Chun
 	// Check if we have a specific configuration for this file type
 	for pattern, patternConfig := range config.FilePatterns {
 		if matched, _ := filepath.Match(pattern, filename); matched {
+			logger.Info(ctx, "see if matched here for test: %v", matched)
 			// Create a new config that merges pattern-specific settings
 			newConfig := *config // Copy base config
 			// Override with pattern-specific settings
@@ -182,7 +183,7 @@ func chunkfile(ctx context.Context, content string, changes string, config *Chun
 		}
 	}
 
-	logger.Debug(ctx, "Chunking file %s using strategy: %s", filename, config.Strategy)
+	logger.Info(ctx, "Chunking file %s using strategy: %s", filename, config.Strategy)
 
 	// Select chunking strategy based on configuration
 	var chunks []ReviewChunk

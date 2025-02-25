@@ -270,6 +270,41 @@ func printMaestroBanner() {
 	}
 }
 
+func showConversationBox(c ConsoleInterface) {
+	width, _, err := term.GetSize(0)
+	if err != nil {
+		width = 80 // Default if we can't get terminal width
+	}
+
+	// Create a box that takes most of the terminal width
+	boxWidth := width - 4
+
+	// Box drawing characters
+	topBorder := "╭" + strings.Repeat("─", boxWidth) + "╮"
+	bottomBorder := "╰" + strings.Repeat("─", boxWidth) + "╯"
+	sideBorder := "│"
+
+	// Display the box
+	if c.Color() {
+		c.Println(aurora.Cyan(topBorder).String())
+		c.Println(aurora.Cyan(sideBorder).String() +
+			strings.Repeat(" ", boxWidth) +
+			aurora.Cyan(sideBorder).String())
+		c.Println(aurora.Cyan(bottomBorder).String())
+	} else {
+		c.Println(topBorder)
+		c.Println(sideBorder + strings.Repeat(" ", boxWidth) + sideBorder)
+		c.Println(bottomBorder)
+	}
+
+	if c.Color() {
+		prompt := aurora.Cyan("maestro> ").Bold().String()
+		c.Printf("%s", prompt)
+	} else {
+		c.Printf("maestro> ")
+	}
+}
+
 func main() {
 	cfg := &config{}
 	sqlite_vec.Auto()
@@ -278,7 +313,17 @@ func main() {
 		Use:   "Maestro",
 		Short: "Maestro - Code assistant",
 		Long: `Maestro is an AI-powered code assistant that helps you review PR
-and impl changes through interactive learning sessions.`,
+and impl changes through interactive learning sessions.
+
+Try the new conversational interface with slash commands:
+  maestro -i  (or --interactive)
+
+Available slash commands in conversation mode:
+  /help                   - Show help for available commands
+  /review <PR-NUMBER>     - Review a specific pull request
+  /ask <QUESTION>         - Ask a question about the repository
+  /compact                - Compact conversation history
+  /exit or /quit          - Exit the application`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if cmd.Flags().Changed("model") {
 				modelStr, _ := cmd.Flags().GetString("model")
@@ -674,6 +719,10 @@ Examples:
 		return fmt.Errorf("failed to get verbose preference: %w", err)
 	}
 
+	console.Println("Type /help to see available commands, or ask a question directly.")
+	showConversationBox(console)
+	ShowHelpMessage(console)
+
 	// Prompt for action
 	actionPrompt := &survey.Select{
 		Message: "What would you like to do?",
@@ -794,4 +843,32 @@ func initializeAndAskQuestions(ctx context.Context, cfg *config, console Console
 			console.Println("\n" + strings.Repeat("─", 80) + "\n")
 		}
 	}
+}
+
+func ShowHelpMessage(c ConsoleInterface) {
+	c.PrintHeader("Available Commands")
+
+	commands := []struct {
+		Command     string
+		Description string
+	}{
+		{"/help", "Show this help message"},
+		{"/exit", "Exit the application"},
+		{"/quit", "Exit the application"},
+		{"/compact", "Compact the conversation history"},
+		{"/review <PR-NUMBER>", "Review a specific pull request"},
+		{"/ask <QUESTION>", "Ask a specific question about the repository"},
+	}
+
+	for _, cmd := range commands {
+		if c.Color() {
+			c.Printf("%s %s\n",
+				aurora.Cyan(cmd.Command).Bold().String(),
+				cmd.Description)
+		} else {
+			c.Printf("%s - %s\n", cmd.Command, cmd.Description)
+		}
+	}
+
+	c.Println("\nYou can also type a question directly to ask about the repository.")
 }
