@@ -16,6 +16,15 @@ import (
 	"golang.org/x/term"
 )
 
+var maestroThick = []string{
+	"███╗   ███╗ █████╗ ███████╗███████╗████████╗██████╗  ██████╗ ",
+	"████╗ ████║██╔══██╗██╔════╝██╔════╝╚══██╔══╝██╔══██╗██╔═══██╗",
+	"██╔████╔██║███████║█████╗  ███████╗   ██║   ██████╔╝██║   ██║",
+	"██║╚██╔╝██║██╔══██║██╔══╝  ╚════██║   ██║   ██╔══██╗██║   ██║",
+	"██║ ╚═╝ ██║██║  ██║███████╗███████║   ██║   ██║  ██║╚██████╔╝",
+	"╚═╝     ╚═╝╚═╝  ╚═╝╚══════╝╚══════╝   ╚═╝   ╚═╝  ╚═╝ ╚═════╝ ",
+}
+
 // UI states for the application flow.
 type uiState int
 
@@ -332,7 +341,7 @@ func (m maestroModel) View() string {
 	// Display header in centered style
 	headerStyle := lipgloss.NewStyle().
 		Bold(true).
-		Foreground(lipgloss.Color("212")). // Slightly more muted pink
+		Foreground(lipgloss.Color("#da7756")). // Slightly more muted pink
 		PaddingTop(1).
 		PaddingBottom(1)
 
@@ -341,12 +350,22 @@ func (m maestroModel) View() string {
 	s.WriteString(headerStyle.Width(width).Align(lipgloss.Center).Render(header))
 
 	s.WriteString("\n\n")
+	asciiStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#da7756")). // Match header color
+		Align(lipgloss.Center)
+
+	for _, line := range maestroThick {
+		s.WriteString(asciiStyle.Width(width).Render(line))
+		s.WriteString("\n")
+	}
+
+	s.WriteString("\n")
 	// Render different views based on state
 	switch m.state {
 	case stateOwnerRepo:
 		promptStyle := lipgloss.NewStyle().
 			Bold(true).
-			Foreground(lipgloss.Color("252")). // Light gray
+			Foreground(lipgloss.Color("#da7756")). // Light gray
 			PaddingBottom(1).
 			Width(width).
 			Align(lipgloss.Center)
@@ -370,7 +389,7 @@ func (m maestroModel) View() string {
 
 		promptStyle := lipgloss.NewStyle().
 			Bold(true).
-			Foreground(lipgloss.Color("252")). // Light gray
+			Foreground(lipgloss.Color("#da7756")). // Light gray
 			PaddingBottom(1).
 			Width(width).
 			Align(lipgloss.Center)
@@ -408,7 +427,7 @@ func (m maestroModel) View() string {
 			// Apply selected styling if this is the current item
 			if m.cursor == i {
 				selectedStyle := lipgloss.NewStyle().
-					Foreground(lipgloss.Color("212")). // Matching pink
+					Foreground(lipgloss.Color("#da7756")).
 					Bold(true)
 				choiceList.WriteString(selectedStyle.Render(itemText) + "\n")
 			} else {
