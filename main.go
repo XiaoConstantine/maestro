@@ -535,6 +535,7 @@ func runCLI(cfg *config) error {
 
 func runInteractiveMode(cfg *config) error {
 	printMaestroBanner()
+
 	ctx := core.WithExecutionState(context.Background())
 	output := logging.NewConsoleOutput(true, logging.WithColor(true))
 	logLevel := logging.INFO
@@ -545,6 +546,7 @@ func runInteractiveMode(cfg *config) error {
 	logging.SetLogger(logger)
 
 	console := NewConsole(os.Stdout, logger, nil)
+	ShowHelpMessage(console)
 	llms.EnsureFactory()
 	if cfg.owner == "" {
 		ownerPrompt := &survey.Input{
@@ -721,7 +723,6 @@ Examples:
 
 	console.Println("Type /help to see available commands, or ask a question directly.")
 	showConversationBox(console)
-	ShowHelpMessage(console)
 
 	// Prompt for action
 	actionPrompt := &survey.Select{
