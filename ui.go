@@ -235,6 +235,8 @@ func (m maestroModel) handleEnterKey() (tea.Model, tea.Cmd) {
 			m.textInput.Focus()
 			return m, func() tea.Msg { return stateOllamaModelInput }
 		}
+		m.config.modelProvider = selected.Provider
+		m.config.modelName = string(selected.ID)
 
 		// For other providers, proceed to action selection
 		return m, func() tea.Msg { return stateVerboseOption }
