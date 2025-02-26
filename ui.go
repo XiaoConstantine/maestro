@@ -436,7 +436,7 @@ func (m maestroModel) View() string {
 
 			if m.cursor == i {
 				s.WriteString(lipgloss.NewStyle().
-					Foreground(lipgloss.Color("205")).
+					Foreground(lipgloss.Color("#da7756")).
 					Render(line) + "\n")
 			} else {
 				s.WriteString(line + "\n")
@@ -477,7 +477,7 @@ func (m maestroModel) View() string {
 
 			if m.cursor == i {
 				s.WriteString(lipgloss.NewStyle().
-					Foreground(lipgloss.Color("212")).
+					Foreground(lipgloss.Color("#da7756")).
 					Render(line) + "\n")
 			} else {
 				s.WriteString(line + "\n")
