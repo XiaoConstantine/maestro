@@ -792,22 +792,14 @@ func VerifyTokenPermissions(ctx context.Context, token, owner, repo string) erro
 	tc := oauth2.NewClient(ctx, ts)
 	client := github.NewClient(tc)
 
-	// First, let's check the token's basic information
-	fmt.Println("Checking token permissions...")
-
 	// Check token validity and scopes
 	user, resp, err := client.Users.Get(ctx, "") // Empty string gets authenticated user
 	if err != nil {
 		if resp != nil && resp.StatusCode == 401 {
 			return fmt.Errorf("invalid token or token has expired")
 		}
-		return fmt.Errorf("error checking token: %w", err)
+		return fmt.Errorf("error checking token: %w for user: %s", err, user)
 	}
-
-	fmt.Printf("\nToken belongs to user: %s\n", user.GetLogin())
-	fmt.Printf("Token scopes: %s\n", resp.Header.Get("X-OAuth-Scopes"))
-
-	fmt.Printf("Checking access to repository: %s/%s\n", owner, repo)
 
 	// Now let's check specific permissions we need
 	permissionChecks := []struct {
@@ -867,25 +859,16 @@ func VerifyTokenPermissions(ctx context.Context, token, owner, repo string) erro
 		// },
 	}
 
-	// Run all permission checks
-	fmt.Println("\nPermission Check Results:")
-	fmt.Println("------------------------")
 	allPassed := true
 	for _, check := range permissionChecks {
-		fmt.Printf("%-30s: ", check.name)
 		if err := check.check(); err != nil {
-			fmt.Printf("❌ Failed - %v\n", err)
 			allPassed = false
-		} else {
-			fmt.Printf("✅ Passed\n")
 		}
 	}
 
 	if !allPassed {
 		return fmt.Errorf("\nsome permission checks failed - token may not have sufficient access")
 	}
-
-	fmt.Println("\n✅ Token has all required permissions for PR review functionality")
 	return nil
 }
 
