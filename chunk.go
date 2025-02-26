@@ -183,8 +183,6 @@ func chunkfile(ctx context.Context, content string, changes string, config *Chun
 		}
 	}
 
-	logger.Info(ctx, "Chunking file %s using strategy: %s", filename, config.Strategy)
-
 	// Select chunking strategy based on configuration
 	var chunks []ReviewChunk
 	var err error

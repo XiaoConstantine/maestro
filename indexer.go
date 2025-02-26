@@ -280,7 +280,7 @@ func (ri *RepoIndexer) processChangedFiles(ctx context.Context, changes []*githu
 	}
 
 	var processedFiles int32
-	console.StartSpinner("Processing changed files...")
+	console.StartSpinner("")
 
 	// Create a ticker for updating progress
 	ticker := time.NewTicker(100 * time.Millisecond)
@@ -295,7 +295,7 @@ func (ri *RepoIndexer) processChangedFiles(ctx context.Context, changes []*githu
 				current := atomic.LoadInt32(&processedFiles)
 				if totalChanges > 0 {
 					percentage := float64(current) / float64(totalChanges) * 100
-					console.UpdateSpinnerText(fmt.Sprintf("Processing changed files... %.1f%% (%d/%d files)",
+					console.UpdateSpinnerText(fmt.Sprintf("Indexing changed files... %.1f%% (%d/%d files)",
 						percentage, current, totalChanges))
 				}
 			}
