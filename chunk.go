@@ -474,6 +474,7 @@ func chunkBySize(content string, config *ChunkConfig) ([]ReviewChunk, error) {
 		)
 		chunks = append(chunks, chunk)
 	}
+	logging.GetLogger().Debug(context.Background(), "for file: %s, created: %d chunks", filepath, len(chunks))
 
 	return chunks, nil
 }

@@ -543,12 +543,12 @@ func (m maestroModel) executeQA(question string) (string, error) {
 	// Create a buffer to capture output
 	var outputBuffer strings.Builder
 	// Create a custom console that writes to our buffer
-	customConsole := NewConsole(&outputBuffer, m.logger, nil)
+	_ = NewConsole(&outputBuffer, m.logger, nil)
 
-	err := runQA(m.ctx, m.config, customConsole, question)
-	if err != nil {
-		return "", err
-	}
+	// err := runQA(m.ctx, m.config, customConsole, question)
+	// if err != nil {
+	// 	return "", err
+	// }
 
 	return outputBuffer.String(), nil
 }
