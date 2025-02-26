@@ -307,11 +307,27 @@ Available slash commands in conversation mode:
 func runCLI(cfg *config) error {
 	ctx := core.WithExecutionState(context.Background())
 	output := logging.NewConsoleOutput(true, logging.WithColor(true))
+
 	logLevel := logging.INFO
 	if cfg.verbose {
 		logLevel = logging.DEBUG
 
 	}
+	if cfg.verbose {
+		// Set DEBUG environment variable for other components
+		os.Setenv("DEBUG", "1")
+
+		// Set up Bubble Tea's file logging
+		f, err := tea.LogToFile("~/.maestro/logs/maestro-debug.log", "debug")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to set up logging: %v\n", err)
+			// Continue anyway, don't exit
+		} else {
+			defer f.Close()
+			fmt.Fprintf(os.Stderr, "Debug logging enabled to maestro-debug.log\n")
+		}
+	}
+
 	logger := logging.NewLogger(logging.Config{
 		Severity: logLevel,
 		Outputs:  []logging.Output{output},
@@ -456,16 +472,32 @@ func runCLI(cfg *config) error {
 }
 
 func runInteractiveMode(cfg *config) error {
-	printMaestroBanner()
 	_ = core.WithExecutionState(context.Background())
 	output := logging.NewConsoleOutput(true, logging.WithColor(true))
 	logLevel := logging.INFO
+	if cfg.verbose {
+		logLevel = logging.DEBUG
+	}
+
 	logger := logging.NewLogger(logging.Config{
 		Severity: logLevel,
 		Outputs:  []logging.Output{output},
 	})
 	logging.SetLogger(logger)
+	if cfg.verbose {
+		// Set DEBUG environment variable for other components
+		os.Setenv("DEBUG", "1")
 
+		// Set up Bubble Tea's file logging
+		f, err := tea.LogToFile("~/.maestro/logs/maestro-debug.log", "debug")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to set up logging: %v\n", err)
+			// Continue anyway, don't exit
+		} else {
+			defer f.Close()
+			fmt.Fprintf(os.Stderr, "Debug logging enabled to maestro-debug.log\n")
+		}
+	}
 	console := NewConsole(os.Stdout, logger, nil)
 	llms.EnsureFactory()
 

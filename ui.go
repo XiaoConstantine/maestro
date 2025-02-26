@@ -116,12 +116,12 @@ func (m maestroModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.handleEnterKey()
 
 		case "up", "k":
-			if m.state == stateModelSelection || m.state == stateActionSelection {
+			if m.state == stateModelSelection || m.state == stateActionSelection || m.state == stateVerboseOption {
 				m.cursor = max(m.cursor-1, 0)
 			}
 
 		case "down", "j":
-			if m.state == stateModelSelection || m.state == stateActionSelection {
+			if m.state == stateModelSelection || m.state == stateActionSelection || m.state == stateVerboseOption {
 				m.cursor = min(m.cursor+1, len(m.choices)-1)
 			}
 		}
