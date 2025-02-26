@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"runtime"
-	"strconv"
 	"strings"
 	"time"
 
@@ -14,6 +13,7 @@ import (
 	"github.com/XiaoConstantine/dspy-go/pkg/core"
 	"github.com/XiaoConstantine/dspy-go/pkg/llms"
 	"github.com/XiaoConstantine/dspy-go/pkg/logging"
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/logrusorgru/aurora"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
@@ -535,7 +535,7 @@ func runCLI(cfg *config) error {
 
 func runInteractiveMode(cfg *config) error {
 	printMaestroBanner()
-	ctx := core.WithExecutionState(context.Background())
+	_ = core.WithExecutionState(context.Background())
 	output := logging.NewConsoleOutput(true, logging.WithColor(true))
 	logLevel := logging.INFO
 	logger := logging.NewLogger(logging.Config{
@@ -546,228 +546,251 @@ func runInteractiveMode(cfg *config) error {
 
 	console := NewConsole(os.Stdout, logger, nil)
 	llms.EnsureFactory()
-	if cfg.owner == "" {
-		ownerPrompt := &survey.Input{
-			Message: "Enter repository owner:",
-		}
-		if err := survey.AskOne(ownerPrompt, &cfg.owner); err != nil {
-			return fmt.Errorf("failed to get owner: %w", err)
-		}
+
+	// Create and run the Bubble Tea program
+	p := tea.NewProgram(initialModel(cfg, logger, console), tea.WithAltScreen())
+	if _, err := p.Run(); err != nil {
+		return fmt.Errorf("error running Bubble Tea program: %w", err)
 	}
 
-	// Only prompt for repo if not provided
-	if cfg.repo == "" {
-		repoPrompt := &survey.Input{
-			Message: "Enter repository name:",
-		}
-		if err := survey.AskOne(repoPrompt, &cfg.repo); err != nil {
-			return fmt.Errorf("failed to get repo: %w", err)
-		}
-	}
-
-	var customizeConcurrency bool
-	concurrencyPrompt := &survey.Confirm{
-		Message: fmt.Sprintf("Customize concurrency settings? (currently using %d workers)", runtime.NumCPU()),
-		Default: false,
-	}
-	if err := survey.AskOne(concurrencyPrompt, &customizeConcurrency); err != nil {
-		return fmt.Errorf("failed to get concurrency preference: %w", err)
-	}
-
-	if customizeConcurrency {
-		workersPrompt := &survey.Input{
-			Message: fmt.Sprintf("Enter number of concurrent workers for indexing (current: %d):", cfg.indexWorkers),
-			Default: strconv.Itoa(cfg.indexWorkers),
-		}
-		var workersStr string
-		if err := survey.AskOne(workersPrompt, &workersStr); err != nil {
-			return fmt.Errorf("failed to get worker count: %w", err)
-		}
-		if workers, err := strconv.Atoi(workersStr); err == nil && workers > 0 {
-			cfg.indexWorkers = workers
-		}
-
-		workersPrompt = &survey.Input{
-			Message: fmt.Sprintf("Enter number of concurrent workers for review (current: %d):", cfg.reviewWorkers),
-			Default: strconv.Itoa(cfg.reviewWorkers),
-		}
-		if err := survey.AskOne(workersPrompt, &workersStr); err != nil {
-			return fmt.Errorf("failed to get worker count: %w", err)
-		}
-		if workers, err := strconv.Atoi(workersStr); err == nil && workers > 0 {
-			cfg.reviewWorkers = workers
-		}
-	}
-
-	// Optional settings
-	if cfg.modelProvider == DefaultModelProvider && cfg.modelName == DefaultModelName {
-
-		var useCustomModel bool
-		modelPrompt := &survey.Confirm{
-			Message: "Default to models with llamacpp, Would you like to use a custom model?",
-			Default: false,
-		}
-		if err := survey.AskOne(modelPrompt, &useCustomModel); err != nil {
-			return fmt.Errorf("failed to get model preference: %w", err)
-		}
-
-		if useCustomModel {
-			titleCaser := cases.Title(language.English)
-			choices := getModelChoices()
-
-			// Create formatted options for the survey
-			var options []string
-			var sections = map[string]bool{} // Track where we need section headers
-			currentProvider := ""
-
-			for _, choice := range choices {
-				// Add section header if we're switching providers
-				if choice.Provider != currentProvider {
-					currentProvider = choice.Provider
-					if !sections[currentProvider] {
-						sections[currentProvider] = true
-						options = append(options, fmt.Sprintf("=== %s Models ===",
-							titleCaser.String(currentProvider)))
-					}
-				}
-
-				option := fmt.Sprintf("%-30s - %s", choice.DisplayName, choice.Description)
-				options = append(options, option)
-			}
-			var selectedOption string
-			selectPrompt := &survey.Select{
-				Message: "Choose a model:",
-				Options: options,
-				Default: options[1], // Skip the first section header
-				Help: `Use ↑↓ to navigate, Enter to select
-
-Local Models (Ollama, LLaMA.cpp):
-- Run locally on your machine
-- No API keys required
-- Support various model formats
-
-Cloud Models (Anthropic, Google):
-- Require API keys
-- Hosted solutions with consistent performance
-- Regular updates and improvements`,
-			}
-			if err := survey.AskOne(selectPrompt, &selectedOption, survey.WithPageSize(15)); err != nil {
-				return fmt.Errorf("failed to get model selection: %w", err)
-			}
-
-			// Find the selected model and update configuration
-			if selectedChoice := findSelectedChoice(selectedOption, choices, options); selectedChoice != nil {
-				console.Printf("Select choice: %s", selectedChoice)
-				// Update configuration based on selection
-				cfg.modelProvider = selectedChoice.Provider
-				cfg.modelName = string(selectedChoice.ID)
-
-				if cfg.modelProvider == "ollama" {
-					// Prompt user for specific Ollama model
-					var ollamaModel string
-					modelPrompt := &survey.Input{
-						Message: "Enter Ollama model (e.g., mistral:q4, llama2:13b):",
-						Help: `Format: modelname[:tag]
-Examples:
-- mistral:q4    (Mistral with 4-bit quantization)
-- llama2:13b    (LLaMA 2 13B model)
-- codellama     (default CodeLLaMA model)`,
-					}
-
-					if err := survey.AskOne(modelPrompt, &ollamaModel); err != nil {
-						return fmt.Errorf("failed to get Ollama model: %w", err)
-					}
-
-					// Parse the Ollama model string
-					if strings.Contains(ollamaModel, ":") {
-						// If user provided model:tag format
-						parts := strings.SplitN(ollamaModel, ":", 2)
-						cfg.modelName = parts[0]
-						cfg.modelConfig = parts[1]
-					} else {
-						// If user provided just the model name
-						cfg.modelName = ollamaModel
-					}
-				}
-
-				// Handle API key requirements for cloud providers
-				if selectedChoice.Provider != "ollama" &&
-					selectedChoice.Provider != "llamacpp" &&
-					cfg.apiKey == "" {
-					if err := handleAPIKeySetup(cfg, selectedChoice); err != nil {
-						console.Printf("got error verify key: %v", err)
-
-						return err
-					}
-				}
-			}
-		}
-	}
-
-	logger.Debug(ctx, "model config provider: %s, model name: %s, model config: %v", cfg.modelProvider, cfg.modelName, cfg.modelConfig)
-	modelID := constructModelID(cfg)
-
-	if err := core.ConfigureDefaultLLM(cfg.apiKey, modelID); err != nil {
-		return fmt.Errorf("failed to configure LLM: %w", err)
-	}
-
-	verbosePrompt := &survey.Confirm{
-		Message: "Enable verbose logging?",
-		Default: false,
-	}
-	if err := survey.AskOne(verbosePrompt, &cfg.verbose); err != nil {
-		return fmt.Errorf("failed to get verbose preference: %w", err)
-	}
-
-	console.Println("Type /help to see available commands, or ask a question directly.")
-	showConversationBox(console)
-	ShowHelpMessage(console)
-
-	// Prompt for action
-	actionPrompt := &survey.Select{
-		Message: "What would you like to do?",
-		Options: []string{
-			"Review a Pull Request",
-			"Ask questions about the repository",
-			"Exit",
-		},
-	}
-
-	for {
-		var action string
-		if err := survey.AskOne(actionPrompt, &action); err != nil {
-			return fmt.Errorf("failed to get action: %w", err)
-		}
-
-		switch action {
-		case "Review a Pull Request":
-			var prNumber string
-			prPrompt := &survey.Input{
-				Message: "Enter PR number:",
-			}
-			if err := survey.AskOne(prPrompt, &prNumber); err != nil {
-				return fmt.Errorf("failed to get PR number: %w", err)
-			}
-			var err error
-			cfg.prNumber, err = strconv.Atoi(prNumber)
-			if err != nil {
-				return fmt.Errorf("invalid PR number: %w", err)
-			}
-			if err := runCLI(cfg); err != nil {
-				fmt.Printf("Error reviewing PR: %v\n", err)
-			}
-
-		case "Ask questions about the repository":
-			// Initialize necessary components for repository Q&A
-			if err := initializeAndAskQuestions(ctx, cfg, console); err != nil {
-				fmt.Printf("Error during Q&A session: %v\n", err)
-			}
-
-		case "Exit":
-			return nil
-		}
-	}
+	return nil
 }
+
+// func runInteractiveMode(cfg *config) error {
+// 	printMaestroBanner()
+// 	ctx := core.WithExecutionState(context.Background())
+// 	output := logging.NewConsoleOutput(true, logging.WithColor(true))
+// 	logLevel := logging.INFO
+// 	logger := logging.NewLogger(logging.Config{
+// 		Severity: logLevel,
+// 		Outputs:  []logging.Output{output},
+// 	})
+// 	logging.SetLogger(logger)
+//
+// 	console := NewConsole(os.Stdout, logger, nil)
+// 	llms.EnsureFactory()
+// 	if cfg.owner == "" {
+// 		ownerPrompt := &survey.Input{
+// 			Message: "Enter repository owner:",
+// 		}
+// 		if err := survey.AskOne(ownerPrompt, &cfg.owner); err != nil {
+// 			return fmt.Errorf("failed to get owner: %w", err)
+// 		}
+// 	}
+//
+// 	// Only prompt for repo if not provided
+// 	if cfg.repo == "" {
+// 		repoPrompt := &survey.Input{
+// 			Message: "Enter repository name:",
+// 		}
+// 		if err := survey.AskOne(repoPrompt, &cfg.repo); err != nil {
+// 			return fmt.Errorf("failed to get repo: %w", err)
+// 		}
+// 	}
+//
+// 	var customizeConcurrency bool
+// 	concurrencyPrompt := &survey.Confirm{
+// 		Message: fmt.Sprintf("Customize concurrency settings? (currently using %d workers)", runtime.NumCPU()),
+// 		Default: false,
+// 	}
+// 	if err := survey.AskOne(concurrencyPrompt, &customizeConcurrency); err != nil {
+// 		return fmt.Errorf("failed to get concurrency preference: %w", err)
+// 	}
+//
+// 	if customizeConcurrency {
+// 		workersPrompt := &survey.Input{
+// 			Message: fmt.Sprintf("Enter number of concurrent workers for indexing (current: %d):", cfg.indexWorkers),
+// 			Default: strconv.Itoa(cfg.indexWorkers),
+// 		}
+// 		var workersStr string
+// 		if err := survey.AskOne(workersPrompt, &workersStr); err != nil {
+// 			return fmt.Errorf("failed to get worker count: %w", err)
+// 		}
+// 		if workers, err := strconv.Atoi(workersStr); err == nil && workers > 0 {
+// 			cfg.indexWorkers = workers
+// 		}
+//
+// 		workersPrompt = &survey.Input{
+// 			Message: fmt.Sprintf("Enter number of concurrent workers for review (current: %d):", cfg.reviewWorkers),
+// 			Default: strconv.Itoa(cfg.reviewWorkers),
+// 		}
+// 		if err := survey.AskOne(workersPrompt, &workersStr); err != nil {
+// 			return fmt.Errorf("failed to get worker count: %w", err)
+// 		}
+// 		if workers, err := strconv.Atoi(workersStr); err == nil && workers > 0 {
+// 			cfg.reviewWorkers = workers
+// 		}
+// 	}
+//
+// 	// Optional settings
+// 	if cfg.modelProvider == DefaultModelProvider && cfg.modelName == DefaultModelName {
+//
+// 		var useCustomModel bool
+// 		modelPrompt := &survey.Confirm{
+// 			Message: "Default to models with llamacpp, Would you like to use a custom model?",
+// 			Default: false,
+// 		}
+// 		if err := survey.AskOne(modelPrompt, &useCustomModel); err != nil {
+// 			return fmt.Errorf("failed to get model preference: %w", err)
+// 		}
+//
+// 		if useCustomModel {
+// 			titleCaser := cases.Title(language.English)
+// 			choices := getModelChoices()
+//
+// 			// Create formatted options for the survey
+// 			var options []string
+// 			var sections = map[string]bool{} // Track where we need section headers
+// 			currentProvider := ""
+//
+// 			for _, choice := range choices {
+// 				// Add section header if we're switching providers
+// 				if choice.Provider != currentProvider {
+// 					currentProvider = choice.Provider
+// 					if !sections[currentProvider] {
+// 						sections[currentProvider] = true
+// 						options = append(options, fmt.Sprintf("=== %s Models ===",
+// 							titleCaser.String(currentProvider)))
+// 					}
+// 				}
+//
+// 				option := fmt.Sprintf("%-30s - %s", choice.DisplayName, choice.Description)
+// 				options = append(options, option)
+// 			}
+// 			var selectedOption string
+// 			selectPrompt := &survey.Select{
+// 				Message: "Choose a model:",
+// 				Options: options,
+// 				Default: options[1], // Skip the first section header
+// 				Help: `Use ↑↓ to navigate, Enter to select
+//
+// Local Models (Ollama, LLaMA.cpp):
+// - Run locally on your machine
+// - No API keys required
+// - Support various model formats
+//
+// Cloud Models (Anthropic, Google):
+// - Require API keys
+// - Hosted solutions with consistent performance
+// - Regular updates and improvements`,
+// 			}
+// 			if err := survey.AskOne(selectPrompt, &selectedOption, survey.WithPageSize(15)); err != nil {
+// 				return fmt.Errorf("failed to get model selection: %w", err)
+// 			}
+//
+// 			// Find the selected model and update configuration
+// 			if selectedChoice := findSelectedChoice(selectedOption, choices, options); selectedChoice != nil {
+// 				console.Printf("Select choice: %s", selectedChoice)
+// 				// Update configuration based on selection
+// 				cfg.modelProvider = selectedChoice.Provider
+// 				cfg.modelName = string(selectedChoice.ID)
+//
+// 				if cfg.modelProvider == "ollama" {
+// 					// Prompt user for specific Ollama model
+// 					var ollamaModel string
+// 					modelPrompt := &survey.Input{
+// 						Message: "Enter Ollama model (e.g., mistral:q4, llama2:13b):",
+// 						Help: `Format: modelname[:tag]
+// Examples:
+// - mistral:q4    (Mistral with 4-bit quantization)
+// - llama2:13b    (LLaMA 2 13B model)
+// - codellama     (default CodeLLaMA model)`,
+// 					}
+//
+// 					if err := survey.AskOne(modelPrompt, &ollamaModel); err != nil {
+// 						return fmt.Errorf("failed to get Ollama model: %w", err)
+// 					}
+//
+// 					// Parse the Ollama model string
+// 					if strings.Contains(ollamaModel, ":") {
+// 						// If user provided model:tag format
+// 						parts := strings.SplitN(ollamaModel, ":", 2)
+// 						cfg.modelName = parts[0]
+// 						cfg.modelConfig = parts[1]
+// 					} else {
+// 						// If user provided just the model name
+// 						cfg.modelName = ollamaModel
+// 					}
+// 				}
+//
+// 				// Handle API key requirements for cloud providers
+// 				if selectedChoice.Provider != "ollama" &&
+// 					selectedChoice.Provider != "llamacpp" &&
+// 					cfg.apiKey == "" {
+// 					if err := handleAPIKeySetup(cfg, selectedChoice); err != nil {
+// 						console.Printf("got error verify key: %v", err)
+//
+// 						return err
+// 					}
+// 				}
+// 			}
+// 		}
+// 	}
+//
+// 	logger.Debug(ctx, "model config provider: %s, model name: %s, model config: %v", cfg.modelProvider, cfg.modelName, cfg.modelConfig)
+// 	modelID := constructModelID(cfg)
+//
+// 	if err := core.ConfigureDefaultLLM(cfg.apiKey, modelID); err != nil {
+// 		return fmt.Errorf("failed to configure LLM: %w", err)
+// 	}
+//
+// 	verbosePrompt := &survey.Confirm{
+// 		Message: "Enable verbose logging?",
+// 		Default: false,
+// 	}
+// 	if err := survey.AskOne(verbosePrompt, &cfg.verbose); err != nil {
+// 		return fmt.Errorf("failed to get verbose preference: %w", err)
+// 	}
+//
+// 	console.Println("Type /help to see available commands, or ask a question directly.")
+// 	showConversationBox(console)
+// 	ShowHelpMessage(console)
+//
+// 	// Prompt for action
+// 	actionPrompt := &survey.Select{
+// 		Message: "What would you like to do?",
+// 		Options: []string{
+// 			"Review a Pull Request",
+// 			"Ask questions about the repository",
+// 			"Exit",
+// 		},
+// 	}
+//
+// 	for {
+// 		var action string
+// 		if err := survey.AskOne(actionPrompt, &action); err != nil {
+// 			return fmt.Errorf("failed to get action: %w", err)
+// 		}
+//
+// 		switch action {
+// 		case "Review a Pull Request":
+// 			var prNumber string
+// 			prPrompt := &survey.Input{
+// 				Message: "Enter PR number:",
+// 			}
+// 			if err := survey.AskOne(prPrompt, &prNumber); err != nil {
+// 				return fmt.Errorf("failed to get PR number: %w", err)
+// 			}
+// 			var err error
+// 			cfg.prNumber, err = strconv.Atoi(prNumber)
+// 			if err != nil {
+// 				return fmt.Errorf("invalid PR number: %w", err)
+// 			}
+// 			if err := runCLI(cfg); err != nil {
+// 				fmt.Printf("Error reviewing PR: %v\n", err)
+// 			}
+//
+// 		case "Ask questions about the repository":
+// 			// Initialize necessary components for repository Q&A
+// 			if err := initializeAndAskQuestions(ctx, cfg, console); err != nil {
+// 				fmt.Printf("Error during Q&A session: %v\n", err)
+// 			}
+//
+// 		case "Exit":
+// 			return nil
+// 		}
+// 	}
+//}
 
 func initializeAndAskQuestions(ctx context.Context, cfg *config, console ConsoleInterface) error {
 	if cfg.githubToken == "" {
