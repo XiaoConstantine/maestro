@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
@@ -131,37 +132,94 @@ func formatDisplayName(modelID string) string {
 	return strings.Join(words, " ")
 }
 
-// func handleAPIKeySetup(cfg *config, choice *ModelChoice) error {
-// 	// First try to get the API key from environment variables
-// 	key, err := checkProviderAPIKey(choice.Provider, "")
-// 	if err == nil {
-// 		// Found a valid key in environment variables
-// 		cfg.apiKey = key
-// 		return nil
-// 	}
+//	func handleAPIKeySetup(cfg *config, choice *ModelChoice) error {
+//		// First try to get the API key from environment variables
+//		key, err := checkProviderAPIKey(choice.Provider, "")
+//		if err == nil {
+//			// Found a valid key in environment variables
+//			cfg.apiKey = key
+//			return nil
+//		}
 //
-// 	// If no environment variable is found, prompt the user
-// 	var apiKey string
-// 	apiKeyPrompt := &survey.Password{
-// 		Message: fmt.Sprintf("Enter API key for %s:", choice.DisplayName),
-// 		Help: fmt.Sprintf(`Required for %s models.
+//		// If no environment variable is found, prompt the user
+//		var apiKey string
+//		apiKeyPrompt := &survey.Password{
+//			Message: fmt.Sprintf("Enter API key for %s:", choice.DisplayName),
+//			Help: fmt.Sprintf(`Required for %s models.
+//
 // You can also set this via environment variables:
-// - Anthropic: ANTHROPIC_API_KEY or CLAUDE_API_KEY
-// - Google: GOOGLE_API_KEY or GEMINI_API_KEY`, choice.Provider),
-// 	}
 //
-// 	if err := survey.AskOne(apiKeyPrompt, &apiKey); err != nil {
-// 		return fmt.Errorf("failed to get API key: %w", err)
-// 	}
+//   - Anthropic: ANTHROPIC_API_KEY or CLAUDE_API_KEY
 //
-// 	// Basic validation of the provided key
-// 	if strings.TrimSpace(apiKey) == "" {
-// 		return fmt.Errorf("API key cannot be empty")
-// 	}
+//   - Google: GOOGLE_API_KEY or GEMINI_API_KEY`, choice.Provider),
+//     }
 //
-// 	cfg.apiKey = apiKey
-// 	return nil
-// }
+//     if err := survey.AskOne(apiKeyPrompt, &apiKey); err != nil {
+//     return fmt.Errorf("failed to get API key: %w", err)
+//     }
+//
+//     // Basic validation of the provided key
+//     if strings.TrimSpace(apiKey) == "" {
+//     return fmt.Errorf("API key cannot be empty")
+//     }
+//
+//     cfg.apiKey = apiKey
+//     return nil
+//     }
+//
+// setupLogging configures debug logging to a file when verbose mode is enabled.
+func setupLogging(verbose bool) (func(), logging.Output) {
+	if !verbose {
+		return func() {}, nil // No-op cleanup function
+	}
+
+	// Set DEBUG environment variable for other components
+	os.Setenv("DEBUG", "1")
+
+	// Expand the ~ in the log path
+	logDir := "~/.maestro/logs"
+	if strings.HasPrefix(logDir, "~/") {
+		home, err := os.UserHomeDir()
+		if err == nil {
+			logDir = filepath.Join(home, logDir[2:])
+		}
+	}
+
+	// Create the directory if it doesn't exist
+	if err := os.MkdirAll(logDir, 0755); err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to create log directory: %v\n", err)
+		return func() {}, nil
+	}
+
+	logPath := filepath.Join(logDir, "maestro-debug.log")
+	f, err := tea.LogToFile(logPath, "debug")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to set up logging: %v\n", err)
+		return func() {}, nil
+	}
+	fileOutput, err := logging.NewFileOutput(
+		logPath,
+		logging.WithRotation(50*1024*1024, 5), // 50MB max size, keep 5 files
+		logging.WithJSONFormat(false),         // Use plain text for readability
+	)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to create application log output: %v\n", err)
+		// Still return the Bubble Tea cleanup even if file output fails
+		return func() {
+			if f != nil {
+				f.Close()
+			}
+		}, nil
+	}
+	fmt.Fprintf(os.Stderr, "Debug logging enabled to %s\n", logPath)
+
+	// Return a cleanup function that closes the file
+	return func() {
+		if f != nil {
+			f.Close()
+		}
+	}, fileOutput
+}
 
 func main() {
 	cfg := &config{}
@@ -241,31 +299,23 @@ Available slash commands in conversation mode:
 
 func runCLI(cfg *config) error {
 	ctx := core.WithExecutionState(context.Background())
-	output := logging.NewConsoleOutput(true, logging.WithColor(true))
+	consoleOutput := logging.NewConsoleOutput(true, logging.WithColor(true))
 
 	logLevel := logging.INFO
 	if cfg.verbose {
 		logLevel = logging.DEBUG
-
 	}
-	if cfg.verbose {
-		// Set DEBUG environment variable for other components
-		os.Setenv("DEBUG", "1")
+	cleanup, fileOutput := setupLogging(cfg.verbose)
+	defer cleanup()
 
-		// Set up Bubble Tea's file logging
-		f, err := tea.LogToFile("~/.maestro/logs/maestro-debug.log", "debug")
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Failed to set up logging: %v\n", err)
-			// Continue anyway, don't exit
-		} else {
-			defer f.Close()
-			fmt.Fprintf(os.Stderr, "Debug logging enabled to maestro-debug.log\n")
-		}
+	var outputs []logging.Output
+	outputs = append(outputs, consoleOutput)
+	if fileOutput != nil {
+		outputs = append(outputs, fileOutput)
 	}
-
 	logger := logging.NewLogger(logging.Config{
 		Severity: logLevel,
-		Outputs:  []logging.Output{output},
+		Outputs:  outputs,
 	})
 	logging.SetLogger(logger)
 
@@ -408,31 +458,23 @@ func runCLI(cfg *config) error {
 
 func runInteractiveMode(cfg *config) error {
 	_ = core.WithExecutionState(context.Background())
-	output := logging.NewConsoleOutput(true, logging.WithColor(true))
+	consoleOutput := logging.NewConsoleOutput(true, logging.WithColor(true))
 	logLevel := logging.INFO
 	if cfg.verbose {
 		logLevel = logging.DEBUG
 	}
-
+	var outputs []logging.Output
+	outputs = append(outputs, consoleOutput)
+	cleanup, fileOutput := setupLogging(cfg.verbose)
+	defer cleanup()
+	if fileOutput != nil {
+		outputs = append(outputs, fileOutput)
+	}
 	logger := logging.NewLogger(logging.Config{
 		Severity: logLevel,
-		Outputs:  []logging.Output{output},
+		Outputs:  outputs,
 	})
 	logging.SetLogger(logger)
-	if cfg.verbose {
-		// Set DEBUG environment variable for other components
-		os.Setenv("DEBUG", "1")
-
-		// Set up Bubble Tea's file logging
-		f, err := tea.LogToFile("~/.maestro/logs/maestro-debug.log", "debug")
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Failed to set up logging: %v\n", err)
-			// Continue anyway, don't exit
-		} else {
-			defer f.Close()
-			fmt.Fprintf(os.Stderr, "Debug logging enabled to maestro-debug.log\n")
-		}
-	}
 	console := NewConsole(os.Stdout, logger, nil)
 	llms.EnsureFactory()
 
