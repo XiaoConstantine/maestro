@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/XiaoConstantine/dspy-go/pkg/agents"
 	"github.com/XiaoConstantine/dspy-go/pkg/core"
 	"github.com/XiaoConstantine/dspy-go/pkg/llms"
 	"github.com/XiaoConstantine/dspy-go/pkg/logging"
@@ -457,7 +458,7 @@ func runCLI(cfg *config) error {
 }
 
 func runInteractiveMode(cfg *config) error {
-	_ = core.WithExecutionState(context.Background())
+	ctx := core.WithExecutionState(context.Background())
 	consoleOutput := logging.NewConsoleOutput(true, logging.WithColor(true))
 	logLevel := logging.INFO
 	if cfg.verbose {
@@ -477,6 +478,11 @@ func runInteractiveMode(cfg *config) error {
 	logging.SetLogger(logger)
 	console := NewConsole(os.Stdout, logger, nil)
 	llms.EnsureFactory()
+	modelID := constructModelID(cfg)
+	err := core.ConfigureDefaultLLM(cfg.apiKey, modelID)
+	if err != nil {
+		logger.Fatalf(ctx, "Failed to config llm: %v", err)
+	}
 
 	// Create and run the Bubble Tea program
 	p := tea.NewProgram(initialModel(cfg, logger, console), tea.WithAltScreen())
@@ -484,5 +490,96 @@ func runInteractiveMode(cfg *config) error {
 		return fmt.Errorf("error running Bubble Tea program: %w", err)
 	}
 
+	return nil
+}
+func runQA(ctx context.Context, cfg *config, console ConsoleInterface, question string) error {
+	_ = core.WithExecutionState(context.Background())
+	consoleOutput := logging.NewConsoleOutput(true, logging.WithColor(true))
+	logLevel := logging.INFO
+	if cfg.verbose {
+		logLevel = logging.DEBUG
+	}
+	var outputs []logging.Output
+	outputs = append(outputs, consoleOutput)
+	cleanup, fileOutput := setupLogging(cfg.verbose)
+	defer cleanup()
+	if fileOutput != nil {
+		outputs = append(outputs, fileOutput)
+	}
+	logger := logging.NewLogger(logging.Config{
+		Severity: logLevel,
+		Outputs:  outputs,
+	})
+	logging.SetLogger(logger)
+	llms.EnsureFactory()
+	modelID := constructModelID(cfg)
+	err := core.ConfigureDefaultLLM(cfg.apiKey, modelID)
+	if err != nil {
+		logger.Fatalf(ctx, "Failed to configure LLM: %v", err)
+	}
+
+	if cfg.githubToken == "" {
+		return fmt.Errorf("GitHub token is required")
+	}
+
+	logger.Info(ctx, "config: %v", cfg)
+	// Initialize GitHub tools and other necessary components
+	githubTools := NewGitHubTools(cfg.githubToken, cfg.owner, cfg.repo)
+	if githubTools == nil || githubTools.Client() == nil {
+		return fmt.Errorf("failed to initialize GitHub client")
+	}
+
+	dbPath, err := CreateStoragePath(ctx, cfg.owner, cfg.repo)
+	if err != nil {
+		return fmt.Errorf("failed to create storage path: %w", err)
+	}
+
+	agent, err := NewPRReviewAgent(ctx, githubTools, dbPath, &AgentConfig{
+		IndexWorkers:  cfg.indexWorkers,
+		ReviewWorkers: cfg.reviewWorkers,
+	})
+	if err != nil {
+		return fmt.Errorf("Failed to initialize agent due to: %v", err)
+	}
+
+	qaProcessor, _ := agent.Orchestrator(ctx).GetProcessor("repo_qa")
+
+	// Process the question
+	result, err := qaProcessor.Process(ctx, agents.Task{
+		ID: "qa",
+		Metadata: map[string]interface{}{
+			"question": question,
+		},
+	}, nil)
+
+	if err != nil {
+		return fmt.Errorf("Error processing question: %v", err)
+	}
+
+	// Format response
+	if response, ok := result.(*QAResponse); ok {
+		// Print a separator line for visual clarity
+		console.Println("\n" + strings.Repeat("─", 80))
+
+		// Format and print the main answer using structured sections
+		formattedAnswer := formatStructuredAnswer(response.Answer)
+		console.Println(formattedAnswer)
+
+		// Print source files in a tree-like structure if available
+		if len(response.SourceFiles) > 0 {
+			if console.Color() {
+				console.Println("\n" + aurora.Blue("Source Files:").String())
+			} else {
+				console.Println("\nSource Files:")
+			}
+
+			// Group files by directory for better organization
+			filesByDir := groupFilesByDirectory(response.SourceFiles)
+			printFileTree(console, filesByDir)
+		}
+
+		// Print final separator
+		console.Println("\n" + strings.Repeat("─", 80) + "\n")
+	}
 	return nil
 }

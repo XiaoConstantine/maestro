@@ -6,13 +6,11 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/XiaoConstantine/dspy-go/pkg/agents"
 	"github.com/XiaoConstantine/dspy-go/pkg/logging"
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-	"github.com/logrusorgru/aurora"
 	"golang.org/x/term"
 )
 
@@ -531,7 +529,7 @@ func (m maestroModel) processPR() tea.Cmd {
 func (m maestroModel) processQA() tea.Cmd {
 	return func() tea.Msg {
 		// Initialize necessary components for repository Q&A
-		result, err := m.executeQA(m.inputValue)
+		result, err := m.executeQA(m.question)
 		if err != nil {
 			return errorMsg{err: fmt.Errorf("Q&A error: %v", err)}
 		}
@@ -544,81 +542,10 @@ func (m maestroModel) processQA() tea.Cmd {
 func (m maestroModel) executeQA(question string) (string, error) {
 	// Create a buffer to capture output
 	var outputBuffer strings.Builder
-
 	// Create a custom console that writes to our buffer
 	customConsole := NewConsole(&outputBuffer, m.logger, nil)
 
-	// Create a custom function that processes a single question and returns
-	processQuestionFn := func(ctx context.Context, cfg *config, console ConsoleInterface) error {
-		// This is the core logic from initializeAndAskQuestions, but for a single question
-		if cfg.githubToken == "" {
-			return fmt.Errorf("GitHub token is required")
-		}
-
-		// Initialize GitHub tools and other necessary components
-		githubTools := NewGitHubTools(cfg.githubToken, cfg.owner, cfg.repo)
-		if githubTools == nil || githubTools.Client() == nil {
-			return fmt.Errorf("failed to initialize GitHub client")
-		}
-
-		dbPath, err := CreateStoragePath(ctx, cfg.owner, cfg.repo)
-		if err != nil {
-			return fmt.Errorf("failed to create storage path: %w", err)
-		}
-
-		agent, err := NewPRReviewAgent(ctx, githubTools, dbPath, &AgentConfig{
-			IndexWorkers:  cfg.indexWorkers,
-			ReviewWorkers: cfg.reviewWorkers,
-		})
-		if err != nil {
-			return fmt.Errorf("Failed to initialize agent due to: %v", err)
-		}
-
-		qaProcessor, _ := agent.Orchestrator(ctx).GetProcessor("repo_qa")
-
-		// Process the question
-		result, err := qaProcessor.Process(ctx, agents.Task{
-			ID: "qa",
-			Metadata: map[string]interface{}{
-				"question": question,
-			},
-		}, nil)
-
-		if err != nil {
-			return fmt.Errorf("Error processing question: %v", err)
-		}
-
-		// Format response
-		if response, ok := result.(*QAResponse); ok {
-			// Print a separator line for visual clarity
-			console.Println("\n" + strings.Repeat("─", 80))
-
-			// Format and print the main answer using structured sections
-			formattedAnswer := formatStructuredAnswer(response.Answer)
-			console.Println(formattedAnswer)
-
-			// Print source files in a tree-like structure if available
-			if len(response.SourceFiles) > 0 {
-				if console.Color() {
-					console.Println("\n" + aurora.Blue("Source Files:").String())
-				} else {
-					console.Println("\nSource Files:")
-				}
-
-				// Group files by directory for better organization
-				filesByDir := groupFilesByDirectory(response.SourceFiles)
-				printFileTree(console, filesByDir)
-			}
-
-			// Print final separator
-			console.Println("\n" + strings.Repeat("─", 80) + "\n")
-		}
-
-		return nil
-	}
-
-	// Process the question
-	err := processQuestionFn(m.ctx, m.config, customConsole)
+	err := runQA(m.ctx, m.config, customConsole, question)
 	if err != nil {
 		return "", err
 	}
