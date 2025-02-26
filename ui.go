@@ -291,15 +291,16 @@ func (m maestroModel) handleEnterKey() (tea.Model, tea.Cmd) {
 		// Store the PR number input for processing
 		m.inputValue = m.textInput.Value()
 		m.textInput.Reset()
-		// Handle PR review logic
-		return m, m.handlePRReview(m.textInput.Value())
+		m.state = stateProcessing
+		return m, m.processPR()
 
 	case stateQAInput:
 		// Handle QA logic
 		m.inputValue = m.textInput.Value()
 		m.question = m.inputValue
 		m.textInput.Reset()
-		return m, m.handleQA(m.question)
+		m.state = stateProcessing
+		return m, m.processQA()
 	case stateResults:
 		// Return to action selection after viewing results
 		m.err = nil
@@ -308,27 +309,6 @@ func (m maestroModel) handleEnterKey() (tea.Model, tea.Cmd) {
 	}
 
 	return m, nil
-}
-
-// handlePRReview processes a PR review request.
-func (m maestroModel) handlePRReview(prInput string) tea.Cmd {
-
-	return func() tea.Msg {
-		return stateProcessing
-	}
-}
-
-// handleQA processes a repository question.
-func (m maestroModel) handleQA(question string) tea.Cmd {
-	return func() tea.Msg {
-		// Similar implementation to your existing QA function,
-		// adapted to return results to the UI
-
-		// For now, just a placeholder
-		m.result = "Processing question: " + question
-
-		return stateResults
-	}
 }
 
 // View renders the UI.
