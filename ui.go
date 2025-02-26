@@ -16,7 +16,7 @@ import (
 	"golang.org/x/term"
 )
 
-// UI states for the application flow
+// UI states for the application flow.
 type uiState int
 
 const (
@@ -33,7 +33,7 @@ const (
 	stateResults
 )
 
-// maestroModel represents the application state
+// maestroModel represents the application state.
 type maestroModel struct {
 	config        *config
 	state         uiState
@@ -59,7 +59,7 @@ type errorMsg struct {
 	err error
 }
 
-// Initialize the model
+// Initialize the model.
 func initialModel(cfg *config, logger *logging.Logger, console ConsoleInterface) maestroModel {
 	s := spinner.New()
 	s.Spinner = spinner.Dot
@@ -81,7 +81,7 @@ func initialModel(cfg *config, logger *logging.Logger, console ConsoleInterface)
 	}
 }
 
-// Init initializes the model
+// Init initializes the model.
 func (m maestroModel) Init() tea.Cmd {
 	return tea.Batch(
 		m.spinner.Tick,
@@ -90,18 +90,18 @@ func (m maestroModel) Init() tea.Cmd {
 	)
 }
 
-// initialPrompt shows the first prompt based on state
+// initialPrompt shows the first prompt based on state.
 func (m maestroModel) initialPrompt() tea.Cmd {
 	return func() tea.Msg {
 		// If owner/repo are already set in config, skip to next state
 		if m.config.owner != "" && m.config.repo != "" {
-			return stateModelSelection
+			return stateConcurrencyOptions
 		}
 		return stateOwnerRepo
 	}
 }
 
-// Update handles UI events and state transitions
+// Update handles UI events and state transitions.
 func (m maestroModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	var cmds []tea.Cmd
@@ -162,6 +162,8 @@ func (m maestroModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case stateConcurrencyOptions:
 			m.textInput.Placeholder = fmt.Sprintf("Enter number of concurrent workers (current: %d)", m.config.indexWorkers)
+
+			m.textInput.SetValue(strconv.Itoa(m.config.indexWorkers)) // Pre-fill with current value
 			m.textInput.Focus()
 			return m, textinput.Blink
 
@@ -196,7 +198,7 @@ func (m maestroModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, tea.Batch(cmds...)
 }
 
-// handleEnterKey handles the enter key press based on current state
+// handleEnterKey handles the enter key press based on current state.
 func (m maestroModel) handleEnterKey() (tea.Model, tea.Cmd) {
 	switch m.state {
 	case stateOwnerRepo:
@@ -205,7 +207,7 @@ func (m maestroModel) handleEnterKey() (tea.Model, tea.Cmd) {
 			m.config.owner = parts[0]
 			m.config.repo = parts[1]
 			m.textInput.Reset()
-			return m, func() tea.Msg { return stateModelSelection }
+			return m, func() tea.Msg { return stateConcurrencyOptions }
 		}
 		return m, nil
 
@@ -226,7 +228,7 @@ func (m maestroModel) handleEnterKey() (tea.Model, tea.Cmd) {
 		}
 
 		// For other providers, proceed to action selection
-		return m, func() tea.Msg { return stateActionSelection }
+		return m, func() tea.Msg { return stateVerboseOption }
 	case stateConcurrencyOptions:
 		// Parse concurrency settings
 		workersStr := m.textInput.Value()
@@ -299,7 +301,7 @@ func (m maestroModel) handleEnterKey() (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// handlePRReview processes a PR review request
+// handlePRReview processes a PR review request.
 func (m maestroModel) handlePRReview(prInput string) tea.Cmd {
 
 	return func() tea.Msg {
@@ -307,7 +309,7 @@ func (m maestroModel) handlePRReview(prInput string) tea.Cmd {
 	}
 }
 
-// handleQA processes a repository question
+// handleQA processes a repository question.
 func (m maestroModel) handleQA(question string) tea.Cmd {
 	return func() tea.Msg {
 		// Similar implementation to your existing QA function,
@@ -320,7 +322,7 @@ func (m maestroModel) handleQA(question string) tea.Cmd {
 	}
 }
 
-// View renders the UI
+// View renders the UI.
 func (m maestroModel) View() string {
 	var s strings.Builder
 	width, _, err := term.GetSize(0)
@@ -454,7 +456,34 @@ func (m maestroModel) View() string {
 	case stateProcessing:
 		s.WriteString("Processing... ")
 		s.WriteString(m.spinner.View())
+	case stateConcurrencyOptions:
+		s.WriteString("Configure concurrency settings:\n\n")
+		s.WriteString(m.textInput.View())
+		s.WriteString("\n\nEnter the number of concurrent workers for indexing and review")
 
+	case stateVerboseOption:
+		s.WriteString("Enable verbose logging?\n\n")
+
+		// Render options
+		for i, choice := range m.choices {
+			cursor := " "
+			if m.cursor == i {
+				cursor = ">"
+			}
+
+			line := fmt.Sprintf("%s %s", cursor, choice.DisplayName)
+			if choice.Description != "" {
+				line += fmt.Sprintf(" - %s", choice.Description)
+			}
+
+			if m.cursor == i {
+				s.WriteString(lipgloss.NewStyle().
+					Foreground(lipgloss.Color("212")).
+					Render(line) + "\n")
+			} else {
+				s.WriteString(line + "\n")
+			}
+		}
 	case stateResults:
 		if m.err != nil {
 			s.WriteString(lipgloss.NewStyle().
@@ -478,7 +507,7 @@ func (m maestroModel) View() string {
 	return s.String()
 }
 
-// processPR performs the actual PR review work
+// processPR performs the actual PR review work.
 func (m maestroModel) processPR() tea.Cmd {
 	return func() tea.Msg {
 		// Try to process the PR number
@@ -510,7 +539,7 @@ func (m maestroModel) processQA() tea.Cmd {
 	}
 }
 
-// executeQA reuses the existing initializeAndAskQuestions logic
+// executeQA reuses the existing initializeAndAskQuestions logic.
 func (m maestroModel) executeQA(question string) (string, error) {
 	// Create a buffer to capture output
 	var outputBuffer strings.Builder
