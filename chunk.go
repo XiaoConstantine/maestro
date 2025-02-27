@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/XiaoConstantine/dspy-go/pkg/core"
 	"github.com/XiaoConstantine/dspy-go/pkg/logging"
 )
 
@@ -56,6 +57,8 @@ type ChunkConfig struct {
 
 	// Internal use
 	fileMetadata map[string]interface{}
+
+	GenerateDescriptions bool
 }
 
 // ChunkConfigOption is a function that modifies a ChunkConfig.
@@ -65,15 +68,16 @@ type ChunkConfigOption func(*ChunkConfig)
 func NewChunkConfig(options ...ChunkConfigOption) (*ChunkConfig, error) {
 	// Start with sensible defaults
 	config := &ChunkConfig{
-		Strategy:         ChunkBySize,
-		MaxTokens:        1500,
-		MaxBytes:         nil,
-		ContextLines:     5,
-		OverlapLines:     2,
-		MinChunkSize:     10,
-		LanguageSpecific: make(map[string]interface{}),
-		FilePatterns:     make(map[string]ChunkConfig),
-		fileMetadata:     make(map[string]interface{}),
+		Strategy:             ChunkByFunction,
+		MaxTokens:            1500,
+		MaxBytes:             nil,
+		ContextLines:         5,
+		OverlapLines:         2,
+		MinChunkSize:         10,
+		LanguageSpecific:     make(map[string]interface{}),
+		FilePatterns:         make(map[string]ChunkConfig),
+		fileMetadata:         make(map[string]interface{}),
+		GenerateDescriptions: true,
 	}
 
 	// Apply all options
@@ -123,6 +127,12 @@ func WithFilePattern(pattern string, config ChunkConfig) ChunkConfigOption {
 func WithMaxBytes(bytes int) ChunkConfigOption {
 	return func(c *ChunkConfig) {
 		c.MaxBytes = &bytes
+	}
+}
+
+func WithGenerateDescriptions(generate bool) ChunkConfigOption {
+	return func(c *ChunkConfig) {
+		c.GenerateDescriptions = generate
 	}
 }
 
@@ -258,6 +268,17 @@ func chunkfile(ctx context.Context, content string, changes string, config *Chun
 	// Extract relevant changes
 	for i := range finalChunks {
 		finalChunks[i].changes = ExtractRelevantChanges(changes, finalChunks[i].startline, finalChunks[i].endline)
+		if config.GenerateDescriptions {
+			if estimatetokens(finalChunks[i].content) < 1000 {
+				description, err := generateChunkDescription(ctx, finalChunks[i].content)
+				if err != nil {
+					logger.Warn(ctx, "Failed to generate description: %v", err)
+				} else {
+					logger.Debug(ctx, "Generated description: %v for chunk: %d", description, i)
+					finalChunks[i].description = description
+				}
+			}
+		}
 	}
 
 	logger.Debug(ctx, "Created %d chunks for file %s", len(finalChunks), filename)
@@ -272,46 +293,81 @@ func chunkByFunction(content string, config *ChunkConfig) ([]ReviewChunk, error)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse file: %w", err)
 	}
-	var functionCount int
-	ast.Inspect(file, func(n ast.Node) bool {
-		if _, ok := n.(*ast.FuncDecl); ok {
-			functionCount++
-		}
-		return true
-	})
-	// Get required metadata with safe defaults
-	filePath := ""
-	if path, ok := config.fileMetadata["file_path"].(string); ok {
-		filePath = path
-	}
-
-	changes := ""
-	if changesData, ok := config.fileMetadata["changes"].(string); ok {
-		changes = changesData
-	}
 	var chunks []ReviewChunk
-	ast.Inspect(file, func(n ast.Node) bool {
-		// Look for function declarations
-		if fn, ok := n.(*ast.FuncDecl); ok {
-			// Get the position information
-			start := fset.Position(fn.Pos())
-			end := fset.Position(fn.End())
 
+	// Process function declarations with their associated comments
+	for _, decl := range file.Decls {
+		switch d := decl.(type) {
+		case *ast.FuncDecl:
+			// Get function position
+			startPos := fset.Position(d.Pos())
+			endPos := fset.Position(d.End())
+
+			// Include doc comments if present
+			var codeWithComments string
+			if d.Doc != nil {
+				docPos := fset.Position(d.Doc.Pos())
+				codeWithComments = content[d.Doc.Pos()-1 : d.End()-1]
+				startPos = docPos // Update start position to include comments
+			} else {
+				codeWithComments = content[d.Pos()-1 : d.End()-1]
+			}
+
+			// Create chunk with comment context
 			chunk := createCompleteChunk(
-				content[fn.Pos()-1:fn.End()-1],
-				start.Line,
-				end.Line,
+				codeWithComments,
+				startPos.Line,
+				endPos.Line,
 				content,
 				config,
-				filePath,
-				functionCount,
-				changes,
+				config.fileMetadata["file_path"].(string),
+				0, // Will be updated later
+				"",
 			)
-
 			chunks = append(chunks, chunk)
+
+		case *ast.GenDecl:
+			// Handle type declarations, constants, variables
+			if d.Tok == token.TYPE {
+				for _, spec := range d.Specs {
+					if ts, ok := spec.(*ast.TypeSpec); ok {
+						// Extract type with comments
+						startPos := fset.Position(ts.Pos())
+						endPos := fset.Position(ts.End())
+
+						var codeWithComments string
+						// Try spec-level doc first, then declaration-level
+						if ts.Doc != nil {
+							docPos := fset.Position(ts.Doc.Pos())
+							codeWithComments = content[ts.Doc.Pos()-1 : ts.End()-1]
+							startPos = docPos
+						} else if d.Doc != nil {
+							docPos := fset.Position(d.Doc.Pos())
+							codeWithComments = content[d.Doc.Pos()-1 : ts.End()-1]
+							startPos = docPos
+						} else {
+							codeWithComments = content[ts.Pos()-1 : ts.End()-1]
+						}
+
+						chunk := createCompleteChunk(
+							codeWithComments,
+							startPos.Line,
+							endPos.Line,
+							content,
+							config,
+							config.fileMetadata["file_path"].(string),
+							0,
+							"",
+						)
+						chunks = append(chunks, chunk)
+					}
+				}
+			}
 		}
-		return true
-	})
+	}
+	for i := range chunks {
+		chunks[i].totalChunks = len(chunks)
+	}
 
 	return chunks, nil
 }
@@ -558,4 +614,23 @@ func createCompleteChunk(
 	}
 
 	return chunk
+}
+
+// generateChunkDescription creates a natural language description of a code chunk.
+func generateChunkDescription(ctx context.Context, chunk string) (string, error) {
+	llm := core.GetDefaultLLM()
+	prompt := fmt.Sprintf(`Generate a concise natural language description of what this Go code does:
+
+%s
+
+Description:`, chunk)
+
+	resp, err := llm.Generate(ctx, prompt, core.WithMaxTokens(100),
+		core.WithTemperature(0.6))
+
+	if err != nil {
+		return "", fmt.Errorf("failed to generate description: %w", err)
+	}
+
+	return strings.TrimSpace(resp.Content), nil
 }

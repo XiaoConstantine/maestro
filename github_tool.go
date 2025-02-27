@@ -658,7 +658,6 @@ func newFileFilterRules() *fileFilterRules {
 	extensions := []string{
 		".pb.go",   // Generated protobuf
 		".gen.go",  // Other generated files
-		".md",      // Documentation
 		".txt",     // Text files
 		".yaml",    // Config files
 		".yml",     // Config files

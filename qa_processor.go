@@ -7,7 +7,6 @@ import (
 
 	"github.com/XiaoConstantine/dspy-go/pkg/agents"
 	"github.com/XiaoConstantine/dspy-go/pkg/core"
-	"github.com/XiaoConstantine/dspy-go/pkg/logging"
 	"github.com/XiaoConstantine/dspy-go/pkg/modules"
 )
 
@@ -57,7 +56,7 @@ func (p *RepoQAProcessor) Process(ctx context.Context, task agents.Task, context
 		return nil, fmt.Errorf("failed to create embedding: %w", err)
 	}
 
-	similar, err := p.ragStore.FindSimilar(ctx, questionEmbedding.Vector, 5)
+	similar, err := p.ragStore.FindSimilar(ctx, questionEmbedding.Vector, 10, ContentTypeRepository)
 	if err != nil {
 		return nil, fmt.Errorf("failed to find similar content: %w", err)
 	}

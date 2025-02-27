@@ -45,6 +45,7 @@ type ReviewChunk struct {
 	changes         string // Relevant diff section for this chunk
 	filePath        string // Path of the parent file
 	totalChunks     int    // Total number of chunks for this file
+	description     string
 }
 
 // PRReviewTask represents a single file review task.

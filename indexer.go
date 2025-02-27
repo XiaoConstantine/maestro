@@ -378,11 +378,15 @@ func (ri *RepoIndexer) processChangedFile(ctx context.Context, file *github.Comm
 			"start_line":   fmt.Sprintf("%d", chunk.startline),
 			"end_line":     fmt.Sprintf("%d", chunk.endline),
 			"content_type": ContentTypeRepository,
+			"description":  chunk.description,
 		}
-
+		embeddingText := chunk.content
+		if description, exists := metadata["description"]; exists {
+			embeddingText = fmt.Sprintf("%s\n\n# Description:\n%s", chunk.content, description)
+		}
 		// Generate embedding for the chunk
 		llm := core.GetDefaultLLM()
-		embedding, err := llm.CreateEmbedding(ctx, chunk.content)
+		embedding, err := llm.CreateEmbedding(ctx, embeddingText)
 		if err != nil {
 			return fmt.Errorf("failed to create embedding: %w", err)
 		}
