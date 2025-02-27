@@ -193,7 +193,7 @@ func (ri *RepoIndexer) processFile(ctx context.Context, file *github.RepositoryC
 			return fmt.Errorf("failed to preprocess chunk for embedding: %w", err)
 		}
 		// Generate embedding for the chunk using the default LLM
-		llm := core.GetDefaultLLM()
+		llm := core.GetTeacherLLM()
 		embedding, err := llm.CreateEmbedding(ctx, embeddingContent)
 
 		if err != nil {
@@ -222,7 +222,7 @@ func (ri *RepoIndexer) processFile(ctx context.Context, file *github.RepositoryC
 // SearchSimilarCode finds similar code snippets in the indexed repository.
 func (ri *RepoIndexer) SearchSimilarCode(ctx context.Context, query string, limit int) ([]*Content, error) {
 	// Generate embedding for the query
-	llm := core.GetDefaultLLM()
+	llm := core.GetTeacherLLM()
 	queryEmbedding, err := llm.CreateEmbedding(ctx, query)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create query embedding: %w", err)
@@ -385,7 +385,7 @@ func (ri *RepoIndexer) processChangedFile(ctx context.Context, file *github.Comm
 			embeddingText = fmt.Sprintf("%s\n\n# Description:\n%s", chunk.content, description)
 		}
 		// Generate embedding for the chunk
-		llm := core.GetDefaultLLM()
+		llm := core.GetTeacherLLM()
 		embedding, err := llm.CreateEmbedding(ctx, embeddingText)
 		if err != nil {
 			return fmt.Errorf("failed to create embedding: %w", err)

@@ -223,16 +223,17 @@ func (s *sqliteRAGStore) PopulateGuidelines(ctx context.Context, language string
 	}
 
 	console.StartSpinner("Processing guidelines...")
+	chunkConfig, err := NewChunkConfig(WithStrategy(ChunkBySize))
 
 	s.log.Debug(ctx, "Fetched %d guidelines", len(guidelines))
+
+	totalChunks := 0
 	// Store guidelines in the same database
 	for i, guideline := range guidelines {
 
 		progress := float64(i+1) / float64(len(guidelines)) * 100
 		console.UpdateSpinnerText(fmt.Sprintf("Processing guidelines... %.1f%% (%d/%d)",
 			progress, i+1, len(guidelines)))
-		// Generate embedding for the guideline
-		llm := core.GetDefaultLLM()
 		rule, err := fetcher.ConvertGuidelineToRules(ctx, guideline)
 		if err != nil {
 			s.log.Error(ctx, "failed to convert guideline to rule")
@@ -243,29 +244,69 @@ func (s *sqliteRAGStore) PopulateGuidelines(ctx context.Context, language string
 		}
 
 		content := FormatRuleContent(rule[0])
-		embedding, err := llm.CreateEmbedding(ctx, content)
+		chunks, err := chunkfile(ctx, content, "", chunkConfig)
 		if err != nil {
-			console.StopSpinner()
-			return fmt.Errorf("failed to create embedding: %w", err)
+			s.log.Warn(ctx, "Failed to chunk guideline: %v, storing as single unit", err)
+			// Fall back to original approach if chunking fails
+			chunks = []ReviewChunk{{
+				content:     content,
+				startline:   1,
+				endline:     len(strings.Split(content, "\n")),
+				filePath:    fmt.Sprintf("guideline_%s.md", guideline.ID),
+				totalChunks: 1,
+			}}
 		}
-
-		// Store in the database with content_type = 'guideline'
-		err = s.StoreContent(ctx, &Content{
-			ID:        "guideline_" + guideline.ID,
-			Text:      content,
-			Embedding: embedding.Vector,
-			Metadata: map[string]string{
+		for j, chunk := range chunks {
+			chunkID := fmt.Sprintf("guideline_%s_chunk_%d", guideline.ID, j+1)
+			// Generate description for improved semantic understanding
+			// var description string
+			// if estimatetokens(chunk.content) <= 300 {
+			// 	description, err = generateChunkDescription(ctx, chunk.content)
+			// 	if err != nil {
+			// 		s.log.Warn(ctx, "Failed to generate description: %v", err)
+			// 	}
+			// }
+			metadata := map[string]string{
 				"content_type": ContentTypeGuideline,
 				"language":     language,
 				"category":     guideline.Category,
 				"dimension":    rule[0].Dimension,
 				"impact":       rule[0].Metadata.Impact,
-			},
-		})
-		if err != nil {
+				"guideline_id": guideline.ID,
+				"chunk_number": fmt.Sprintf("%d", j+1),
+				"total_chunks": fmt.Sprintf("%d", len(chunks)),
+				"start_line":   fmt.Sprintf("%d", chunk.startline),
+				"end_line":     fmt.Sprintf("%d", chunk.endline),
+				"rule_name":    rule[0].Name,
+			}
+			// if description != "" {
+			// 	metadata["description"] = description
+			// }
+			embeddingText := chunk.content
+			// if description != "" {
+			// 	embeddingText = fmt.Sprintf("%s\n\n# Description:\n%s", chunk.content, description)
+			// }
+			//
+			// Generate embedding using combined text
+			llm := core.GetTeacherLLM()
+			embedding, err := llm.CreateEmbedding(ctx, embeddingText)
+			if err != nil {
+				s.log.Warn(ctx, "Failed to create embedding: %v", err)
+				continue
+			}
+			// Store the chunk with enhanced embedding
+			err = s.StoreContent(ctx, &Content{
+				ID:        chunkID,
+				Text:      chunk.content,    // Original text
+				Embedding: embedding.Vector, // Enhanced embedding
+				Metadata:  metadata,         // Rich metadata
+			})
+			if err != nil {
+				s.log.Warn(ctx, "Failed to store guideline chunk: %v", err)
+				continue
+			}
 
-			console.StopSpinner()
-			return fmt.Errorf("failed to store guideline: %w", err)
+			totalChunks++
 		}
 	}
 	console.StopSpinner()
@@ -303,11 +344,11 @@ func (s *sqliteRAGStore) FindSimilar(ctx context.Context, embedding []float32, l
 	FROM vec_items v
 	JOIN contents c ON v.content_id = c.id
 	WHERE v.embedding MATCH(vec_quantize_int8(vec_slice(vec_f32(?), 0, 256), 'unit'), 100)
-	AND v.distance < 20`
+	AND v.distance < 80`
 
 	// Add content type filter if specified
 	var whereClauses []string
-	args := []interface{}{blob, blob} // Maintain parameter order
+	args := []interface{}{blob, limit} // Maintain parameter order
 
 	if len(contentTypes) > 0 {
 		placeholders := make([]string, len(contentTypes))

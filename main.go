@@ -417,10 +417,14 @@ func runCLI(cfg *config) error {
 
 	modelID := constructModelID(cfg)
 	err = core.ConfigureDefaultLLM(cfg.apiKey, modelID)
+
 	if err != nil {
 		logger.Error(ctx, "Failed to configure LLM: %v", err)
 	}
-
+	// Use local model for embedding
+	if err := core.ConfigureTeacherLLM(cfg.apiKey, "ollama:jina/jina-embeddings-v2-small-en:latest"); err != nil {
+		return fmt.Errorf("failed to configure embedding LLM: %w", err)
+	}
 	githubTools := NewGitHubTools(cfg.githubToken, cfg.owner, cfg.repo)
 
 	dbPath, err := CreateStoragePath(ctx, cfg.owner, cfg.repo)
@@ -720,6 +724,10 @@ Examples:
 
 	if err := core.ConfigureDefaultLLM(cfg.apiKey, modelID); err != nil {
 		return fmt.Errorf("failed to configure LLM: %w", err)
+	}
+	// Use local model for embedding
+	if err := core.ConfigureTeacherLLM(cfg.apiKey, "ollama:jina/jina-embeddings-v2-small-en:latest"); err != nil {
+		return fmt.Errorf("failed to configure embedding LLM: %w", err)
 	}
 
 	console.Println("Type /help to see available commands, or ask a question directly.")
