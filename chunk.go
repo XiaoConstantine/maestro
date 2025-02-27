@@ -512,7 +512,6 @@ func chunkBySize(content string, config *ChunkConfig) ([]ReviewChunk, error) {
 		currentLines = append(currentLines, line)
 		currentTokens += lineTokens
 		currentBytes += lineBytes
-		currentTokens += lineTokens
 	}
 
 	// Handle the final chunk if there's remaining content
@@ -576,8 +575,12 @@ func addContextAndOverlap(chunks []ReviewChunk, fullContent string, config *Chun
 		// Add overlap with previous chunk if needed
 		if i > 0 && config.OverlapLines > 0 {
 			overlapStart := max(chunks[i-1].endline-config.OverlapLines, chunks[i-1].startline)
-			overlapEnd := chunks[i-1].endline
-			overlap := strings.Join(lines[overlapStart-1:overlapEnd], "\n")
+			var overlap string
+			if overlapStart > 1 {
+				overlap = strings.Join(lines[overlapStart-1:chunks[i-1].endline], "\n")
+			} else {
+				overlap = strings.Join(lines[0:chunks[i-1].endline], "\n")
+			}
 			chunks[i].content = overlap + "\n" + chunks[i].content
 			chunks[i].startline = overlapStart
 		}
@@ -595,19 +598,12 @@ func createCompleteChunk(
 	estimatedTotalChunks int,
 	changes string,
 ) ReviewChunk {
-	// Calculate context boundaries
-	contextStart := max(0, startLine-config.ContextLines)
-	contextEnd := min(strings.Count(fullContent, "\n")+1, endLine+config.ContextLines)
-
-	// Split full content into lines for context extraction
-	lines := strings.Split(fullContent, "\n")
-
 	chunk := ReviewChunk{
 		content:         content,
 		startline:       startLine,
 		endline:         endLine,
-		leadingcontext:  strings.Join(lines[contextStart:startLine-1], "\n"),
-		trailingcontext: strings.Join(lines[endLine:contextEnd], "\n"),
+		leadingcontext:  "", // Context will be added in addContextAndOverlap
+		trailingcontext: "", // Context will be added in addContextAndOverlap
 		changes:         ExtractRelevantChanges(changes, startLine, endLine),
 		filePath:        filePath,
 		totalChunks:     estimatedTotalChunks,
