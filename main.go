@@ -535,19 +535,28 @@ func runCLI(cfg *config) error {
 
 func runInteractiveMode(cfg *config) error {
 	printMaestroBanner()
-
 	ctx := core.WithExecutionState(context.Background())
 	output := logging.NewConsoleOutput(true, logging.WithColor(true))
 	logLevel := logging.INFO
+	verbosePrompt := &survey.Confirm{
+		Message: "Enable verbose logging?",
+		Default: false,
+	}
+	if err := survey.AskOne(verbosePrompt, &cfg.verbose); err != nil {
+		return fmt.Errorf("failed to get verbose preference: %w", err)
+	}
+	if cfg.verbose {
+		logLevel = logging.DEBUG
+	}
 	logger := logging.NewLogger(logging.Config{
 		Severity: logLevel,
 		Outputs:  []logging.Output{output},
 	})
 	logging.SetLogger(logger)
-
 	console := NewConsole(os.Stdout, logger, nil)
 	ShowHelpMessage(console)
 	llms.EnsureFactory()
+
 	if cfg.owner == "" {
 		ownerPrompt := &survey.Input{
 			Message: "Enter repository owner:",
@@ -713,14 +722,6 @@ Examples:
 		return fmt.Errorf("failed to configure LLM: %w", err)
 	}
 
-	verbosePrompt := &survey.Confirm{
-		Message: "Enable verbose logging?",
-		Default: false,
-	}
-	if err := survey.AskOne(verbosePrompt, &cfg.verbose); err != nil {
-		return fmt.Errorf("failed to get verbose preference: %w", err)
-	}
-
 	console.Println("Type /help to see available commands, or ask a question directly.")
 	showConversationBox(console)
 
@@ -788,6 +789,7 @@ func initializeAndAskQuestions(ctx context.Context, cfg *config, console Console
 		IndexWorkers:  cfg.indexWorkers,
 		ReviewWorkers: cfg.reviewWorkers,
 	})
+	logging.GetLogger().Info(ctx, "agent: %v", agent)
 	if err != nil {
 		return fmt.Errorf("Failed to initiliaze agent due to : %v", err)
 	}

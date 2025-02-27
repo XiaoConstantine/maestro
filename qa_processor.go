@@ -29,8 +29,6 @@ func NewRepoQAProcessor(store RAGStore) *RepoQAProcessor {
 
 // Process implements the TaskProcessor interface.
 func (p *RepoQAProcessor) Process(ctx context.Context, task agents.Task, context map[string]interface{}) (interface{}, error) {
-	logger := logging.GetLogger()
-
 	signature := core.NewSignature(
 		[]core.InputField{
 			{Field: core.Field{Name: "question"}},
@@ -46,15 +44,15 @@ func (p *RepoQAProcessor) Process(ctx context.Context, task agents.Task, context
     Reference specific files and line numbers when available.`)
 
 	metadata, err := extractQAMetadata(task.Metadata)
+
 	if err != nil {
 		return nil, fmt.Errorf("task %s: %w", task.ID, err)
 	}
 
-	logger.Debug(ctx, "Processing question: %s", metadata.Question)
-
 	// Create embedding and find similar content
 	llm := core.GetDefaultLLM()
 	questionEmbedding, err := llm.CreateEmbedding(ctx, metadata.Question)
+
 	if err != nil {
 		return nil, fmt.Errorf("failed to create embedding: %w", err)
 	}

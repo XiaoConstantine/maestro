@@ -348,7 +348,7 @@ func NewPRReviewAgent(ctx context.Context, githubTool GitHubInterface, dbPath st
 		PlanCreator:    &agents.DependencyPlanCreator{},
 		AnalyzerConfig: analyzerConfig,
 		RetryConfig: &agents.RetryConfig{
-			MaxAttempts:       2,
+			MaxAttempts:       5,
 			BackoffMultiplier: 2.0,
 		},
 		CustomProcessors: map[string]agents.TaskProcessor{
