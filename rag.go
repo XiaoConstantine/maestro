@@ -346,8 +346,7 @@ func (s *sqliteRAGStore) FindSimilar(ctx context.Context, embedding []float32, l
 	SELECT c.id, c.text, c.metadata, v.distance
 	FROM vec_items v
 	JOIN contents c ON v.content_id = c.id
-	WHERE v.embedding MATCH(vec_quantize_int8(vec_slice(vec_f32(?), 0, 256), 'unit'), 100)
-	AND v.distance < 80`
+	WHERE v.embedding MATCH(vec_quantize_int8(vec_slice(vec_f32(?), 0, 256), 'unit'), 100)`
 
 	// Add content type filter if specified
 	var whereClauses []string
