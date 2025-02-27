@@ -224,6 +224,9 @@ func (s *sqliteRAGStore) PopulateGuidelines(ctx context.Context, language string
 
 	console.StartSpinner("Processing guidelines...")
 	chunkConfig, err := NewChunkConfig(WithStrategy(ChunkBySize))
+	if err != nil {
+		return fmt.Errorf("failed to create chunking strategy: %w", err)
+	}
 
 	s.log.Debug(ctx, "Fetched %d guidelines", len(guidelines))
 
