@@ -206,6 +206,103 @@ You can also set this via environment variables:
 	return nil
 }
 
+// Create an interactive command system using Cobra.
+func createInteractiveCommands(cfg *config, console ConsoleInterface) *cobra.Command {
+	ctx := context.Background()
+
+	// Create a root command for interactive mode
+	rootCmd := &cobra.Command{
+		Use:   "maestro",
+		Short: "Maestro interactive shell",
+		Run: func(cmd *cobra.Command, args []string) {
+			// Default behavior when no subcommand is specified
+			if len(args) > 0 {
+				// Treat as a question if not a command
+				question := strings.Join(args, " ")
+				if err := initializeAndAskQuestions(ctx, cfg, console, question); err != nil {
+					console.Printf("Error: %v\n", err)
+				}
+			}
+		},
+	}
+
+	// Help command
+	helpCmd := &cobra.Command{
+		Use:   "help",
+		Short: "Show available commands",
+		Run: func(cmd *cobra.Command, args []string) {
+			showHelpMessage(console)
+		},
+	}
+	rootCmd.AddCommand(helpCmd)
+
+	// Exit command
+	exitCmd := &cobra.Command{
+		Use:   "exit",
+		Short: "Exit the application",
+		Run: func(cmd *cobra.Command, args []string) {
+			os.Exit(0)
+		},
+	}
+	rootCmd.AddCommand(exitCmd)
+
+	// Quit command (alias for exit)
+	quitCmd := &cobra.Command{
+		Use:   "quit",
+		Short: "Exit the application",
+		Run: func(cmd *cobra.Command, args []string) {
+			os.Exit(0)
+		},
+	}
+	rootCmd.AddCommand(quitCmd)
+
+	// Compact command
+	compactCmd := &cobra.Command{
+		Use:   "compact",
+		Short: "Compact the conversation history",
+		Run: func(cmd *cobra.Command, args []string) {
+			console.Println("Conversation history compacted.")
+		},
+	}
+	rootCmd.AddCommand(compactCmd)
+
+	// Review command
+	reviewCmd := &cobra.Command{
+		Use:   "review [PR-NUMBER]",
+		Short: "Review a specific pull request",
+		Args:  cobra.ExactArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			prNumber, err := strconv.Atoi(args[0])
+			if err != nil {
+				console.Println("Invalid PR number. Please use a number.")
+				return
+			}
+
+			cfg.prNumber = prNumber
+			if err := runCLIWithoutBanner(cfg); err != nil {
+				console.Printf("Error: %v\n", err)
+			}
+		},
+	}
+	rootCmd.AddCommand(reviewCmd)
+
+	// Ask command
+	askCmd := &cobra.Command{
+		Use:   "ask [QUESTION]",
+		Short: "Ask a specific question about the repository",
+		Args:  cobra.MinimumNArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			question := strings.Join(args, " ")
+			if err := initializeAndAskQuestions(ctx, cfg, console, question); err != nil {
+				console.Printf("Error: %v\n", err)
+			}
+		},
+	}
+	rootCmd.AddCommand(askCmd)
+
+	return rootCmd
+}
+
 func printMaestroBanner() {
 	// Get a colored output that works with your terminal
 	au := aurora.NewAurora(true)
@@ -270,7 +367,7 @@ func printMaestroBanner() {
 	}
 }
 
-func showConversationBox(c ConsoleInterface) {
+func showConversationBox(c ConsoleInterface, showCommands bool) {
 	width, _, err := term.GetSize(0)
 	if err != nil {
 		width = 80 // Default if we can't get terminal width
@@ -287,13 +384,53 @@ func showConversationBox(c ConsoleInterface) {
 	// Display the box
 	if c.Color() {
 		c.Println(aurora.Cyan(topBorder).String())
-		c.Println(aurora.Cyan(sideBorder).String() +
-			strings.Repeat(" ", boxWidth) +
-			aurora.Cyan(sideBorder).String())
+
+		// If requested, show command hints in the input box
+		if showCommands {
+			hint := "Type /help, /review <PR>, /ask <question>, or just ask directly"
+			padding := (boxWidth - len(hint)) / 2
+			if padding < 0 {
+				padding = 0
+				hint = hint[:boxWidth-3] + "..."
+			}
+			paddedHint := strings.Repeat(" ", padding) + hint
+			rightPadding := boxWidth - len(paddedHint)
+			if rightPadding > 0 {
+				paddedHint += strings.Repeat(" ", rightPadding)
+			}
+
+			c.Println(aurora.Cyan(sideBorder).String() +
+				aurora.Blue(paddedHint).String() +
+				aurora.Cyan(sideBorder).String())
+		} else {
+			c.Println(aurora.Cyan(sideBorder).String() +
+				strings.Repeat(" ", boxWidth) +
+				aurora.Cyan(sideBorder).String())
+		}
+
 		c.Println(aurora.Cyan(bottomBorder).String())
 	} else {
 		c.Println(topBorder)
-		c.Println(sideBorder + strings.Repeat(" ", boxWidth) + sideBorder)
+
+		// If requested, show command hints in the input box
+		if showCommands {
+			hint := "Type /help, /review <PR>, /ask <question>, or just ask directly"
+			padding := (boxWidth - len(hint)) / 2
+			if padding < 0 {
+				padding = 0
+				hint = hint[:boxWidth-3] + "..."
+			}
+			paddedHint := strings.Repeat(" ", padding) + hint
+			rightPadding := boxWidth - len(paddedHint)
+			if rightPadding > 0 {
+				paddedHint += strings.Repeat(" ", rightPadding)
+			}
+
+			c.Println(sideBorder + paddedHint + sideBorder)
+		} else {
+			c.Println(sideBorder + strings.Repeat(" ", boxWidth) + sideBorder)
+		}
+
 		c.Println(bottomBorder)
 	}
 
@@ -383,6 +520,11 @@ Available slash commands in conversation mode:
 
 func runCLI(cfg *config) error {
 	printMaestroBanner()
+	return runCLIWithoutBanner(cfg)
+}
+
+// runCLIWithoutBanner contains the core CLI logic without printing the banner.
+func runCLIWithoutBanner(cfg *config) error {
 	ctx := core.WithExecutionState(context.Background())
 	output := logging.NewConsoleOutput(true, logging.WithColor(true))
 	logLevel := logging.INFO
@@ -422,7 +564,7 @@ func runCLI(cfg *config) error {
 		logger.Error(ctx, "Failed to configure LLM: %v", err)
 	}
 	// Use local model for embedding
-	if err := core.ConfigureTeacherLLM(cfg.apiKey, "ollama:jina/jina-embeddings-v2-small-en:latest"); err != nil {
+	if err := core.ConfigureTeacherLLM(cfg.apiKey, "llamacpp:"); err != nil {
 		return fmt.Errorf("failed to configure embedding LLM: %w", err)
 	}
 	githubTools := NewGitHubTools(cfg.githubToken, cfg.owner, cfg.repo)
@@ -558,7 +700,7 @@ func runInteractiveMode(cfg *config) error {
 	})
 	logging.SetLogger(logger)
 	console := NewConsole(os.Stdout, logger, nil)
-	ShowHelpMessage(console)
+	showHelpMessage(console)
 	llms.EnsureFactory()
 
 	if cfg.owner == "" {
@@ -634,7 +776,6 @@ func runInteractiveMode(cfg *config) error {
 			var options []string
 			var sections = map[string]bool{} // Track where we need section headers
 			currentProvider := ""
-
 			for _, choice := range choices {
 				// Add section header if we're switching providers
 				if choice.Provider != currentProvider {
@@ -726,60 +867,69 @@ Examples:
 		return fmt.Errorf("failed to configure LLM: %w", err)
 	}
 	// Use local model for embedding
-	if err := core.ConfigureTeacherLLM(cfg.apiKey, "ollama:jina/jina-embeddings-v2-small-en:latest"); err != nil {
+	if err := core.ConfigureTeacherLLM(cfg.apiKey, "llamacpp:"); err != nil {
 		return fmt.Errorf("failed to configure embedding LLM: %w", err)
 	}
 
 	console.Println("Type /help to see available commands, or ask a question directly.")
-	showConversationBox(console)
 
-	// Prompt for action
-	actionPrompt := &survey.Select{
-		Message: "What would you like to do?",
-		Options: []string{
-			"Review a Pull Request",
-			"Ask questions about the repository",
-			"Exit",
-		},
-	}
+	// Create interactive commands
+	interactiveCmd := createInteractiveCommands(cfg, console)
 
+	// Interactive command loop
 	for {
-		var action string
-		if err := survey.AskOne(actionPrompt, &action); err != nil {
-			return fmt.Errorf("failed to get action: %w", err)
+		showConversationBox(console, true)
+
+		var input string
+		inputPrompt := &survey.Input{
+			Message: "maestro>",
 		}
 
-		switch action {
-		case "Review a Pull Request":
-			var prNumber string
-			prPrompt := &survey.Input{
-				Message: "Enter PR number:",
-			}
-			if err := survey.AskOne(prPrompt, &prNumber); err != nil {
-				return fmt.Errorf("failed to get PR number: %w", err)
-			}
-			var err error
-			cfg.prNumber, err = strconv.Atoi(prNumber)
-			if err != nil {
-				return fmt.Errorf("invalid PR number: %w", err)
-			}
-			if err := runCLI(cfg); err != nil {
-				fmt.Printf("Error reviewing PR: %v\n", err)
-			}
-
-		case "Ask questions about the repository":
-			// Initialize necessary components for repository Q&A
-			if err := initializeAndAskQuestions(ctx, cfg, console); err != nil {
-				fmt.Printf("Error during Q&A session: %v\n", err)
-			}
-
-		case "Exit":
+		if err := survey.AskOne(inputPrompt, &input); err != nil {
+			return fmt.Errorf("failed to get input: %w", err)
+		}
+		if input == "/" {
+			console.Println("Available commands:")
+			console.Println("  /help - Show this help message")
+			console.Println("  /exit, /quit - Exit the application")
+			console.Println("  /compact - Compact the conversation history")
+			console.Println("  /review <PR-NUMBER> - Review a specific pull request")
+			console.Println("  /ask <QUESTION> - Ask a specific question about the repository")
+			continue
+		}
+		// Exit condition
+		if input == "exit" || input == "quit" || input == "/exit" || input == "/quit" {
 			return nil
+		}
+
+		// Handle command syntax
+		if strings.HasPrefix(input, "/") {
+			// Remove the leading slash for Cobra
+			args := strings.TrimPrefix(input, "/")
+			// Split into arguments
+			argList := strings.Fields(args)
+
+			// Set os.Args temporarily and execute the command
+			oldArgs := os.Args
+			os.Args = append([]string{"maestro"}, argList...)
+			interactiveCmd.SetArgs(argList)
+			err := interactiveCmd.Execute()
+			os.Args = oldArgs
+
+			if err != nil {
+				console.Printf("Error: %v\n", err)
+			}
+		} else if input != "" {
+			// Treat as a question if not empty
+			if err := initializeAndAskQuestions(ctx, cfg, console, input); err != nil {
+				console.Printf("Error: %v\n", err)
+			}
 		}
 	}
 }
 
-func initializeAndAskQuestions(ctx context.Context, cfg *config, console ConsoleInterface) error {
+// Modify initializeAndAskQuestions to accept a direct question.
+func initializeAndAskQuestions(ctx context.Context, cfg *config, console ConsoleInterface, initialQuestion string) error {
 	if cfg.githubToken == "" {
 		return fmt.Errorf("GitHub token is required")
 	}
@@ -803,6 +953,45 @@ func initializeAndAskQuestions(ctx context.Context, cfg *config, console Console
 	}
 
 	qaProcessor, _ := agent.Orchestrator(ctx).GetProcessor("repo_qa")
+
+	// If an initial question was provided, process it first
+	if initialQuestion != "" {
+		result, err := qaProcessor.Process(ctx, agents.Task{
+			ID: "qa",
+			Metadata: map[string]interface{}{
+				"question": initialQuestion,
+			},
+		}, nil)
+
+		if err != nil {
+			console.Printf("Error processing question: %v\n", err)
+		} else if response, ok := result.(*QAResponse); ok {
+			// Print a separator line for visual clarity
+			console.Println("\n" + strings.Repeat("─", 80))
+
+			// Format and print the main answer using structured sections
+			formattedAnswer := formatStructuredAnswer(response.Answer)
+			console.Println(formattedAnswer)
+
+			// Print source files in a tree-like structure if available
+			if len(response.SourceFiles) > 0 {
+				if console.Color() {
+					console.Println("\n" + aurora.Blue("Source Files:").String())
+				} else {
+					console.Println("\nSource Files:")
+				}
+
+				// Group files by directory for better organization
+				filesByDir := groupFilesByDirectory(response.SourceFiles)
+				printFileTree(console, filesByDir)
+			}
+
+			// Print final separator
+			console.Println("\n" + strings.Repeat("─", 80) + "\n")
+		}
+		return nil
+	}
+
 	// Interactive question loop
 	for {
 		var question string
@@ -856,7 +1045,7 @@ func initializeAndAskQuestions(ctx context.Context, cfg *config, console Console
 	}
 }
 
-func ShowHelpMessage(c ConsoleInterface) {
+func showHelpMessage(c ConsoleInterface) {
 	c.PrintHeader("Available Commands")
 
 	commands := []struct {

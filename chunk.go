@@ -69,7 +69,7 @@ func NewChunkConfig(options ...ChunkConfigOption) (*ChunkConfig, error) {
 	// Start with sensible defaults
 	config := &ChunkConfig{
 		Strategy:             ChunkByFunction,
-		MaxTokens:            1500,
+		MaxTokens:            4000,
 		MaxBytes:             nil,
 		ContextLines:         5,
 		OverlapLines:         2,
@@ -138,8 +138,8 @@ func WithGenerateDescriptions(generate bool) ChunkConfigOption {
 
 // Validation method to ensure configuration is valid.
 func (c *ChunkConfig) validate() error {
-	if c.MaxTokens < 100 || c.MaxTokens > 4000 {
-		return fmt.Errorf("MaxTokens must be between 100 and 4000")
+	if c.MaxTokens < 100 || c.MaxTokens > 1000000 {
+		return fmt.Errorf("MaxTokens must be between 100 and 1000000")
 	}
 	if c.ContextLines < 0 || c.ContextLines > 50 {
 		return fmt.Errorf("ContextLines must be between 0 and 50")

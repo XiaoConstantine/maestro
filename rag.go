@@ -249,7 +249,7 @@ func (s *sqliteRAGStore) PopulateGuidelines(ctx context.Context, language string
 		content := FormatRuleContent(rule[0])
 		chunks, err := chunkfile(ctx, content, "", chunkConfig)
 		if err != nil {
-			s.log.Warn(ctx, "Failed to chunk guideline: %v, storing as single unit", err)
+			s.log.Debug(ctx, "Failed to chunk guideline: %v, storing as single unit", err)
 			// Fall back to original approach if chunking fails
 			chunks = []ReviewChunk{{
 				content:     content,
@@ -261,14 +261,6 @@ func (s *sqliteRAGStore) PopulateGuidelines(ctx context.Context, language string
 		}
 		for j, chunk := range chunks {
 			chunkID := fmt.Sprintf("guideline_%s_chunk_%d", guideline.ID, j+1)
-			// Generate description for improved semantic understanding
-			// var description string
-			// if estimatetokens(chunk.content) <= 300 {
-			// 	description, err = generateChunkDescription(ctx, chunk.content)
-			// 	if err != nil {
-			// 		s.log.Warn(ctx, "Failed to generate description: %v", err)
-			// 	}
-			// }
 			metadata := map[string]string{
 				"content_type": ContentTypeGuideline,
 				"language":     language,
@@ -282,14 +274,7 @@ func (s *sqliteRAGStore) PopulateGuidelines(ctx context.Context, language string
 				"end_line":     fmt.Sprintf("%d", chunk.endline),
 				"rule_name":    rule[0].Name,
 			}
-			// if description != "" {
-			// 	metadata["description"] = description
-			// }
 			embeddingText := chunk.content
-			// if description != "" {
-			// 	embeddingText = fmt.Sprintf("%s\n\n# Description:\n%s", chunk.content, description)
-			// }
-			//
 			// Generate embedding using combined text
 			llm := core.GetTeacherLLM()
 			embedding, err := llm.CreateEmbedding(ctx, embeddingText)
