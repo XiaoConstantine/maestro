@@ -1,0 +1,585 @@
+package main
+
+import (
+	"bytes"
+	"context"
+	"fmt"
+	"io"
+	"net/http"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/XiaoConstantine/dspy-go/pkg/agents"
+	"github.com/XiaoConstantine/dspy-go/pkg/core"
+	"github.com/XiaoConstantine/dspy-go/pkg/logging"
+	"github.com/briandowns/spinner"
+	"github.com/google/go-github/v68/github"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/mock"
+)
+
+// MockLLM is a mock implementation of core.LLM.
+type MockLLM struct {
+	mock.Mock
+}
+
+func NewMockLLM() *MockLLM {
+	m := &MockLLM{}
+	// No need for Test(t) here; setting expectations will initialize the mock
+	// Define default behavior for CreateEmbedding
+	m.On("CreateEmbedding", mock.Anything, mock.Anything, mock.Anything).Return(
+		&core.EmbeddingResult{
+			Vector:     []float32{0.1, 0.2, 0.3},
+			TokenCount: 14, // Default for "func main() {}" length
+			Metadata:   map[string]interface{}{"fallback": true},
+		}, nil,
+	)
+	m.On("Generate", mock.Anything, mock.MatchedBy(func(prompt string) bool {
+		return strings.Contains(prompt, "produce the fields 'analysis, tasks'")
+	}), mock.Anything).Return(&core.LLMResponse{
+		Content: `analysis:
+Reviewing a simple main function in test.go for code quality and best practices.
+
+tasks:
+<tasks>
+    <task id="1" type="review_chain" processor="review_chain" priority="1">
+        <description>Review test.go for code quality</description>
+        <metadata>
+            <item key="file_path">test.go</item>
+            <item key="category">code-style</item>
+            <item key="file_content">func main() {}</item>
+	    <item key="changes">{changes}</item>
+		       <item key="line_range">0-100</item>
+		       <item key="chunk_start">0</item>
+		       <item key="chunk_end">0</item>
+                       <item key="chunk_number">1</item>
+                       <item key="total_chunks">1</item>
+            <item key="category">code-style</item>
+        </metadata>
+    </task>
+</tasks>`}, nil)
+	// Rule Checking step
+	m.On("Generate", mock.Anything, mock.MatchedBy(func(prompt string) bool {
+		return strings.Contains(prompt, "produce the fields 'potential_issues'") &&
+			!strings.Contains(prompt, "context_valid")
+	}), mock.Anything).Return(&core.LLMResponse{
+		Content: `potential_issues:
+<potential_issues>
+    <issue>
+        <file_path>test.go</file_path>
+        <line_number>1</line_number>
+        <rule_id>DOC_001</rule_id>
+        <confidence>0.9</confidence>
+        <content>Empty main function without documentation</content>
+        <context>
+            <before></before>
+            <after></after>
+        </context>
+        <suggestion>Add function documentation explaining the purpose of main</suggestion>
+        <category>documentation</category>
+        <metadata></metadata>
+    </issue>
+</potential_issues>`}, nil)
+
+	// Context Validation step
+	m.On("Generate", mock.Anything, mock.MatchedBy(func(prompt string) bool {
+		return strings.Contains(prompt, "context_valid") &&
+			strings.Contains(prompt, "confidence") &&
+			strings.Contains(prompt, "enhanced_context")
+	}), mock.Anything).Return(&core.LLMResponse{
+		Content: `potential_issues:
+<potential_issues>
+    <issue>
+        <file_path>test.go</file_path>
+        <line_number>1</line_number>
+        <rule_id>DOC_001</rule_id>
+        <confidence>0.9</confidence>
+        <content>Empty main function without documentation</content>
+        <context>
+            <before></before>
+            <after></after>
+        </context>
+        <suggestion>Add function documentation explaining the purpose of main</suggestion>
+        <category>documentation</category>
+        <metadata></metadata>
+    </issue>
+</potential_issues>
+context_valid: true
+confidence: 0.95
+enhanced_context: The main function is the entry point of the program but lacks any documentation explaining its purpose or behavior.`}, nil)
+
+	// Rule Compliance step
+	// m.On("Generate", mock.Anything, mock.MatchedBy(func(prompt string) bool {
+	// 	logging.GetLogger().Info(context.Background(), "=================Rule Compliance Prompt: %s", prompt)
+	// 	return strings.Contains(prompt, "rule_compliant") ||
+	// 		strings.Contains(prompt, "rule_compliance") ||
+	// 		strings.Contains(prompt, "refined_suggestion")
+	// }), mock.Anything).Return(&core.LLMResponse{
+
+	m.On("Generate", mock.Anything, mock.Anything, mock.Anything).Return(&core.LLMResponse{
+		Content: `potential_issues:
+<potential_issues>
+    <issue>
+        <file_path>test.go</file_path>
+        <line_number>1</line_number>
+        <rule_id>DOC_001</rule_id>
+        <confidence>0.9</confidence>
+        <content>Empty main function without documentation</content>
+        <context>
+            <before></before>
+            <after></after>
+        </context>
+        <suggestion>Add function documentation explaining the purpose of main</suggestion>
+        <category>documentation</category>
+        <metadata></metadata>
+    </issue>
+</potential_issues>
+rule_compliant: true
+refined_suggestion: Add a comprehensive comment block above main() that explains the program's entry point and describes its overall purpose and functionality`}, nil)
+	// Practical Impact step
+	m.On("Generate", mock.Anything, mock.MatchedBy(func(prompt string) bool {
+		return strings.Contains(prompt, "is_actionable") ||
+			strings.Contains(prompt, "final_suggestion") ||
+			strings.Contains(prompt, "severity")
+	}), mock.Anything).Return(&core.LLMResponse{
+		Content: `
+is_actionable: true
+final_suggestion: Add a docstring above main() describing the program's purpose and entry point behavior
+severity: suggestion`}, nil)
+	m.On("GenerateWithJSON", mock.Anything, mock.Anything, mock.Anything).Return(map[string]interface{}{"response": "mock"}, nil)
+	m.On("CreateEmbeddings", mock.Anything, mock.Anything, mock.Anything).Return(&core.BatchEmbeddingResult{
+		Embeddings: []core.EmbeddingResult{{Vector: []float32{0.1, 0.2, 0.3}, TokenCount: 14}},
+	}, nil)
+	m.On("ModelID").Return("mock-model")
+	m.On("ProviderName").Return("mock-provider")
+	m.On("Capabilities").Return([]core.Capability{})
+	return m
+}
+
+func (m *MockLLM) Generate(ctx context.Context, prompt string, opts ...core.GenerateOption) (*core.LLMResponse, error) {
+	args := m.Called(ctx, prompt, opts)
+	// Handle both string and struct returns
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	if response, ok := args.Get(0).(*core.LLMResponse); ok {
+		return response, args.Error(1)
+	}
+	// Fall back to string conversion for simple cases
+	return &core.LLMResponse{Content: args.String(0)}, args.Error(1)
+}
+
+func (m *MockLLM) GenerateWithJSON(ctx context.Context, prompt string, opts ...core.GenerateOption) (map[string]interface{}, error) {
+	args := m.Called(ctx, prompt, opts)
+	result := args.Get(0)
+	if result == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).(map[string]interface{}), args.Error(1)
+}
+
+// CreateEmbedding mocks the single embedding creation following the same pattern as Generate.
+func (m *MockLLM) CreateEmbedding(ctx context.Context, input string, options ...core.EmbeddingOption) (*core.EmbeddingResult, error) {
+	// Record the method call and get the mock results
+	args := m.Called(ctx, input, options)
+
+	// Handle nil case first - if first argument is nil, return error
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+
+	// Check if we got a properly structured EmbeddingResult
+	if result, ok := args.Get(0).(*core.EmbeddingResult); ok {
+		return result, args.Error(1)
+	}
+
+	// Fallback case: create a simple embedding result with basic values
+	// This is similar to how Generate falls back to string conversion
+	return &core.EmbeddingResult{
+		Vector:     []float32{0.1, 0.2, 0.3}, // Default vector
+		TokenCount: len(input),
+		Metadata: map[string]interface{}{
+			"fallback": true,
+		},
+	}, args.Error(1)
+}
+
+// CreateEmbeddings mocks the batch embedding creation.
+func (m *MockLLM) CreateEmbeddings(ctx context.Context, inputs []string, options ...core.EmbeddingOption) (*core.BatchEmbeddingResult, error) {
+	// Record the method call and get the mock results
+	args := m.Called(ctx, inputs, options)
+
+	// Handle nil case
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+
+	// Check if we got a properly structured BatchEmbeddingResult
+	if result, ok := args.Get(0).(*core.BatchEmbeddingResult); ok {
+		return result, args.Error(1)
+	}
+
+	// Similar to the single embedding case, provide a fallback
+	embeddings := make([]core.EmbeddingResult, len(inputs))
+	for i := range inputs {
+		embeddings[i] = core.EmbeddingResult{
+			Vector:     []float32{0.1, 0.2, 0.3},
+			TokenCount: len(inputs[i]),
+			Metadata: map[string]interface{}{
+				"fallback": true,
+				"index":    i,
+			},
+		}
+	}
+
+	return &core.BatchEmbeddingResult{
+		Embeddings: embeddings,
+		Error:      nil,
+		ErrorIndex: -1,
+	}, args.Error(1)
+}
+
+// ModelID mocks the GetModelID method from the LLM interface.
+func (m *MockLLM) ModelID() string {
+	args := m.Called()
+
+	ret0, _ := args.Get(0).(string)
+
+	return ret0
+}
+
+// GetProviderName mocks the GetProviderName method from the LLM interface.
+func (m *MockLLM) ProviderName() string {
+	args := m.Called()
+
+	ret0, _ := args.Get(0).(string)
+
+	return ret0
+}
+
+func (m *MockLLM) Capabilities() []core.Capability {
+	return []core.Capability{}
+}
+
+// MockRAGStore implements the RAGStore interface.
+type MockRAGStore struct{}
+
+func (m *MockRAGStore) StoreContent(ctx context.Context, content *Content) error {
+	return nil
+}
+
+func (m *MockRAGStore) FindSimilar(ctx context.Context, embedding []float32, limit int, contentTypes ...string) ([]*Content, error) {
+	return []*Content{
+		{ID: "mock-content", Text: "mock text", Embedding: embedding, Metadata: map[string]string{"file_path": "test.go"}},
+	}, nil
+}
+
+func (m *MockRAGStore) UpdateContent(ctx context.Context, content *Content) error {
+	return nil
+}
+
+func (m *MockRAGStore) DeleteContent(ctx context.Context, id string) error {
+	return nil
+}
+
+func (m *MockRAGStore) PopulateGuidelines(ctx context.Context, language string) error {
+	return nil
+}
+
+func (m *MockRAGStore) StoreRule(ctx context.Context, rule ReviewRule) error {
+	return nil
+}
+
+func (m *MockRAGStore) GetMetadata(ctx context.Context, key string) (string, error) {
+	return "mock-sha", nil
+}
+
+func (m *MockRAGStore) SetMetadata(ctx context.Context, key, value string) error {
+	return nil
+}
+
+func (m *MockRAGStore) Close() error {
+	return nil
+}
+
+type MockGitHubTools struct {
+	pullRequests *MockPullRequestsService
+}
+
+func NewMockGitHubTools() *MockGitHubTools {
+	return &MockGitHubTools{
+		pullRequests: &MockPullRequestsService{},
+	}
+}
+
+func (m *MockGitHubTools) GetPullRequestChanges(ctx context.Context, prNumber int) (*PRChanges, error) {
+	return &PRChanges{
+		Files: []PRFileChange{
+			{FilePath: "test.go", FileContent: "func main() {}", Patch: "+func main() {}"},
+		},
+	}, nil
+}
+
+func (m *MockGitHubTools) GetFileContent(ctx context.Context, path string) (string, error) {
+	return "func main() {}", nil
+}
+
+func (m *MockGitHubTools) CreateReviewComments(ctx context.Context, prNumber int, comments []PRReviewComment) error {
+	return nil
+}
+
+func (m *MockGitHubTools) GetLatestCommitSHA(ctx context.Context, branch string) (string, error) {
+	return "abc123", nil
+}
+
+func (m *MockGitHubTools) MonitorPRComments(ctx context.Context, prNumber int, callback func(*github.PullRequestComment)) error {
+	return nil
+}
+
+func (m *MockGitHubTools) PreviewReview(ctx context.Context, console ConsoleInterface, prNumber int, comments []PRReviewComment, metric MetricsCollector) (bool, error) {
+	return true, nil
+}
+
+func (m *MockGitHubTools) GetAuthenticatedUser(ctx context.Context) string {
+	return "testuser"
+}
+
+func (m *MockGitHubTools) GetRepositoryInfo(ctx context.Context) RepositoryInfo {
+	return RepositoryInfo{Owner: "test", Name: "repo"}
+}
+
+func (m *MockGitHubTools) Client() *github.Client {
+	client := github.NewClient(nil) // No transport needed
+	return client
+}
+
+func (m *MockGitHubTools) ListPullRequestComments(ctx context.Context, owner, repo string, prNumber int, opts *github.PullRequestListCommentsOptions) ([]*github.PullRequestComment, *github.Response, error) {
+	return []*github.PullRequestComment{}, &github.Response{Response: &http.Response{StatusCode: 200}}, nil
+}
+
+func (m *MockGitHubTools) GetRepositoryContents(ctx context.Context, owner, repo, path string, opts *github.RepositoryContentGetOptions) (*github.RepositoryContent, []*github.RepositoryContent, *github.Response, error) {
+	if path == "" {
+		return nil, []*github.RepositoryContent{
+			{Path: github.Ptr("test.go"), Type: github.Ptr("file")},
+			{Path: github.Ptr("README.md"), Type: github.Ptr("file")},
+		}, &github.Response{Response: &http.Response{StatusCode: 200}}, nil
+	}
+	return nil, []*github.RepositoryContent{{Path: github.Ptr(path)}}, &github.Response{Response: &http.Response{StatusCode: 200}}, nil
+}
+
+func (m *MockGitHubTools) ListLanguages(ctx context.Context, owner, repo string) (map[string]int, *github.Response, error) {
+	return map[string]int{"Go": 1000}, &github.Response{Response: &http.Response{StatusCode: 200}}, nil
+}
+
+func (m *MockGitHubTools) GetPullRequest(ctx context.Context, owner, repo string, prNumber int) (*github.PullRequest, *github.Response, error) {
+	return &github.PullRequest{Number: github.Ptr(prNumber)}, &github.Response{Response: &http.Response{StatusCode: 200}}, nil
+}
+
+func (m *MockGitHubTools) GetRepository(ctx context.Context, owner, repo string) (*github.Repository, *github.Response, error) {
+	return &github.Repository{Name: github.Ptr(repo)}, &github.Response{Response: &http.Response{StatusCode: 200}}, nil
+}
+
+func (m *MockGitHubTools) CompareCommits(ctx context.Context, owner, repo, base, head string, opts *github.ListOptions) (*github.CommitsComparison, *github.Response, error) {
+	return &github.CommitsComparison{}, &github.Response{Response: &http.Response{StatusCode: 200}}, nil
+}
+
+// MockPullRequestsService.
+type MockPullRequestsService struct{}
+
+func (s *MockPullRequestsService) ListComments(ctx context.Context, owner, repo string, number int, opts *github.PullRequestListCommentsOptions) ([]*github.PullRequestComment, *github.Response, error) {
+	resp := &github.Response{
+		Response: &http.Response{
+			Status:     "200 OK",
+			StatusCode: 200,
+			Body:       io.NopCloser(bytes.NewReader([]byte(`[]`))),
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+		},
+	}
+	return []*github.PullRequestComment{}, resp, nil
+}
+
+// Minimal implementations for other methods.
+func (s *MockPullRequestsService) List(ctx context.Context, owner, repo string, opts *github.PullRequestListOptions) ([]*github.PullRequest, *github.Response, error) {
+	return nil, nil, nil
+}
+
+func (s *MockPullRequestsService) Get(ctx context.Context, owner, repo string, number int) (*github.PullRequest, *github.Response, error) {
+	return nil, nil, nil
+}
+
+func (s *MockPullRequestsService) CreateReview(ctx context.Context, owner, repo string, number int, review *github.PullRequestReviewRequest) (*github.PullRequestReview, *github.Response, error) {
+	return nil, nil, nil
+}
+
+func (s *MockPullRequestsService) Create(ctx context.Context, owner, repo string, pull *github.NewPullRequest) (*github.PullRequest, *github.Response, error) {
+	return nil, nil, nil
+}
+
+func (s *MockPullRequestsService) Edit(ctx context.Context, owner, repo string, number int, pull *github.PullRequest) (*github.PullRequest, *github.Response, error) {
+	return nil, nil, nil
+}
+
+func (s *MockPullRequestsService) ListCommits(ctx context.Context, owner, repo string, number int, opts *github.ListOptions) ([]*github.RepositoryCommit, *github.Response, error) {
+	return nil, nil, nil
+}
+
+func (s *MockPullRequestsService) ListFiles(ctx context.Context, owner, repo string, number int, opts *github.ListOptions) ([]*github.CommitFile, *github.Response, error) {
+	return nil, nil, nil
+}
+
+type MockConsole struct {
+	Buffer *bytes.Buffer
+}
+
+func NewMockConsole() *MockConsole {
+	return &MockConsole{Buffer: &bytes.Buffer{}}
+}
+
+func (m *MockConsole) StartSpinner(message string) {
+	fmt.Fprintf(m.Buffer, "Starting spinner: %s\n", message)
+}
+
+func (m *MockConsole) StopSpinner() {
+	fmt.Fprintln(m.Buffer, "Stopping spinner")
+}
+
+func (m *MockConsole) WithSpinner(ctx context.Context, message string, fn func() error) error {
+	fmt.Fprintf(m.Buffer, "%s...\n", message)
+	err := fn() // Execute the function directly, no goroutine
+	return err
+}
+
+func (m *MockConsole) ShowComments(comments []PRReviewComment, metric MetricsCollector) {
+	fmt.Fprintf(m.Buffer, "Showing %d comments\n", len(comments))
+}
+
+func (m *MockConsole) ShowSummary(comments []PRReviewComment, metric MetricsCollector) {
+	fmt.Fprintf(m.Buffer, "Summary: %d comments\n", len(comments))
+}
+
+func (m *MockConsole) StartReview(pr *github.PullRequest) {
+	fmt.Fprintf(m.Buffer, "Starting review for PR #%d\n", *pr.Number)
+}
+
+func (m *MockConsole) ReviewingFile(file string, current, total int) {
+	fmt.Fprintf(m.Buffer, "Reviewing file %s (%d/%d)\n", file, current, total)
+}
+
+func (m *MockConsole) ConfirmReviewPost(commentCount int) (bool, error) {
+	fmt.Fprintf(m.Buffer, "Confirming post of %d comments\n", commentCount)
+	return true, nil // Always confirm in mock
+}
+
+func (m *MockConsole) ReviewComplete() {
+	fmt.Fprintln(m.Buffer, "Review complete")
+}
+
+func (m *MockConsole) UpdateSpinnerText(text string) {
+	fmt.Fprintf(m.Buffer, "Updating spinner: %s\n", text)
+}
+
+func (m *MockConsole) ShowReviewMetrics(metrics MetricsCollector, comments []PRReviewComment) {
+	fmt.Fprintf(m.Buffer, "Showing metrics for %d comments\n", len(comments))
+}
+
+func (m *MockConsole) Confirm(opts PromptOptions) (bool, error) {
+	fmt.Fprintf(m.Buffer, "Confirming prompt: %s\n", opts.Message)
+	return true, nil // Always confirm in mock
+}
+
+func (m *MockConsole) FileError(filepath string, err error) {
+	fmt.Fprintf(m.Buffer, "Error in file %s: %v\n", filepath, err)
+}
+
+func (m *MockConsole) Printf(format string, a ...interface{}) {
+	fmt.Fprintf(m.Buffer, format, a...)
+}
+
+func (m *MockConsole) Println(a ...interface{}) {
+	fmt.Fprintln(m.Buffer, a...)
+}
+
+func (m *MockConsole) PrintHeader(text string) {
+	fmt.Fprintf(m.Buffer, "=== %s ===\n", text)
+}
+
+func (m *MockConsole) NoIssuesFound(file string, chunkNumber, totalChunks int) {
+	fmt.Fprintf(m.Buffer, "No issues found in %s (%d/%d)\n", file, chunkNumber, totalChunks)
+}
+
+func (m *MockConsole) SeverityIcon(severity string) string {
+	return fmt.Sprintf("[%s]", severity)
+}
+
+func (m *MockConsole) Color() bool {
+	return false // No color in mock
+}
+
+func (m *MockConsole) Spinner() *spinner.Spinner {
+	return spinner.New(spinner.CharSets[14], 100*time.Millisecond) // Return a real but unused spinner
+}
+
+// TestPRReviewAgent_ReviewPR.
+func TestPRReviewAgent_ReviewPR(t *testing.T) {
+	// Set up logging
+	logger := logging.NewLogger(logging.Config{
+		Severity: logging.DEBUG,
+		Outputs:  []logging.Output{logging.NewConsoleOutput(true)},
+	})
+	logging.SetLogger(logger)
+
+	// Configure mock LLM
+	ctx := context.Background()
+	mockLLM := NewMockLLM()
+	core.SetDefaultLLM(mockLLM)
+	core.GlobalConfig.DefaultLLM = mockLLM
+	assert.NotNil(t, core.GetDefaultLLM(), "Default LLM should be set")
+
+	// Use mock GitHub tools and RAG store
+	githubTools := NewMockGitHubTools()
+	mockRAG := &MockRAGStore{}
+
+	// Manually create PRReviewAgent with mock dependencies
+	metrics := NewBusinessMetrics(logger)
+	config := agents.OrchestrationConfig{
+		MaxConcurrent: 1,
+		TaskParser:    &agents.XMLTaskParser{},
+		PlanCreator:   &agents.DependencyPlanCreator{},
+		RetryConfig: &agents.RetryConfig{
+			MaxAttempts:       2,
+			BackoffMultiplier: 2.0,
+		},
+		CustomProcessors: map[string]agents.TaskProcessor{
+			"code_review":      &CodeReviewProcessor{metrics: metrics},
+			"comment_response": &CommentResponseProcessor{metrics: metrics},
+			"review_chain":     NewReviewChainProcessor(ctx, metrics, logger),
+		},
+		Options: core.WithGenerateOptions(
+			core.WithTemperature(0.3),
+			core.WithMaxTokens(8192),
+		),
+	}
+
+	agent := &PRReviewAgent{
+		orchestrator:  agents.NewFlexibleOrchestrator(agents.NewInMemoryStore(), config),
+		memory:        agents.NewInMemoryStore(),
+		rag:           mockRAG,
+		githubTools:   githubTools,
+		stopper:       NewStopper(),
+		metrics:       metrics,
+		activeThreads: make(map[int64]*ThreadTracker),
+	}
+	assert.NotNil(t, agent, "Agent should not be nil")
+
+	// Prepare test data
+	tasks := []PRReviewTask{
+		{FilePath: "test.go", FileContent: "func main() {}", Changes: "+func main() {}"},
+	}
+	// Set up console
+	console := NewMockConsole()
+	// Run the ReviewPR method
+	comments, err := agent.ReviewPR(ctx, 1, tasks, console)
+	assert.NoError(t, err, "ReviewPR should not return an error")
+	assert.NotNil(t, comments, "Comments should not be nil")
+}
