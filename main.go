@@ -14,6 +14,7 @@ import (
 	"github.com/XiaoConstantine/dspy-go/pkg/core"
 	"github.com/XiaoConstantine/dspy-go/pkg/llms"
 	"github.com/XiaoConstantine/dspy-go/pkg/logging"
+	"github.com/c-bata/go-prompt"
 	"github.com/logrusorgru/aurora"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
@@ -52,6 +53,51 @@ type ModelChoice struct {
 	Provider    string
 	DisplayName string
 	Description string
+}
+
+func commandCompleter(d prompt.Document) []prompt.Suggest {
+	// Commands with their descriptions
+	commandSuggestions := []prompt.Suggest{
+		{Text: "/help", Description: "Show available commands"},
+		{Text: "/exit", Description: "Exit the application"},
+		{Text: "/quit", Description: "Exit the application"},
+		{Text: "/review", Description: "Review a specific pull request"},
+		{Text: "/ask", Description: "Ask a specific question about the repository"},
+	}
+
+	text := d.TextBeforeCursor()
+
+	// If starting with slash, provide command completion
+	if strings.HasPrefix(text, "/") {
+		// Check if we're typing a command or its arguments
+		parts := strings.Fields(text)
+
+		if len(parts) == 1 {
+			// We're still typing the command itself
+			return prompt.FilterHasPrefix(commandSuggestions, text, true)
+		} else if len(parts) > 1 {
+			// We're typing arguments for a command
+			command := parts[0]
+
+			// Add argument-specific completions
+			switch command {
+			case "/review":
+				// You could potentially fetch recent PR numbers here
+				return []prompt.Suggest{
+					{Text: parts[0] + " 123", Description: "Recent PR #123"},
+					{Text: parts[0] + " 456", Description: "Recent PR #456"},
+				}
+			case "/ask":
+				// You could suggest common questions or topics
+				return []prompt.Suggest{
+					{Text: parts[0] + " How does the codebase handle errors?", Description: "Error handling patterns"},
+					{Text: parts[0] + " What's the project structure?", Description: "Code organization"},
+				}
+			}
+		}
+		return prompt.FilterHasPrefix(commandSuggestions, text, true)
+	}
+	return []prompt.Suggest{}
 }
 
 func getModelChoices() []ModelChoice {
@@ -256,16 +302,6 @@ func createInteractiveCommands(cfg *config, console ConsoleInterface) *cobra.Com
 	}
 	rootCmd.AddCommand(quitCmd)
 
-	// Compact command
-	compactCmd := &cobra.Command{
-		Use:   "compact",
-		Short: "Compact the conversation history",
-		Run: func(cmd *cobra.Command, args []string) {
-			console.Println("Conversation history compacted.")
-		},
-	}
-	rootCmd.AddCommand(compactCmd)
-
 	// Review command
 	reviewCmd := &cobra.Command{
 		Use:   "review [PR-NUMBER]",
@@ -367,81 +403,6 @@ func printMaestroBanner() {
 	}
 }
 
-func showConversationBox(c ConsoleInterface, showCommands bool) {
-	width, _, err := term.GetSize(0)
-	if err != nil {
-		width = 80 // Default if we can't get terminal width
-	}
-
-	// Create a box that takes most of the terminal width
-	boxWidth := width - 4
-
-	// Box drawing characters
-	topBorder := "╭" + strings.Repeat("─", boxWidth) + "╮"
-	bottomBorder := "╰" + strings.Repeat("─", boxWidth) + "╯"
-	sideBorder := "│"
-
-	// Display the box
-	if c.Color() {
-		c.Println(aurora.Cyan(topBorder).String())
-
-		// If requested, show command hints in the input box
-		if showCommands {
-			hint := "Type /help, /review <PR>, /ask <question>, or just ask directly"
-			padding := (boxWidth - len(hint)) / 2
-			if padding < 0 {
-				padding = 0
-				hint = hint[:boxWidth-3] + "..."
-			}
-			paddedHint := strings.Repeat(" ", padding) + hint
-			rightPadding := boxWidth - len(paddedHint)
-			if rightPadding > 0 {
-				paddedHint += strings.Repeat(" ", rightPadding)
-			}
-
-			c.Println(aurora.Cyan(sideBorder).String() +
-				aurora.Blue(paddedHint).String() +
-				aurora.Cyan(sideBorder).String())
-		} else {
-			c.Println(aurora.Cyan(sideBorder).String() +
-				strings.Repeat(" ", boxWidth) +
-				aurora.Cyan(sideBorder).String())
-		}
-
-		c.Println(aurora.Cyan(bottomBorder).String())
-	} else {
-		c.Println(topBorder)
-
-		// If requested, show command hints in the input box
-		if showCommands {
-			hint := "Type /help, /review <PR>, /ask <question>, or just ask directly"
-			padding := (boxWidth - len(hint)) / 2
-			if padding < 0 {
-				padding = 0
-				hint = hint[:boxWidth-3] + "..."
-			}
-			paddedHint := strings.Repeat(" ", padding) + hint
-			rightPadding := boxWidth - len(paddedHint)
-			if rightPadding > 0 {
-				paddedHint += strings.Repeat(" ", rightPadding)
-			}
-
-			c.Println(sideBorder + paddedHint + sideBorder)
-		} else {
-			c.Println(sideBorder + strings.Repeat(" ", boxWidth) + sideBorder)
-		}
-
-		c.Println(bottomBorder)
-	}
-
-	if c.Color() {
-		prompt := aurora.Cyan("maestro> ").Bold().String()
-		c.Printf("%s", prompt)
-	} else {
-		c.Printf("maestro> ")
-	}
-}
-
 func main() {
 	cfg := &config{}
 	sqlite_vec.Auto()
@@ -459,7 +420,6 @@ Available slash commands in conversation mode:
   /help                   - Show help for available commands
   /review <PR-NUMBER>     - Review a specific pull request
   /ask <QUESTION>         - Ask a question about the repository
-  /compact                - Compact conversation history
   /exit or /quit          - Exit the application`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if cmd.Flags().Changed("model") {
@@ -875,57 +835,99 @@ Examples:
 
 	// Create interactive commands
 	interactiveCmd := createInteractiveCommands(cfg, console)
+	ctrlCPressed := false
+	ctrlCTimer := time.NewTimer(0)
+	ctrlCTimer.Stop() // Initialize in stopped state
 
-	// Interactive command loop
-	for {
-		showConversationBox(console, true)
+	// Configure go-prompt options
+	options := []prompt.Option{
+		prompt.OptionTitle("Maestro AI Code Assistant"),
+		prompt.OptionPrefix("maestro> "),
+		// Use lighter colors for a cleaner look
+		prompt.OptionPrefixTextColor(prompt.Brown),
 
-		var input string
-		inputPrompt := &survey.Input{
-			Message: "maestro>",
-		}
+		// Style the suggestions to look more like Claude's style
+		prompt.OptionSuggestionBGColor(prompt.Black),
+		prompt.OptionSuggestionTextColor(prompt.Brown),
+		prompt.OptionDescriptionBGColor(prompt.Black),
+		prompt.OptionDescriptionTextColor(prompt.White),
 
-		if err := survey.AskOne(inputPrompt, &input); err != nil {
-			return fmt.Errorf("failed to get input: %w", err)
-		}
-		if input == "/" {
-			console.Println("Available commands:")
-			console.Println("  /help - Show this help message")
-			console.Println("  /exit, /quit - Exit the application")
-			console.Println("  /compact - Compact the conversation history")
-			console.Println("  /review <PR-NUMBER> - Review a specific pull request")
-			console.Println("  /ask <QUESTION> - Ask a specific question about the repository")
-			continue
-		}
-		// Exit condition
-		if input == "exit" || input == "quit" || input == "/exit" || input == "/quit" {
-			return nil
-		}
+		// Selected item styling
+		prompt.OptionSelectedSuggestionBGColor(prompt.DarkGray),
+		prompt.OptionSelectedSuggestionTextColor(prompt.Brown),
+		prompt.OptionSelectedDescriptionBGColor(prompt.DarkGray),
+		prompt.OptionSelectedDescriptionTextColor(prompt.White),
 
-		// Handle command syntax
-		if strings.HasPrefix(input, "/") {
-			// Remove the leading slash for Cobra
-			args := strings.TrimPrefix(input, "/")
-			// Split into arguments
-			argList := strings.Fields(args)
+		// Format and layout
+		prompt.OptionMaxSuggestion(6),        // Limit visible suggestions
+		prompt.OptionShowCompletionAtStart(), // Show immediately when typing /
+		prompt.OptionAddKeyBind(
+			// Handle Ctrl+C
+			prompt.KeyBind{
+				Key: prompt.ControlC,
+				Fn: func(buf *prompt.Buffer) {
+					if ctrlCPressed {
+						// Second press - exit the program
+						fmt.Println("\nExiting...")
+						os.Exit(0)
+					} else {
+						// First press - show warning
+						ctrlCPressed = true
+						fmt.Println("\nPress Ctrl+C again to exit.")
 
-			// Set os.Args temporarily and execute the command
-			oldArgs := os.Args
-			os.Args = append([]string{"maestro"}, argList...)
-			interactiveCmd.SetArgs(argList)
-			err := interactiveCmd.Execute()
-			os.Args = oldArgs
-
-			if err != nil {
-				console.Printf("Error: %v\n", err)
-			}
-		} else if input != "" {
-			// Treat as a question if not empty
-			if err := initializeAndAskQuestions(ctx, cfg, console, input); err != nil {
-				console.Printf("Error: %v\n", err)
-			}
-		}
+						// Reset the flag after 3 seconds
+						ctrlCTimer.Reset(3 * time.Second)
+						go func() {
+							<-ctrlCTimer.C
+							ctrlCPressed = false
+						}()
+					}
+				},
+			},
+		),
 	}
+
+	console.Println("\nType / to see available commands, or ask a question directly.")
+	// Start the interactive prompt with auto-completion
+	p := prompt.New(
+		// Executor function runs when the user presses Enter
+		func(input string) {
+
+			ctrlCPressed = false
+			// Exit condition
+			if input == "exit" || input == "quit" || input == "/exit" || input == "/quit" {
+				os.Exit(0)
+			}
+
+			// Handle command syntax
+			if strings.HasPrefix(input, "/") {
+				// Remove the leading slash for Cobra
+				args := strings.TrimPrefix(input, "/")
+				// Split into arguments
+				argList := strings.Fields(args)
+
+				// Set os.Args temporarily and execute the command
+				oldArgs := os.Args
+				os.Args = append([]string{"maestro"}, argList...)
+				interactiveCmd.SetArgs(argList)
+				err := interactiveCmd.Execute()
+				os.Args = oldArgs
+
+				if err != nil {
+					console.Printf("Error: %v\n", err)
+				}
+			} else if input != "" {
+				// Treat as a question if not empty
+				if err := initializeAndAskQuestions(ctx, cfg, console, input); err != nil {
+					console.Printf("Error: %v\n", err)
+				}
+			}
+		},
+		commandCompleter,
+		options...,
+	)
+	p.Run()
+	return nil
 }
 
 // Modify initializeAndAskQuestions to accept a direct question.
@@ -1055,7 +1057,6 @@ func showHelpMessage(c ConsoleInterface) {
 		{"/help", "Show this help message"},
 		{"/exit", "Exit the application"},
 		{"/quit", "Exit the application"},
-		{"/compact", "Compact the conversation history"},
 		{"/review <PR-NUMBER>", "Review a specific pull request"},
 		{"/ask <QUESTION>", "Ask a specific question about the repository"},
 	}
@@ -1063,7 +1064,7 @@ func showHelpMessage(c ConsoleInterface) {
 	for _, cmd := range commands {
 		if c.Color() {
 			c.Printf("%s %s\n",
-				aurora.Cyan(cmd.Command).Bold().String(),
+				aurora.Index(209, cmd.Command).Bold().String(),
 				cmd.Description)
 		} else {
 			c.Printf("%s - %s\n", cmd.Command, cmd.Description)
