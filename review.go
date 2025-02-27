@@ -252,7 +252,7 @@ func NewPRReviewAgent(ctx context.Context, githubTool GitHubInterface, dbPath st
 	}
 
 	logger.Debug(ctx, "Successfully opened database")
-	store, err := NewSQLiteRAGStore(db, logging.GetLogger())
+	store, err := NewSQLiteRAGStore(db, logger)
 	if err != nil {
 		db.Close()
 		return nil, fmt.Errorf("failed to initialize rag store: %v", err)
@@ -565,7 +565,7 @@ func (a *PRReviewAgent) analyzePatterns(ctx context.Context, tasks []PRReviewTas
 	for _, task := range tasks {
 
 		// Create embedding for the entire file to find similar patterns
-		llm := core.GetDefaultLLM()
+		llm := core.GetTeacherLLM()
 
 		chunks, err := splitContentForEmbedding(task.FileContent, 1024) // Keep under 10KB limit
 		if err != nil {

@@ -49,14 +49,14 @@ func (p *RepoQAProcessor) Process(ctx context.Context, task agents.Task, context
 	}
 
 	// Create embedding and find similar content
-	llm := core.GetDefaultLLM()
+	llm := core.GetTeacherLLM()
 	questionEmbedding, err := llm.CreateEmbedding(ctx, metadata.Question)
 
 	if err != nil {
 		return nil, fmt.Errorf("failed to create embedding: %w", err)
 	}
 
-	similar, err := p.ragStore.FindSimilar(ctx, questionEmbedding.Vector, 10, ContentTypeRepository)
+	similar, err := p.ragStore.FindSimilar(ctx, questionEmbedding.Vector, 10)
 	if err != nil {
 		return nil, fmt.Errorf("failed to find similar content: %w", err)
 	}
