@@ -342,6 +342,19 @@ func NewPRReviewAgent(ctx context.Context, githubTool GitHubInterface, dbPath st
 	}
 
 	qaProcessor := NewRepoQAProcessor(store)
+	streamHandler := func(chunk core.StreamChunk) error {
+		switch {
+		case chunk.Error != nil:
+			logger.Error(ctx, "\nError: %v\n", chunk.Error)
+			return chunk.Error
+		case chunk.Done:
+			logger.Info(ctx, "\n[DONE]")
+		default:
+			logger.Debug(ctx, "Content: %v", chunk.Content)
+
+		}
+		return nil
+	}
 
 	orchConfig := agents.OrchestrationConfig{
 		MaxConcurrent:  5,
@@ -358,9 +371,12 @@ func NewPRReviewAgent(ctx context.Context, githubTool GitHubInterface, dbPath st
 			"repo_qa":          qaProcessor,
 			"review_chain":     NewReviewChainProcessor(ctx, metrics, logger),
 		},
-		Options: core.WithGenerateOptions(
-			core.WithTemperature(0.3),
-			core.WithMaxTokens(8192),
+		Options: core.WithOptions(
+			core.WithGenerateOptions(
+				core.WithTemperature(0.3),
+				core.WithMaxTokens(8192),
+			),
+			core.WithStreamHandler(streamHandler),
 		),
 	}
 
@@ -578,7 +594,10 @@ func (a *PRReviewAgent) analyzePatterns(ctx context.Context, tasks []PRReviewTas
 			for i, chunk := range chunks {
 
 				console.Spinner().Suffix = fmt.Sprintf(" (chunk %d/%d) of %s", i+1, len(chunks), task.FilePath)
-				fileEmbedding, err := llm.CreateEmbedding(ctx, chunk)
+				//fileEmbedding, err := llm.CreateEmbedding(ctx, chunk)
+
+				fileEmbedding, err := llm.CreateEmbedding(ctx, chunk, core.WithModel("gemini-embedding-exp-03-07"))
+
 				if err != nil {
 					return fmt.Errorf("failed to create file embedding: %w", err)
 				}
