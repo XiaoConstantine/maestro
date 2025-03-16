@@ -524,7 +524,7 @@ func runCLIWithoutBanner(cfg *config) error {
 		logger.Error(ctx, "Failed to configure LLM: %v", err)
 	}
 	// Use local model for embedding
-	if err := core.ConfigureTeacherLLM(cfg.apiKey, "llamacpp:"); err != nil {
+	if err := core.ConfigureTeacherLLM(cfg.apiKey, core.ModelGoogleGeminiFlash); err != nil {
 		return fmt.Errorf("failed to configure embedding LLM: %w", err)
 	}
 	githubTools := NewGitHubTools(cfg.githubToken, cfg.owner, cfg.repo)
@@ -827,7 +827,7 @@ Examples:
 		return fmt.Errorf("failed to configure LLM: %w", err)
 	}
 	// Use local model for embedding
-	if err := core.ConfigureTeacherLLM(cfg.apiKey, "llamacpp:"); err != nil {
+	if err := core.ConfigureTeacherLLM(cfg.apiKey, core.ModelGoogleGeminiFlash); err != nil {
 		return fmt.Errorf("failed to configure embedding LLM: %w", err)
 	}
 
@@ -949,7 +949,7 @@ func initializeAndAskQuestions(ctx context.Context, cfg *config, console Console
 		IndexWorkers:  cfg.indexWorkers,
 		ReviewWorkers: cfg.reviewWorkers,
 	})
-	logging.GetLogger().Info(ctx, "agent: %v", agent)
+	logging.GetLogger().Debug(ctx, "agent: %v", agent)
 	if err != nil {
 		return fmt.Errorf("Failed to initiliaze agent due to : %v", err)
 	}

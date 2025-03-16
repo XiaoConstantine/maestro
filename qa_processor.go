@@ -7,6 +7,7 @@ import (
 
 	"github.com/XiaoConstantine/dspy-go/pkg/agents"
 	"github.com/XiaoConstantine/dspy-go/pkg/core"
+	"github.com/XiaoConstantine/dspy-go/pkg/logging"
 	"github.com/XiaoConstantine/dspy-go/pkg/modules"
 )
 
@@ -78,10 +79,11 @@ func (p *RepoQAProcessor) Process(ctx context.Context, task agents.Task, context
 
 	// Use predict module like other processors
 	predict := modules.NewPredict(signature)
+	streamHandler := CreateStreamHandler(ctx, logging.GetLogger())
 	result, err := predict.Process(ctx, map[string]interface{}{
 		"question":         metadata.Question,
 		"relevant_context": contextBuilder.String(),
-	})
+	}, core.WithStreamHandler(streamHandler))
 	if err != nil {
 		return nil, fmt.Errorf("prediction failed: %w", err)
 	}

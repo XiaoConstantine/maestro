@@ -439,3 +439,20 @@ func safeGetBool(m map[string]interface{}, key string) bool {
 	}
 	return false
 }
+
+func CreateStreamHandler(ctx context.Context, logger *logging.Logger) func(chunk core.StreamChunk) error {
+	return func(chunk core.StreamChunk) error {
+		switch {
+		case chunk.Error != nil:
+			logger.Error(ctx, "\nError: %v\n", chunk.Error)
+			return chunk.Error
+		case chunk.Done:
+			logger.Info(ctx, "\n[DONE]")
+		default:
+			logger.Debug(ctx, "Content: %v", chunk.Content)
+
+		}
+		return nil
+	}
+
+}

@@ -342,20 +342,7 @@ func NewPRReviewAgent(ctx context.Context, githubTool GitHubInterface, dbPath st
 	}
 
 	qaProcessor := NewRepoQAProcessor(store)
-	streamHandler := func(chunk core.StreamChunk) error {
-		switch {
-		case chunk.Error != nil:
-			logger.Error(ctx, "\nError: %v\n", chunk.Error)
-			return chunk.Error
-		case chunk.Done:
-			logger.Info(ctx, "\n[DONE]")
-		default:
-			logger.Debug(ctx, "Content: %v", chunk.Content)
-
-		}
-		return nil
-	}
-
+	streamHandler := CreateStreamHandler(ctx, logger)
 	orchConfig := agents.OrchestrationConfig{
 		MaxConcurrent:  5,
 		TaskParser:     &agents.XMLTaskParser{},
