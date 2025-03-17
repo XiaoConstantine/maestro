@@ -4,7 +4,7 @@ go 1.22.5
 
 require (
 	github.com/AlecAivazis/survey/v2 v2.3.7
-	github.com/XiaoConstantine/dspy-go v0.23.0
+	github.com/XiaoConstantine/dspy-go v0.24.0
 	github.com/asg017/sqlite-vec-go-bindings v0.1.6
 	github.com/briandowns/spinner v1.23.2
 	github.com/c-bata/go-prompt v0.2.6
@@ -18,6 +18,7 @@ require (
 )
 
 require (
+	github.com/XiaoConstantine/mcp-go v0.1.0 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/kballard/go-shellquote v0.0.0-20180428030007-95032a82bc51 // indirect
 	github.com/mattn/go-runewidth v0.0.9 // indirect
