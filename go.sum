@@ -4,8 +4,8 @@ github.com/Netflix/go-expect v0.0.0-20220104043353-73e0943537d2 h1:+vx7roKuyA63n
 github.com/Netflix/go-expect v0.0.0-20220104043353-73e0943537d2/go.mod h1:HBCaDeC1lPdgDeDbhX8XFpy1jqjK0IBG8W5K+xYqA0w=
 github.com/XiaoConstantine/anthropic-go v0.0.8 h1:10Z87ZuFhIdyHMsXu0B+7L+Ha7vwCQXYRgZ2fDVVQGk=
 github.com/XiaoConstantine/anthropic-go v0.0.8/go.mod h1:ARxRchhwI8HCfEFJtFCIRET3K2QqoyGyuvMra/6nfoI=
-github.com/XiaoConstantine/dspy-go v0.26.0 h1:gWbjSdMStqpT1YuQEIPI32clE0DnF/km4+MY1haFL0k=
-github.com/XiaoConstantine/dspy-go v0.26.0/go.mod h1:4833JAo61Lvh04nnscP5rcxFHCi4bJwZjITNQJOt6/I=
+github.com/XiaoConstantine/dspy-go v0.27.0 h1:XRrQ0trgI1+ogU1f7dd8Gn1906q6CarsGJIpfKdy/Pg=
+github.com/XiaoConstantine/dspy-go v0.27.0/go.mod h1:61y3MBLH3bw4nqAg2GGLcBeVSFowdID66sKhy5eedoU=
 github.com/XiaoConstantine/mcp-go v0.2.1 h1:X5QbQLb5BKLHZo2a71e5IuDQNaSRrzulhResR5LgCUE=
 github.com/XiaoConstantine/mcp-go v0.2.1/go.mod h1:qsY3Gm4CYMREmoLXEMwtf0Hdb5F957kgcpF6huoNHcY=
 github.com/asg017/sqlite-vec-go-bindings v0.1.6 h1:Nx0jAzyS38XpkKznJ9xQjFXz2X9tI7KqjwVxV8RNoww=
@@ -49,8 +49,8 @@ github.com/mattn/go-isatty v0.0.20/go.mod h1:W+V8PltTTMOvKvAeJH7IuucS94S2C6jfK/D
 github.com/mattn/go-runewidth v0.0.6/go.mod h1:H031xJmbD/WCDINGzjvQ9THkh0rPKHF+m2gUSrubnMI=
 github.com/mattn/go-runewidth v0.0.9 h1:Lm995f3rfxdpd6TSmuVCHVb/QhupuXlYr8sCI/QdE+0=
 github.com/mattn/go-runewidth v0.0.9/go.mod h1:H031xJmbD/WCDINGzjvQ9THkh0rPKHF+m2gUSrubnMI=
-github.com/mattn/go-sqlite3 v1.14.24 h1:tpSp2G2KyMnnQu99ngJ47EIkWVmliIizyZBfPrBWDRM=
-github.com/mattn/go-sqlite3 v1.14.24/go.mod h1:Uh1q+B4BYcTPb+yiD3kU8Ct7aC0hY9fxUwlHK0RXw+Y=
+github.com/mattn/go-sqlite3 v1.14.28 h1:ThEiQrnbtumT+QMknw63Befp/ce/nUPgBPMlRFEum7A=
+github.com/mattn/go-sqlite3 v1.14.28/go.mod h1:Uh1q+B4BYcTPb+yiD3kU8Ct7aC0hY9fxUwlHK0RXw+Y=
 github.com/mattn/go-tty v0.0.3 h1:5OfyWorkyO7xP52Mq7tB36ajHDG5OHrmBGIS/DtakQI=
 github.com/mattn/go-tty v0.0.3/go.mod h1:ihxohKRERHTVzN+aSVRwACLCeqIoZAWpoICkkvrWyR0=
 github.com/mgutz/ansi v0.0.0-20170206155736-9520e82c474b h1:j7+1HpAFS1zy5+Q4qx1fWh90gTKwiN4QCGoY9TWyyO4=
