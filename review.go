@@ -118,6 +118,67 @@ type AgentConfig struct {
 	ReviewWorkers int
 }
 
+// IndexingStatus tracks the progress of background repository indexing
+type IndexingStatus struct {
+	mu             sync.RWMutex
+	isIndexing     bool
+	progress       float64 // 0.0 to 1.0
+	filesIndexed   int
+	totalFiles     int
+	lastError      error
+	startTime      time.Time
+	estimatedETA   time.Duration
+	isComplete     bool
+	hasBasicIndex  bool // Enough for basic functionality
+}
+
+func NewIndexingStatus() *IndexingStatus {
+	return &IndexingStatus{
+		startTime: time.Now(),
+	}
+}
+
+func (s *IndexingStatus) IsReady() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.hasBasicIndex || s.isComplete
+}
+
+func (s *IndexingStatus) GetProgress() (float64, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.progress, s.isComplete
+}
+
+func (s *IndexingStatus) GetStatus() (bool, float64, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.isIndexing, s.progress, s.lastError
+}
+
+func (s *IndexingStatus) UpdateProgress(indexed, total int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.filesIndexed = indexed
+	s.totalFiles = total
+	if total > 0 {
+		s.progress = float64(indexed) / float64(total)
+	}
+	
+	// Consider "basic" indexing complete at 20% for immediate functionality
+	if s.progress > 0.2 {
+		s.hasBasicIndex = true
+	}
+	
+	// Estimate completion time
+	elapsed := time.Since(s.startTime)
+	if indexed > 0 {
+		rate := float64(indexed) / elapsed.Seconds()
+		remaining := float64(total - indexed)
+		s.estimatedETA = time.Duration(remaining/rate) * time.Second
+	}
+}
+
 // PRReviewAgent handles code review using dspy-go.
 type PRReviewAgent struct {
 	orchestrator  *agents.FlexibleOrchestrator
@@ -129,6 +190,7 @@ type PRReviewAgent struct {
 	stopper     *Stopper
 	metrics     MetricsCollector
 	workers     *AgentConfig
+	indexStatus *IndexingStatus // Track background indexing progress
 }
 
 type ThreadTracker struct {
@@ -262,18 +324,11 @@ func NewPRReviewAgent(ctx context.Context, githubTool GitHubInterface, dbPath st
 
 	metrics.StartOptimizationCycle(ctx)
 	logger.Debug(ctx, "Successfully created RAG store")
-	indexer := NewRepoIndexer(githubTool, store, config.IndexWorkers)
-
-	logger.Debug(ctx, "Starting repository indexing")
-	if err := indexer.IndexRepository(ctx, "", dbPath); err != nil {
-		store.Close()
-
-		return nil, fmt.Errorf("failed to index repository: %w", err)
-	}
-
-	logger.Debug(ctx, "Successfully indexed repository")
+	
+	// Create agent components immediately - don't wait for indexing
 	memory := agents.NewInMemoryStore()
 	stopper := NewStopper()
+	indexStatus := NewIndexingStatus()
 
 	logger.Debug(ctx, "Creating orchestrator configuration")
 	analyzerConfig := agents.AnalyzerConfig{
@@ -370,7 +425,8 @@ func NewPRReviewAgent(ctx context.Context, githubTool GitHubInterface, dbPath st
 	orchestrator := agents.NewFlexibleOrchestrator(memory, orchConfig)
 
 	logger.Debug(ctx, "Successfully created orchestrator")
-	return &PRReviewAgent{
+	
+	agent := &PRReviewAgent{
 		orchestrator: orchestrator,
 		memory:       memory,
 		rag:          store,
@@ -378,7 +434,49 @@ func NewPRReviewAgent(ctx context.Context, githubTool GitHubInterface, dbPath st
 		stopper:      stopper,
 		metrics:      metrics,
 		workers:      config,
-	}, nil
+		indexStatus:  indexStatus,
+	}
+	
+	// Start background indexing AFTER agent creation
+	logger.Info(ctx, "🚀 Agent ready! Starting background repository indexing...")
+	go agent.startBackgroundIndexing(ctx, githubTool, store, dbPath, config.IndexWorkers)
+	
+	return agent, nil
+}
+
+func (a *PRReviewAgent) startBackgroundIndexing(ctx context.Context, githubTool GitHubInterface, store RAGStore, dbPath string, workers int) {
+	logger := logging.GetLogger()
+	
+	a.indexStatus.mu.Lock()
+	a.indexStatus.isIndexing = true
+	a.indexStatus.mu.Unlock()
+	
+	logger.Info(ctx, "🔄 Starting background repository indexing...")
+	
+	indexer := NewRepoIndexer(githubTool, store, workers)
+	
+	// For now, use the existing IndexRepository method
+	// TODO: Enhance indexer with progress reporting
+	err := indexer.IndexRepository(ctx, "", dbPath)
+	
+	a.indexStatus.mu.Lock()
+	defer a.indexStatus.mu.Unlock()
+	
+	if err != nil {
+		a.indexStatus.lastError = err
+		logger.Error(ctx, "❌ Background indexing failed: %v", err)
+	} else {
+		a.indexStatus.isComplete = true
+		a.indexStatus.progress = 1.0
+		a.indexStatus.hasBasicIndex = true
+		logger.Info(ctx, "✅ Background indexing completed successfully")
+	}
+	
+	a.indexStatus.isIndexing = false
+}
+
+func (a *PRReviewAgent) GetIndexingStatus() *IndexingStatus {
+	return a.indexStatus
 }
 
 func (a *PRReviewAgent) GetGitHubTools() GitHubInterface {
@@ -413,6 +511,21 @@ func (a *PRReviewAgent) Close() error {
 func (a *PRReviewAgent) ReviewPR(ctx context.Context, prNumber int, tasks []PRReviewTask, console ConsoleInterface) ([]PRReviewComment, error) {
 	if a.activeThreads == nil {
 		a.activeThreads = make(map[int64]*ThreadTracker)
+	}
+
+	// Show indexing status to user
+	isIndexing, progress, indexErr := a.indexStatus.GetStatus()
+	if isIndexing {
+		if console.Color() {
+			console.Printf("🔄 Repository indexing in progress: %.1f%% complete\n", progress*100)
+			console.Printf("💡 Starting review with available data. Quality will improve as indexing completes.\n\n")
+		} else {
+			console.Printf("Repository indexing in progress: %.1f%% complete\n", progress*100)
+			console.Printf("Starting review with available data. Quality will improve as indexing completes.\n\n")
+		}
+	} else if indexErr != nil {
+		console.Printf("⚠️  Background indexing encountered an error: %v\n", indexErr)
+		console.Printf("Proceeding with basic review capabilities.\n\n")
 	}
 
 	if err := a.processExistingComments(ctx, prNumber, console); err != nil {
@@ -564,6 +677,20 @@ func (a *PRReviewAgent) performInitialReview(ctx context.Context, tasks []PRRevi
 func (a *PRReviewAgent) analyzePatterns(ctx context.Context, tasks []PRReviewTask, console ConsoleInterface) ([]*Content, []*Content, error) {
 	var repoPatterns []*Content
 	var guidelineMatches []*Content
+
+	// Check if we have enough indexing for pattern analysis
+	if !a.indexStatus.IsReady() {
+		progress, isComplete := a.indexStatus.GetProgress()
+		if !isComplete {
+			if console.Color() {
+				console.Printf("⏳ Repository indexing in progress (%.1f%%). Using basic analysis mode...\n", progress*100)
+			} else {
+				console.Printf("Repository indexing in progress (%.1f%%). Using basic analysis mode...\n", progress*100)
+			}
+			// Return empty patterns for now, but don't fail
+			return []*Content{}, []*Content{}, nil
+		}
+	}
 
 	for _, task := range tasks {
 
