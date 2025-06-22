@@ -832,6 +832,7 @@ Examples:
 	}
 
 	console.Println("Type /help to see available commands, or ask a question directly.")
+	console.Printf("🔄 Repository indexing will start in the background for enhanced code analysis.\n")
 
 	// Create interactive commands
 	interactiveCmd := createInteractiveCommands(cfg, console)
