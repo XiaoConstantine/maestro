@@ -28,6 +28,8 @@ type GitHubInterface interface {
 	GetAuthenticatedUser(ctx context.Context) string
 	GetRepositoryInfo(ctx context.Context) RepositoryInfo
 	ListPullRequestComments(ctx context.Context, owner, repo string, prNumber int, opts *github.PullRequestListCommentsOptions) ([]*github.PullRequestComment, *github.Response, error)
+	ListPullRequestReviews(ctx context.Context, owner, repo string, prNumber int, opts *github.ListOptions) ([]*github.PullRequestReview, *github.Response, error)
+	CreatePullRequestReviewComment(ctx context.Context, owner, repo string, prNumber int, comment *github.PullRequestReviewRequest) (*github.PullRequestReview, *github.Response, error)
 
 	GetPullRequest(ctx context.Context, owner, repo string, prNumber int) (*github.PullRequest, *github.Response, error)
 	GetRepository(ctx context.Context, owner, repo string) (*github.Repository, *github.Response, error)
@@ -948,4 +950,14 @@ func parseHunks(patch string, filePath string) ([]ChangeHunk, error) {
 	}
 
 	return hunks, nil
+}
+
+// ListPullRequestReviews retrieves all reviews for a pull request
+func (g *GitHubTools) ListPullRequestReviews(ctx context.Context, owner, repo string, prNumber int, opts *github.ListOptions) ([]*github.PullRequestReview, *github.Response, error) {
+	return g.client.PullRequests.ListReviews(ctx, owner, repo, prNumber, opts)
+}
+
+// CreatePullRequestReviewComment creates a review comment on a pull request
+func (g *GitHubTools) CreatePullRequestReviewComment(ctx context.Context, owner, repo string, prNumber int, comment *github.PullRequestReviewRequest) (*github.PullRequestReview, *github.Response, error) {
+	return g.client.PullRequests.CreateReview(ctx, owner, repo, prNumber, comment)
 }

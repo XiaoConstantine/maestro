@@ -44,6 +44,273 @@ func NewRepoIndexer(githubTools GitHubInterface, ragStore RAGStore, workers int)
 }
 
 // IndexRepository indexes the entire repository content into the RAG store.
+// IndexRepositoryBackground runs indexing silently without console output (for background mode)
+func (ri *RepoIndexer) IndexRepositoryBackground(ctx context.Context, branch, dbPath string) error {
+	logger := ri.logger
+	latestSHA, err := ri.githubTools.GetLatestCommitSHA(ctx, branch)
+	if err != nil {
+		return fmt.Errorf("failed to get latest commit SHA: %w", err)
+	}
+
+	needFullIndex := false
+	lastIndexedSHA, err := ri.getLastIndexedCommit(ctx)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			logger.Debug(ctx, "No previous index found, requiring full index")
+			needFullIndex = true
+		} else {
+			return fmt.Errorf("failed to check last indexed commit: %w", err)
+		}
+	}
+
+	if latestSHA == lastIndexedSHA && !needFullIndex {
+		logger.Debug(ctx, "Repository already indexed at latest commit %s", latestSHA)
+		return nil
+	}
+
+	logger.Debug(ctx, "Repository indexing in progress (commit: %s)", latestSHA)
+
+	if needFullIndex {
+		// Silent full index
+		if err := ri.performFullIndexSilent(ctx, latestSHA); err != nil {
+			return fmt.Errorf("full index failed: %w", err)
+		}
+	} else {
+		// Silent incremental index
+		if err := ri.performIncrementalIndexSilent(ctx, lastIndexedSHA, latestSHA); err != nil {
+			return fmt.Errorf("incremental index failed: %w", err)
+		}
+	}
+
+	// Update last indexed commit
+	if err := ri.updateLastIndexedCommit(ctx, latestSHA); err != nil {
+		return fmt.Errorf("failed to update last indexed commit: %w", err)
+	}
+
+	logger.Debug(ctx, "✅ Repository indexing completed successfully")
+	return nil
+}
+
+// performFullIndexSilent runs full indexing without console output
+func (ri *RepoIndexer) performFullIndexSilent(ctx context.Context, latestSHA string) error {
+	logger := ri.logger
+	language, err := ri.detectRepositoryLanguage(ctx)
+	if err != nil {
+		logger.Warn(ctx, "Failed to detect language: %v, defaulting to Go", err)
+		language = "Go"
+	}
+
+	if err := ri.ragStore.PopulateGuidelines(ctx, language); err != nil {
+		return fmt.Errorf("failed to populate guidelines: %w", err)
+	}
+
+	var directoryContent []*github.RepositoryContent
+	repoInfo := ri.githubTools.GetRepositoryInfo(ctx)
+	_, content, _, err := ri.githubTools.GetRepositoryContents(
+		ctx,
+		repoInfo.Owner,
+		repoInfo.Name,
+		"", // Root directory
+		&github.RepositoryContentGetOptions{
+			Ref: "",
+		},
+	)
+	directoryContent = content
+	if err != nil {
+		return fmt.Errorf("failed to get repository contents: %w", err)
+	}
+
+	// Count total files first
+	var totalFiles int32
+	countChan := make(chan *github.RepositoryContent)
+	var countWg sync.WaitGroup
+	countWg.Add(1)
+	go func() {
+		defer countWg.Done()
+		defer close(countChan)
+		if err := ri.walkDirectory(ctx, directoryContent, "", countChan); err != nil {
+			logger.Error(ctx, "Error during file count: %v", err)
+		}
+	}()
+
+	for range countChan {
+		atomic.AddInt32(&totalFiles, 1)
+	}
+	countWg.Wait()
+
+	// Process files concurrently with a worker pool
+	maxWorkers := ri.workers
+	filesChan := make(chan *github.RepositoryContent)
+	errChan := make(chan error, maxWorkers)
+	workerCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	var processedFiles int32
+
+	var walkWg sync.WaitGroup
+	walkWg.Add(1)
+	go func() {
+		defer walkWg.Done()
+		defer close(filesChan)
+
+		if err := ri.walkDirectory(workerCtx, directoryContent, "", filesChan); err != nil {
+			logger.Error(ctx, "Error during directory walk: %v", err)
+			errChan <- err
+			cancel()
+		}
+	}()
+
+	var workerWg sync.WaitGroup
+	// Start workers
+	for i := 0; i < maxWorkers; i++ {
+		workerWg.Add(1)
+		go func(workerNum int) {
+			defer workerWg.Done()
+			for file := range filesChan {
+				select {
+				case <-workerCtx.Done():
+					return
+				default:
+				}
+				if err := ri.processFile(ctx, file, ""); err != nil {
+					logger.Error(workerCtx, "Worker %d failed to process %s: %v",
+						workerNum, file.GetPath(), err)
+					errChan <- err
+					cancel()
+					return
+				}
+
+				atomic.AddInt32(&processedFiles, 1)
+			}
+		}(i)
+	}
+
+	walkWg.Wait()   // Wait for directory walk to complete
+	workerWg.Wait() // Wait for workers to finish
+
+	close(errChan)
+
+	var errors []error
+	for err := range errChan {
+		errors = append(errors, err)
+	}
+
+	if len(errors) > 0 {
+		// Combine all errors into one message
+		var errMsgs []string
+		for _, err := range errors {
+			errMsgs = append(errMsgs, err.Error())
+		}
+		return fmt.Errorf("indexing failed with errors: %s", strings.Join(errMsgs, "; "))
+	}
+
+	logger.Debug(ctx, "Silent full indexing completed")
+	return nil
+}
+
+// performIncrementalIndexSilent runs incremental indexing without console output
+func (ri *RepoIndexer) performIncrementalIndexSilent(ctx context.Context, lastIndexedSHA, latestSHA string) error {
+	logger := ri.logger
+	changes, err := ri.getCommitDifferences(ctx, lastIndexedSHA, latestSHA)
+	if err != nil {
+		return fmt.Errorf("failed to get commit differences: %w", err)
+	}
+
+	var totalChanges int
+	for _, file := range changes {
+		if !shouldSkipFile(file.GetFilename()) {
+			totalChanges++
+		}
+	}
+
+	logger.Debug(ctx, "Processing %d changed files silently", totalChanges)
+
+	for _, file := range changes {
+		if shouldSkipFile(file.GetFilename()) {
+			continue
+		}
+
+		logger.Debug(ctx, "Processing changed file: %s", file.GetFilename())
+
+		// Process the file and update the index
+		if err := ri.processChangedFileSilent(ctx, file); err != nil {
+			logger.Error(ctx, "Failed to process file %s: %v", file.GetFilename(), err)
+			return fmt.Errorf("failed to process file %s: %w", file.GetFilename(), err)
+		}
+	}
+
+	logger.Debug(ctx, "Successfully processed %d changed files", totalChanges)
+	return nil
+}
+
+// processChangedFileSilent processes a changed file without console output
+func (ri *RepoIndexer) processChangedFileSilent(ctx context.Context, file *github.CommitFile) error {
+	logger := ri.logger
+	// Get the file content
+	content, err := ri.githubTools.GetFileContent(ctx, file.GetFilename())
+	if err != nil {
+		logger.Debug(ctx, "failed to get file content: %v", err)
+		return fmt.Errorf("failed to get file content: %w", err)
+	}
+
+	// Configure chunking
+	config, err := NewChunkConfig(
+		WithMaxBytes(9000),
+	)
+	if err != nil {
+		logger.Debug(ctx, "failed to create chunk config: %v", err)
+		return fmt.Errorf("failed to create chunk config: %w", err)
+	}
+	config.fileMetadata = map[string]interface{}{
+		"file_path": file.GetFilename(),
+		"file_type": filepath.Ext(file.GetFilename()),
+		"package":   filepath.Base(filepath.Dir(file.GetFilename())),
+	}
+	// Chunk the file content
+	chunks, err := chunkfile(ctx, content, file.GetPatch(), config)
+	if err != nil {
+		logger.Debug(ctx, "failed to chunk file: %v", err)
+		return fmt.Errorf("failed to chunk file: %w", err)
+	}
+
+	// Process each chunk
+	for i, chunk := range chunks {
+		chunkID := fmt.Sprintf("%s:chunk_%d", file.GetFilename(), i+1)
+		metadata := map[string]string{
+			"file_path":    file.GetFilename(),
+			"chunk_number": fmt.Sprintf("%d", i+1),
+			"total_chunks": fmt.Sprintf("%d", len(chunks)),
+			"start_line":   fmt.Sprintf("%d", chunk.startline),
+			"end_line":     fmt.Sprintf("%d", chunk.endline),
+			"content_type": ContentTypeRepository,
+			"description":  chunk.description,
+		}
+		embeddingText := chunk.content
+		if description, exists := metadata["description"]; exists {
+			embeddingText = fmt.Sprintf("%s\n\n# Description:\n%s", chunk.content, description)
+		}
+		// Generate embedding for the chunk
+		llm := core.GetTeacherLLM()
+		embedding, err := llm.CreateEmbedding(ctx, embeddingText)
+		if err != nil {
+			return fmt.Errorf("failed to create embedding: %w", err)
+		}
+
+		// Store the chunk in RAG store
+		err = ri.ragStore.StoreContent(ctx, &Content{
+			ID:        chunkID,
+			Text:      chunk.content,
+			Embedding: embedding.Vector,
+			Metadata:  metadata,
+		})
+		if err != nil {
+			return fmt.Errorf("failed to store content: %w", err)
+		}
+	}
+
+	return nil
+}
+
 func (ri *RepoIndexer) IndexRepository(ctx context.Context, branch, dbPath string) error {
 	logger := ri.logger
 	latestSHA, err := ri.githubTools.GetLatestCommitSHA(ctx, branch)

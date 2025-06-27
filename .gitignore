@@ -1,0 +1,23 @@
+# Binaries
+maestro
+maestro-test
+*-test
+
+# Development docs (planning files)
+*_IMPROVEMENTS.md
+*_IMPLEMENTATION_PLAN.md
+*_CHANGES_SUMMARY.md
+
+# OS specific files
+.DS_Store
+*.swp
+*.swo
+
+# IDE files
+.vscode/
+.idea/
+
+# Test outputs
+*.test
+*.out
+coverage.html

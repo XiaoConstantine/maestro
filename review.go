@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -181,16 +182,17 @@ func (s *IndexingStatus) UpdateProgress(indexed, total int) {
 
 // PRReviewAgent handles code review using dspy-go.
 type PRReviewAgent struct {
-	orchestrator  *agents.FlexibleOrchestrator
-	memory        agents.Memory
-	rag           RAGStore
-	activeThreads map[int64]*ThreadTracker // Track active discussion threads
+	orchestrator       *agents.FlexibleOrchestrator  // Legacy orchestrator
+	declarativeChain   *DeclarativeReviewChain       // New declarative workflow
+	memory            agents.Memory
+	rag               RAGStore
+	activeThreads     map[int64]*ThreadTracker // Track active discussion threads
 	// TODO: should align with dspy agent interface
-	githubTools GitHubInterface // Add this field
-	stopper     *Stopper
-	metrics     MetricsCollector
-	workers     *AgentConfig
-	indexStatus *IndexingStatus // Track background indexing progress
+	githubTools       GitHubInterface // Add this field
+	stopper           *Stopper
+	metrics           MetricsCollector
+	workers           *AgentConfig
+	indexStatus       *IndexingStatus // Track background indexing progress
 }
 
 type ThreadTracker struct {
@@ -426,15 +428,27 @@ func NewPRReviewAgent(ctx context.Context, githubTool GitHubInterface, dbPath st
 
 	logger.Debug(ctx, "Successfully created orchestrator")
 	
+	// Initialize declarative workflow if Phase 2 features are enabled
+	var declarativeChain *DeclarativeReviewChain
+	if shouldUseDeclarativeWorkflows() {
+		logger.Info(ctx, "🏗️ Initializing Phase 2.3 Declarative Workflow Builder")
+		logger.Info(ctx, "📋 Declarative workflow features: retry logic, parallel validation, conditional refinement")
+		declarativeChain = NewDeclarativeReviewChain(ctx)
+		logger.Info(ctx, "✅ Phase 2.3 Declarative Workflow initialized successfully")
+	} else {
+		logger.Debug(ctx, "⚪ Declarative workflows disabled - using legacy orchestrator")
+	}
+
 	agent := &PRReviewAgent{
-		orchestrator: orchestrator,
-		memory:       memory,
-		rag:          store,
-		githubTools:  githubTool,
-		stopper:      stopper,
-		metrics:      metrics,
-		workers:      config,
-		indexStatus:  indexStatus,
+		orchestrator:     orchestrator,
+		declarativeChain: declarativeChain,
+		memory:          memory,
+		rag:             store,
+		githubTools:     githubTool,
+		stopper:         stopper,
+		metrics:         metrics,
+		workers:         config,
+		indexStatus:     indexStatus,
 	}
 	
 	// Start background indexing AFTER agent creation
@@ -444,6 +458,171 @@ func NewPRReviewAgent(ctx context.Context, githubTool GitHubInterface, dbPath st
 	return agent, nil
 }
 
+// shouldUseDeclarativeWorkflows determines if declarative workflows should be used
+func shouldUseDeclarativeWorkflows() bool {
+	features := GetGlobalFeatures()
+	if features == nil {
+		return false
+	}
+	return features.DeclarativeWorkflows
+}
+
+// processChunkWithDeclarativeWorkflow processes a chunk using the declarative workflow system
+func (a *PRReviewAgent) processChunkWithDeclarativeWorkflow(ctx context.Context, chunkContext map[string]interface{}) (*agents.OrchestratorResult, error) {
+	if a.declarativeChain == nil {
+		return nil, fmt.Errorf("declarative workflow not initialized")
+	}
+	
+	logger := logging.GetLogger()
+	filePath, _ := chunkContext["file_path"].(string)
+	chunkNum, _ := chunkContext["chunk_number"].(int)
+	
+	logger.Info(ctx, "🏗️ Processing chunk %d with Phase 2.3 Declarative Workflow: %s", chunkNum, filePath)
+	
+	// Create task for declarative workflow with enhanced metadata
+	task := agents.Task{
+		ID:       fmt.Sprintf("declarative_chunk_%s_%d_%d", filePath, chunkNum, time.Now().UnixNano()),
+		Type:     "code_review",
+		Metadata: chunkContext,
+		Priority: 1,
+	}
+	
+	// Add declarative workflow context
+	declarativeContext := make(map[string]interface{})
+	for k, v := range chunkContext {
+		declarativeContext[k] = v
+	}
+	declarativeContext["declarative_processing"] = true
+	declarativeContext["workflow_version"] = "2.3"
+	declarativeContext["processing_mode"] = "declarative_chunk_review"
+	
+	// Process with declarative workflow
+	startTime := time.Now()
+	result, err := a.declarativeChain.Process(ctx, task, declarativeContext)
+	processingDuration := time.Since(startTime)
+	
+	if err != nil {
+		logger.Error(ctx, "❌ Phase 2.3 Declarative workflow failed for chunk %d of %s after %v: %v", 
+			chunkNum, filePath, processingDuration, err)
+		return nil, err
+	}
+	
+	logger.Info(ctx, "✅ Phase 2.3 Declarative workflow completed chunk %d of %s in %v", 
+		chunkNum, filePath, processingDuration)
+	
+	// Track declarative workflow usage
+	if globalMetrics != nil {
+		globalMetrics.TrackFeatureUsage(GetGlobalFeatures(), "declarative_workflows")
+	}
+	
+	// Convert declarative result to orchestrator result format
+	return a.convertDeclarativeToOrchestratorResult(result), nil
+}
+
+// generateResponseWithDeclarativeWorkflow generates a response using declarative workflow
+func (a *PRReviewAgent) generateResponseWithDeclarativeWorkflow(ctx context.Context, responseContext map[string]interface{}) (*agents.OrchestratorResult, error) {
+	if a.declarativeChain == nil {
+		return nil, fmt.Errorf("declarative workflow not initialized")
+	}
+	
+	logger := logging.GetLogger()
+	filePath, _ := responseContext["file_path"].(string)
+	
+	// Extract line number (might be stored as float64)
+	var lineNum int
+	if ln, ok := responseContext["line_number"].(float64); ok {
+		lineNum = int(ln)
+	} else if ln, ok := responseContext["line_number"].(int); ok {
+		lineNum = ln
+	}
+	
+	logger.Info(ctx, "🏗️ Generating response with Phase 2.3 Declarative Workflow: %s:%d", filePath, lineNum)
+	
+	// Create task for response generation with properly mapped context
+	// Map responseContext fields to the expected task metadata format
+	taskMetadata := map[string]interface{}{
+		"file_content": responseContext["file_content"],
+		"changes":      "", // Response generation doesn't need changes
+		"file_path":    responseContext["file_path"],
+		"original_comment": responseContext["original_comment"],
+		"thread_context":   responseContext["thread_context"],
+		"line_number":      responseContext["line_number"],
+		"thread_id":        responseContext["thread_id"],
+		"category":         responseContext["category"],
+		"processor_type":   responseContext["processor_type"],
+		"task_type":        responseContext["task_type"],
+	}
+	
+	task := agents.Task{
+		ID:       fmt.Sprintf("declarative_response_%s_%d_%d", filePath, lineNum, time.Now().UnixNano()),
+		Type:     "comment_response",
+		Metadata: taskMetadata,
+		Priority: 1,
+	}
+	
+	// Add declarative workflow context for response generation
+	declarativeContext := make(map[string]interface{})
+	for k, v := range responseContext {
+		declarativeContext[k] = v
+	}
+	declarativeContext["declarative_processing"] = true
+	declarativeContext["workflow_version"] = "2.3"
+	declarativeContext["processing_mode"] = "declarative_response_generation"
+	declarativeContext["response_type"] = "comment_reply"
+	
+	// Process with declarative workflow
+	startTime := time.Now()
+	result, err := a.declarativeChain.Process(ctx, task, declarativeContext)
+	processingDuration := time.Since(startTime)
+	
+	if err != nil {
+		logger.Error(ctx, "❌ Phase 2.3 Declarative response generation failed for %s:%d after %v: %v", 
+			filePath, lineNum, processingDuration, err)
+		return nil, err
+	}
+	
+	logger.Info(ctx, "✅ Phase 2.3 Declarative response generation completed for %s:%d in %v", 
+		filePath, lineNum, processingDuration)
+	
+	// Track declarative workflow usage for response generation
+	if globalMetrics != nil {
+		globalMetrics.TrackFeatureUsage(GetGlobalFeatures(), "declarative_workflows")
+	}
+	
+	// Convert declarative result to orchestrator result format
+	return a.convertDeclarativeToOrchestratorResult(result), nil
+}
+
+// convertDeclarativeToOrchestratorResult converts declarative workflow result to orchestrator format
+func (a *PRReviewAgent) convertDeclarativeToOrchestratorResult(result interface{}) *agents.OrchestratorResult {
+	if resultMap, ok := result.(map[string]interface{}); ok {
+		return &agents.OrchestratorResult{
+			CompletedTasks: map[string]interface{}{
+				"declarative_review": resultMap,
+			},
+			FailedTasks: make(map[string]error),
+			Analysis:    "Declarative workflow processing completed",
+			Metadata: map[string]interface{}{
+				"declarative_processing": true,
+				"processing_type":        resultMap["processing_type"],
+				"workflow_version":       resultMap["workflow_version"],
+			},
+		}
+	}
+	
+	// Fallback for unexpected result types
+	return &agents.OrchestratorResult{
+		CompletedTasks: map[string]interface{}{
+			"declarative_review": result,
+		},
+		FailedTasks: make(map[string]error),
+		Analysis:    "Declarative workflow processing completed",
+		Metadata: map[string]interface{}{
+			"declarative_processing": true,
+		},
+	}
+}
+
 func (a *PRReviewAgent) startBackgroundIndexing(ctx context.Context, githubTool GitHubInterface, store RAGStore, dbPath string, workers int) {
 	logger := logging.GetLogger()
 	
@@ -451,25 +630,25 @@ func (a *PRReviewAgent) startBackgroundIndexing(ctx context.Context, githubTool 
 	a.indexStatus.isIndexing = true
 	a.indexStatus.mu.Unlock()
 	
-	logger.Info(ctx, "🔄 Starting background repository indexing...")
-	
+	// Silent background indexing - no console output
 	indexer := NewRepoIndexer(githubTool, store, workers)
 	
-	// For now, use the existing IndexRepository method
-	// TODO: Enhance indexer with progress reporting
-	err := indexer.IndexRepository(ctx, "", dbPath)
+	// Use background indexing mode (no console/spinners)
+	err := indexer.IndexRepositoryBackground(ctx, "", dbPath)
 	
 	a.indexStatus.mu.Lock()
 	defer a.indexStatus.mu.Unlock()
 	
 	if err != nil {
 		a.indexStatus.lastError = err
-		logger.Error(ctx, "❌ Background indexing failed: %v", err)
+		// Only log errors to debug level to avoid console spam
+		logger.Debug(ctx, "Background indexing failed: %v", err)
 	} else {
 		a.indexStatus.isComplete = true
 		a.indexStatus.progress = 1.0
 		a.indexStatus.hasBasicIndex = true
-		logger.Info(ctx, "✅ Background indexing completed successfully")
+		// Only log completion to debug level to avoid console spam
+		logger.Debug(ctx, "Background indexing completed successfully")
 	}
 	
 	a.indexStatus.isIndexing = false
@@ -509,6 +688,10 @@ func (a *PRReviewAgent) Close() error {
 
 // ReviewPR reviews a complete pull request.
 func (a *PRReviewAgent) ReviewPR(ctx context.Context, prNumber int, tasks []PRReviewTask, console ConsoleInterface) ([]PRReviewComment, error) {
+	logger := logging.GetLogger()
+	reviewStart := time.Now()
+	logger.Info(ctx, "🎬 Starting PR #%d review for %d files", prNumber, len(tasks))
+	
 	if a.activeThreads == nil {
 		a.activeThreads = make(map[int64]*ThreadTracker)
 	}
@@ -590,10 +773,13 @@ func (a *PRReviewAgent) ReviewPR(ctx context.Context, prNumber int, tasks []PRRe
 		} else {
 			console.Println("⋮ No existing review found, performing initial review")
 		}
+		initialReviewStart := time.Now()
 		comments, err := a.performInitialReview(ctx, tasks, console)
 		if err != nil {
 			return nil, fmt.Errorf("initial review failed: %w", err)
 		}
+		initialReviewDuration := time.Since(initialReviewStart)
+		logger.Info(ctx, "🎯 Initial review completed in %v", initialReviewDuration)
 		// Track new threads from initial review
 		for _, comment := range comments {
 			if comment.ThreadID != nil {
@@ -622,6 +808,10 @@ func (a *PRReviewAgent) ReviewPR(ctx context.Context, prNumber int, tasks []PRRe
 		}
 	}
 	cancel()
+	
+	totalReviewDuration := time.Since(reviewStart)
+	logger.Info(ctx, "🏁 PR #%d review completed in %v | Generated %d comments for %d files", 
+		prNumber, totalReviewDuration, len(allComments), len(tasks))
 
 	return allComments, nil
 }
@@ -652,23 +842,50 @@ func (a *PRReviewAgent) Stop(ctx context.Context) {
 }
 
 func (a *PRReviewAgent) performInitialReview(ctx context.Context, tasks []PRReviewTask, console ConsoleInterface) ([]PRReviewComment, error) {
+	logger := logging.GetLogger()
+	totalStart := time.Now()
+	
 	// Phase 1: Pattern Matching - Keep this sequential as it's file-level analysis
+	phase1Start := time.Now()
+	logger.Info(ctx, "🔍 Phase 1: Starting pattern analysis for %d files", len(tasks))
 	repoPatterns, guidelineMatches, err := a.analyzePatterns(ctx, tasks, console)
 	if err != nil {
 		return nil, fmt.Errorf("failed to analyze patterns: %w", err)
 	}
+	phase1Duration := time.Since(phase1Start)
+	logger.Info(ctx, "✅ Phase 1 completed in %v (avg: %v/file)", phase1Duration, phase1Duration/time.Duration(len(tasks)))
 
 	// Phase 2: Create chunks for all files
+	phase2Start := time.Now()
+	logger.Info(ctx, "🔧 Phase 2: Starting chunk preparation")
 	_, processedTasks, err := a.prepareChunks(ctx, tasks, console)
 	if err != nil {
 		return nil, fmt.Errorf("failed to prepare chunks: %w", err)
 	}
+	phase2Duration := time.Since(phase2Start)
+	logger.Info(ctx, "✅ Phase 2 completed in %v", phase2Duration)
 
 	// Phase 3: Parallel chunk processing
+	phase3Start := time.Now()
+	totalChunks := 0
+	for _, task := range processedTasks {
+		totalChunks += len(task.Chunks)
+	}
+	logger.Info(ctx, "⚡ Phase 3: Starting parallel processing of %d chunks across %d files", totalChunks, len(processedTasks))
 	comments, err := a.processChunksParallel(ctx, processedTasks, repoPatterns, guidelineMatches, console)
 	if err != nil {
 		return nil, fmt.Errorf("failed to process chunks: %w", err)
 	}
+	phase3Duration := time.Since(phase3Start)
+	totalDuration := time.Since(totalStart)
+	
+	logger.Info(ctx, "✅ Phase 3 completed in %v (avg: %v/chunk)", phase3Duration, phase3Duration/time.Duration(totalChunks))
+	logger.Info(ctx, "🎉 Total review completed in %v | Phase 1: %v (%.1f%%) | Phase 2: %v (%.1f%%) | Phase 3: %v (%.1f%%) | Generated %d comments", 
+		totalDuration,
+		phase1Duration, float64(phase1Duration)/float64(totalDuration)*100,
+		phase2Duration, float64(phase2Duration)/float64(totalDuration)*100,
+		phase3Duration, float64(phase3Duration)/float64(totalDuration)*100,
+		len(comments))
 
 	return comments, nil
 }
@@ -710,7 +927,12 @@ func (a *PRReviewAgent) analyzePatterns(ctx context.Context, tasks []PRReviewTas
 				console.Spinner().Suffix = fmt.Sprintf(" (chunk %d/%d) of %s", i+1, len(chunks), task.FilePath)
 				//fileEmbedding, err := llm.CreateEmbedding(ctx, chunk)
 
-				fileEmbedding, err := llm.CreateEmbedding(ctx, chunk, core.WithModel("gemini-embedding-exp-03-07"))
+				// Use configurable embedding model
+				embeddingModel := os.Getenv("MAESTRO_EMBEDDING_MODEL")
+				if embeddingModel == "" {
+					embeddingModel = "text-embedding-004" // Default to Gemini
+				}
+				fileEmbedding, err := llm.CreateEmbedding(ctx, chunk, core.WithModel(embeddingModel))
 
 				if err != nil {
 					return fmt.Errorf("failed to create file embedding: %w", err)
@@ -767,7 +989,9 @@ func (a *PRReviewAgent) prepareChunks(ctx context.Context, tasks []PRReviewTask,
 
 	for i := range processedTasks {
 		task := &processedTasks[i]
-		config, err := NewChunkConfig()
+		config, err := NewChunkConfig(
+			WithGenerateDescriptions(false), // Disable expensive LLM calls for chunk descriptions in live reviews
+		)
 		if err != nil {
 			return nil, nil, fmt.Errorf("failed to create chunk config: %w", err)
 		}
@@ -798,9 +1022,639 @@ func (a *PRReviewAgent) Config() *AgentConfig {
 	return a.workers
 }
 
-// processChunksParallel handles parallel chunk processing.
-func (a *PRReviewAgent) processChunksParallel(ctx context.Context, tasks []PRReviewTask, repoPatterns []*Content, guidelineMatches []*Content, console ConsoleInterface) ([]PRReviewComment, error) {
+// processChunkWithEnhancements processes a chunk with enhanced DSPy-Go features if enabled
+func (a *PRReviewAgent) processChunkWithEnhancements(ctx context.Context, workData interface{}, chunkContext map[string]interface{}) (*agents.OrchestratorResult, error) {
+	// Check if enhanced features are enabled
+	if globalFeatures != nil && globalFeatures.IsEnhancedProcessingEnabled() {
+		logger := logging.GetLogger()
+		logger.Info(ctx, "🚀 Processing with enhanced DSPy-Go features (Phase %d)", globalFeatures.GetPhaseLevel())
+		
+		// Use enhanced processing
+		return a.processChunkEnhanced(ctx, workData, chunkContext)
+	}
+	
+	// Try declarative workflow first, then fall back to orchestrator
+	if a.declarativeChain != nil && shouldUseDeclarativeWorkflows() {
+		logger := logging.GetLogger()
+		filePath, _ := chunkContext["file_path"].(string)
+		logger.Debug(ctx, "🏗️ Using declarative workflow for chunk processing: %s", filePath)
+		
+		result, err := a.processChunkWithDeclarativeWorkflow(ctx, chunkContext)
+		if err == nil {
+			return result, nil
+		}
+		
+		logger.Warn(ctx, "⚠️ Declarative workflow failed, falling back to orchestrator: %v", err)
+	}
+	
+	// Fall back to original processing  
+	filePath, _ := chunkContext["file_path"].(string)
+	return a.orchestrator.Process(ctx,
+		fmt.Sprintf("Review chunk of %s", filePath),
+		chunkContext)
+}
+
+// processChunkEnhanced implements enhanced chunk processing with advanced DSPy-Go capabilities
+func (a *PRReviewAgent) processChunkEnhanced(ctx context.Context, workData interface{}, chunkContext map[string]interface{}) (*agents.OrchestratorResult, error) {
 	logger := logging.GetLogger()
+	enhancedStart := time.Now()
+	
+	// Extract file information from context
+	filePath, _ := chunkContext["file_path"].(string)
+	chunk, _ := chunkContext["chunk"].(string)
+	chunkNum, _ := chunkContext["chunk_number"].(int)
+	
+	logger.Debug(ctx, "🚀 Enhanced processing: Starting chunk %d of %s", chunkNum, filePath)
+	
+	// Create enhanced processor registry
+	registryStart := time.Now()
+	registry := NewEnhancedProcessorRegistry(a.Metrics(ctx), logger)
+	registryDuration := time.Since(registryStart)
+	logger.Debug(ctx, "📋 Enhanced processing: Registry created in %v", registryDuration)
+	
+	// Create a synthetic task for the enhanced processor
+	task := agents.Task{
+		ID:   fmt.Sprintf("enhanced_chunk_%s", filePath),
+		Type: "code_review",
+		Metadata: map[string]interface{}{
+			"file_content": chunk,
+			"changes":      "", // We'll extract this if available
+			"file_path":    filePath,
+		},
+		Priority: 1,
+	}
+	
+	// Process with enhanced capabilities
+	processStart := time.Now()
+	logger.Debug(ctx, "⚡ Enhanced processing: Starting code review processing")
+	result, err := registry.ProcessCodeReview(ctx, task, chunkContext)
+	processDuration := time.Since(processStart)
+	totalEnhancedDuration := time.Since(enhancedStart)
+	
+	if err != nil {
+		logger.Warn(ctx, "❌ Enhanced processing failed for %s after %v (registry: %v, process: %v), falling back to original: %v", 
+			filePath, totalEnhancedDuration, registryDuration, processDuration, err)
+		
+		// Try declarative workflow as fallback, then orchestrator
+		if a.declarativeChain != nil && shouldUseDeclarativeWorkflows() {
+			logger.Debug(ctx, "🏗️ Enhanced processing failed, trying declarative workflow for %s", filePath)
+			
+			result, err := a.processChunkWithDeclarativeWorkflow(ctx, chunkContext)
+			if err == nil {
+				return result, nil
+			}
+			
+			logger.Warn(ctx, "⚠️ Declarative workflow also failed, falling back to orchestrator: %v", err)
+		}
+		
+		// Fall back to original orchestrator
+		return a.orchestrator.Process(ctx,
+			fmt.Sprintf("Review chunk of %s", filePath),
+			chunkContext)
+	}
+	
+	logger.Debug(ctx, "✅ Enhanced processing: Completed chunk %d of %s in %v (registry: %v, process: %v)", 
+		chunkNum, filePath, totalEnhancedDuration, registryDuration, processDuration)
+	
+	// Convert enhanced result to orchestration result format
+	return a.convertEnhancedToOrchestrationResult(result), nil
+}
+
+// convertEnhancedToOrchestrationResult converts enhanced processor result to orchestration result
+func (a *PRReviewAgent) convertEnhancedToOrchestrationResult(result interface{}) *agents.OrchestratorResult {
+	// Convert enhanced result to the format expected by the existing system
+	resultMap, ok := result.(map[string]interface{})
+	if !ok {
+		// Create a basic result structure
+		resultMap = map[string]interface{}{
+			"comments":        []PRReviewComment{},
+			"processing_type": "enhanced_fallback",
+		}
+	}
+	
+	// Wrap in orchestrator result format
+	return &agents.OrchestratorResult{
+		CompletedTasks: map[string]interface{}{
+			"code_review": resultMap,
+		},
+		FailedTasks: make(map[string]error),
+		Analysis:    "Enhanced DSPy-Go processing completed",
+		Metadata: map[string]interface{}{
+			"enhanced_processing": true,
+			"processing_type":     resultMap["processing_type"],
+		},
+	}
+}
+
+// processChunksParallel handles parallel chunk processing with intelligent optimization.
+func (a *PRReviewAgent) processChunksParallel(ctx context.Context, tasks []PRReviewTask, repoPatterns []*Content, guidelineMatches []*Content, console ConsoleInterface) ([]PRReviewComment, error) {
+	// Check if Phase 2.2 Intelligent Parallel Processing is available
+	if a.shouldUseIntelligentProcessing() {
+		return a.processChunksIntelligent(ctx, tasks, repoPatterns, guidelineMatches, console)
+	}
+	
+	// Fall back to manual parallel processing
+	return a.processChunksManual(ctx, tasks, repoPatterns, guidelineMatches, console)
+}
+
+// shouldUseIntelligentProcessing determines if intelligent processing should be used
+func (a *PRReviewAgent) shouldUseIntelligentProcessing() bool {
+	features := GetGlobalFeatures()
+	if features == nil {
+		return false
+	}
+	
+	// Use intelligent processing if Phase 2 features are enabled
+	return features.IntelligentParallelProcessing || 
+		   features.AdaptiveResourceManagement || 
+		   features.LoadBalancing
+}
+
+// processChunksIntelligent uses intelligent coordination with existing chunk processing logic
+func (a *PRReviewAgent) processChunksIntelligent(ctx context.Context, tasks []PRReviewTask, repoPatterns []*Content, guidelineMatches []*Content, console ConsoleInterface) ([]PRReviewComment, error) {
+	logger := logging.GetLogger()
+	logger.Info(ctx, "🚀 Starting Phase 2.2 Intelligent Parallel Processing for %d files", len(tasks))
+	
+	phase2Start := time.Now()
+	
+	// Calculate total chunks from existing optimized chunks
+	totalChunks := 0
+	for _, task := range tasks {
+		totalChunks += len(task.Chunks)
+	}
+	logger.Info(ctx, "📊 Using existing optimized chunks: %d chunks across %d files", totalChunks, len(tasks))
+	
+	// Create intelligent coordination with adaptive concurrency
+	maxConcurrency := a.Config().ReviewWorkers
+	if maxConcurrency < 1 {
+		maxConcurrency = 1
+	}
+	
+	// Apply intelligent concurrency adjustment based on system resources
+	adaptiveConcurrency := a.calculateAdaptiveConcurrency(ctx, totalChunks, maxConcurrency)
+	logger.Info(ctx, "⚡ Using adaptive concurrency: %d workers (base: %d)", adaptiveConcurrency, maxConcurrency)
+	
+	// Create intelligent resource monitor
+	resourceMonitor := a.createResourceMonitor(ctx)
+	defer resourceMonitor.Stop()
+	
+	// Process chunks with intelligent coordination but existing logic
+	allComments, err := a.processChunksWithIntelligentCoordination(ctx, tasks, repoPatterns, guidelineMatches, console, adaptiveConcurrency, resourceMonitor)
+	if err != nil {
+		logger.Error(ctx, "❌ Intelligent coordination failed after %v: %v", time.Since(phase2Start), err)
+		logger.Info(ctx, "🔄 Falling back to manual parallel processing")
+		return a.processChunksManual(ctx, tasks, repoPatterns, guidelineMatches, console)
+	}
+	
+	phase2Duration := time.Since(phase2Start)
+	logger.Info(ctx, "✅ Phase 2.2 Intelligent Parallel Processing completed in %v", phase2Duration)
+	
+	// Track Phase 2.2 metrics
+	if globalMetrics != nil {
+		globalMetrics.TrackFeatureUsage(GetGlobalFeatures(), "intelligent_parallel_processing")
+	}
+	
+	logger.Info(ctx, "🎯 Intelligent processing generated %d comments across %d files", len(allComments), len(tasks))
+	return allComments, nil
+}
+
+// calculateAdaptiveConcurrency determines optimal concurrency based on system resources and workload
+func (a *PRReviewAgent) calculateAdaptiveConcurrency(ctx context.Context, totalChunks, baseConcurrency int) int {
+	logger := logging.GetLogger()
+	
+	// Get current system resources
+	var memStats runtime.MemStats
+	runtime.ReadMemStats(&memStats)
+	
+	currentMemoryMB := int64(memStats.Alloc / 1024 / 1024)
+	numCPU := runtime.NumCPU()
+	currentGoroutines := runtime.NumGoroutine()
+	
+	logger.Debug(ctx, "📊 System resources: Memory=%dMB, CPUs=%d, Goroutines=%d", 
+		currentMemoryMB, numCPU, currentGoroutines)
+	
+	// Start with base concurrency
+	adaptiveConcurrency := baseConcurrency
+	
+	// Adjust based on workload size
+	if totalChunks > 200 {
+		// Large workload - increase concurrency
+		adaptiveConcurrency = int(float64(baseConcurrency) * 1.5)
+	} else if totalChunks < 50 {
+		// Small workload - reduce concurrency to avoid overhead
+		adaptiveConcurrency = int(float64(baseConcurrency) * 0.7)
+	}
+	
+	// Cap based on system resources
+	maxByMemory := int(4096 / 100) // Assume 100MB per worker max
+	maxByCPU := numCPU * 3         // 3x CPU cores
+	maxByGoroutines := 100 - currentGoroutines // Leave room for other goroutines
+	
+	systemMax := maxByMemory
+	if maxByCPU < systemMax {
+		systemMax = maxByCPU
+	}
+	if maxByGoroutines > 0 && maxByGoroutines < systemMax {
+		systemMax = maxByGoroutines
+	}
+	
+	if adaptiveConcurrency > systemMax {
+		adaptiveConcurrency = systemMax
+	}
+	
+	// Ensure minimum of 1
+	if adaptiveConcurrency < 1 {
+		adaptiveConcurrency = 1
+	}
+	
+	logger.Debug(ctx, "⚡ Adaptive concurrency calculation: base=%d, workload_adjusted=%d, system_max=%d, final=%d", 
+		baseConcurrency, adaptiveConcurrency, systemMax, adaptiveConcurrency)
+	
+	return adaptiveConcurrency
+}
+
+// createResourceMonitor creates a lightweight resource monitor for intelligent processing
+func (a *PRReviewAgent) createResourceMonitor(ctx context.Context) *SimpleResourceMonitor {
+	return &SimpleResourceMonitor{
+		ctx:    ctx,
+		stopCh: make(chan struct{}),
+		logger: logging.GetLogger(),
+	}
+}
+
+// SimpleResourceMonitor provides basic resource monitoring
+type SimpleResourceMonitor struct {
+	ctx    context.Context
+	stopCh chan struct{}
+	logger *logging.Logger
+}
+
+func (rm *SimpleResourceMonitor) Stop() {
+	close(rm.stopCh)
+}
+
+// processChunksWithIntelligentCoordination processes chunks using intelligent coordination with existing logic
+func (a *PRReviewAgent) processChunksWithIntelligentCoordination(ctx context.Context, tasks []PRReviewTask, repoPatterns []*Content, guidelineMatches []*Content, console ConsoleInterface, concurrency int, resourceMonitor *SimpleResourceMonitor) ([]PRReviewComment, error) {
+	logger := logging.GetLogger()
+	logger.Info(ctx, "🎯 Starting intelligent coordination with %d workers", concurrency)
+
+	var allComments []PRReviewComment
+	var mu sync.Mutex // For thread-safe comment aggregation
+
+	// Use the same work structure as manual processing
+	type chunkWork struct {
+		task     *PRReviewTask
+		chunk    ReviewChunk
+		chunkIdx int
+		taskIdx  int
+	}
+
+	// Create channels for work distribution and results
+	workChan := make(chan chunkWork, concurrency*2) // Buffered channel for better performance
+	resultChan := make(chan []PRReviewComment, concurrency*2)
+	errorChan := make(chan error, concurrency)
+
+	// Calculate total chunks for progress tracking
+	totalChunks := 0
+	for _, task := range tasks {
+		totalChunks += len(task.Chunks)
+	}
+	processedChunks := atomic.NewInt32(0)
+	
+	// Create cancellable context
+	workCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	// Start intelligent worker pool with adaptive features
+	var wg sync.WaitGroup
+	for i := 0; i < concurrency; i++ {
+		wg.Add(1)
+		go func(workerID int) {
+			defer wg.Done()
+			
+			// Worker-specific metrics
+			workerStartTime := time.Now()
+			workerProcessedCount := 0
+			
+			for work := range workChan {
+				select {
+				case <-workCtx.Done():
+					return
+				default:
+					chunkStart := time.Now()
+					
+					// Use the SAME chunk context as manual processing
+					chunkContext := map[string]interface{}{
+						"file_path": work.task.FilePath,
+						"chunk":     escapeFileContent(ctx, work.chunk.content),
+						"context": map[string]string{
+							"leading":  work.chunk.leadingcontext,
+							"trailing": work.chunk.trailingcontext,
+						},
+						"changes":      work.chunk.changes,
+						"chunk_start":  work.chunk.startline,
+						"chunk_end":    work.chunk.endline,
+						"chunk_number": work.chunkIdx + 1,
+						"total_chunks": len(work.task.Chunks),
+						"line_range": map[string]int{
+							"start": work.chunk.startline,
+							"end":   work.chunk.endline,
+						},
+						"review_type":   "chunk_review",
+						"repo_patterns": repoPatterns,
+						"guidelines":    guidelineMatches,
+						// Add intelligent processing metadata
+						"intelligent_processing": true,
+						"worker_id":              workerID,
+						"adaptive_concurrency":   concurrency,
+					}
+
+					logger.Debug(ctx, "🤖 Intelligent Worker %d: Processing chunk %d/%d of %s (lines %d-%d)", 
+						workerID, work.chunkIdx+1, len(work.task.Chunks), work.task.FilePath, work.chunk.startline, work.chunk.endline)
+
+					// Use the SAME chunk processing logic as manual mode
+					result, err := a.processChunkWithEnhancements(ctx, work, chunkContext)
+					chunkDuration := time.Since(chunkStart)
+					workerProcessedCount++
+					
+					if err != nil {
+						logger.Error(ctx, "❌ Intelligent Worker %d: Failed to process chunk %d of %s after %v: %v", 
+							workerID, work.chunkIdx+1, work.task.FilePath, chunkDuration, err)
+						errorChan <- fmt.Errorf("intelligent worker %d failed to process chunk %d of %s: %w",
+							workerID, work.chunkIdx+1, work.task.FilePath, err)
+						continue
+					}
+					
+					logger.Debug(ctx, "✅ Intelligent Worker %d: Completed chunk %d of %s in %v", 
+						workerID, work.chunkIdx+1, work.task.FilePath, chunkDuration)
+
+					// Use the SAME result processing logic as manual mode
+					for _, taskResult := range result.CompletedTasks {
+						taskMap, ok := taskResult.(map[string]interface{})
+						if !ok {
+							continue
+						}
+
+						taskType, _ := taskMap["task_type"].(string)
+						processingType, hasProcessingType := taskMap["processing_type"].(string)
+
+						switch taskType {
+						case "review_chain":
+							logger.Debug(ctx, "Processed review chain result: %v", taskMap)
+							continue
+
+						case "code_review", "comment_response":
+							comments, err := extractComments(ctx, taskResult, work.task.FilePath, a.Metrics(ctx))
+							if err != nil {
+								logger.Error(ctx, "Failed to extract comments from task %s: %v", taskType, err)
+								continue
+							}
+
+							if len(comments) == 0 {
+								console.NoIssuesFound(work.task.FilePath, work.chunkIdx+1, len(work.task.Chunks))
+							} else {
+								console.ShowComments(comments, a.Metrics(ctx))
+							}
+							resultChan <- comments
+							
+						case "":
+							if hasProcessingType {
+								logger.Debug(ctx, "Processing enhanced result with type: %s", processingType)
+								comments, err := extractComments(ctx, taskResult, work.task.FilePath, a.Metrics(ctx))
+								if err != nil {
+									logger.Debug(ctx, "Enhanced result extraction failed: %v", err)
+									continue
+								}
+								if len(comments) == 0 {
+									console.NoIssuesFound(work.task.FilePath, work.chunkIdx+1, len(work.task.Chunks))
+								} else {
+									console.ShowComments(comments, a.Metrics(ctx))
+								}
+								resultChan <- comments
+							} else {
+								logger.Debug(ctx, "Empty task result: %+v", taskMap)
+							}
+							
+						default:
+							logger.Debug(ctx, "Unknown task type '%s', checking for enhanced result with processing_type: %s", taskType, processingType)
+							comments, err := extractComments(ctx, taskResult, work.task.FilePath, a.Metrics(ctx))
+							if err == nil && len(comments) > 0 {
+								console.ShowComments(comments, a.Metrics(ctx))
+								resultChan <- comments
+							}
+						}
+					}
+				}
+			}
+			
+			// Log worker completion stats
+			workerDuration := time.Since(workerStartTime)
+			avgPerChunk := workerDuration
+			if workerProcessedCount > 0 {
+				avgPerChunk = time.Duration(int64(workerDuration) / int64(workerProcessedCount))
+			}
+			logger.Debug(ctx, "🏁 Intelligent Worker %d completed: processed %d chunks in %v (avg: %v/chunk)", 
+				workerID, workerProcessedCount, workerDuration, avgPerChunk)
+		}(i)
+	}
+
+	// Distribute work (same as manual processing)
+	go func() {
+		defer close(workChan)
+		for taskIdx, task := range tasks {
+			for chunkIdx, chunk := range task.Chunks {
+				select {
+				case <-workCtx.Done():
+					return
+				default:
+					workChan <- chunkWork{
+						task:     &task,
+						chunk:    chunk,
+						chunkIdx: chunkIdx,
+						taskIdx:  taskIdx,
+					}
+				}
+			}
+		}
+	}()
+
+	// Collect results (same as manual processing)
+	go func() {
+		wg.Wait()
+		logger.Debug(ctx, "All intelligent workers completed, closing channels")
+		close(resultChan)
+		close(errorChan)
+	}()
+
+	// Process results and errors (same as manual processing)
+	var errors []error
+	var errorsMu sync.Mutex
+	for {
+		select {
+		case err, ok := <-errorChan:
+			if !ok {
+				errorChan = nil
+			} else {
+				errorsMu.Lock()
+				errors = append(errors, err)
+				errorsMu.Unlock()
+			}
+		case comments, ok := <-resultChan:
+			if !ok {
+				resultChan = nil
+			} else {
+				mu.Lock()
+				allComments = append(allComments, comments...)
+				processed := processedChunks.Add(1)
+				percentage := float64(processed) / float64(totalChunks) * 100
+				console.UpdateSpinnerText(fmt.Sprintf("Intelligent processing... %.1f%% (%d/%d)", percentage, processed, totalChunks))
+				mu.Unlock()
+			}
+
+		case <-workCtx.Done():
+			logger.Debug(ctx, "Intelligent coordination context cancelled")
+			return nil, workCtx.Err()
+		}
+
+		if errorChan == nil && resultChan == nil {
+			logger.Debug(ctx, "Both intelligent coordination channels closed: %d comments, %d errors",
+				len(allComments), len(errors))
+			break
+		}
+	}
+
+	if len(errors) > 0 {
+		logger.Error(ctx, "Intelligent coordination failed with %d errors: %v", len(errors), errors)
+		return nil, fmt.Errorf("encountered errors during intelligent parallel processing: %v", errors)
+	}
+
+	logger.Info(ctx, "🎯 Intelligent coordination completed: %d comments generated", len(allComments))
+	return allComments, nil
+}
+
+// extractCommentsFromIntelligentResults extracts comments from intelligent processing results
+func (a *PRReviewAgent) extractCommentsFromIntelligentResults(ctx context.Context, results map[string]interface{}, console ConsoleInterface) []PRReviewComment {
+	logger := logging.GetLogger()
+	var allComments []PRReviewComment
+	
+	// Process results from intelligent file processor
+	if embeddings, exists := results["embeddings"]; exists {
+		if embeddingMap, ok := embeddings.(map[string]interface{}); ok {
+			for filePath, embedding := range embeddingMap {
+				if embeddingData, ok := embedding.(map[string]interface{}); ok {
+					// Extract review information from embedding metadata
+					if reviewData, exists := embeddingData["review_data"]; exists {
+						comments := a.convertIntelligentResultToComments(ctx, filePath, reviewData)
+						if len(comments) > 0 {
+							console.ShowComments(comments, a.Metrics(ctx))
+							allComments = append(allComments, comments...)
+						} else {
+							console.NoIssuesFound(filePath, 1, 1)
+						}
+					}
+				}
+			}
+		}
+	}
+	
+	// Process patterns results
+	if patterns, exists := results["patterns"]; exists {
+		if patternMap, ok := patterns.(map[string]interface{}); ok {
+			for filePath, pattern := range patternMap {
+				if patternData, ok := pattern.(map[string]interface{}); ok {
+					comments := a.convertPatternResultToComments(ctx, filePath, patternData)
+					if len(comments) > 0 {
+						allComments = append(allComments, comments...)
+					}
+				}
+			}
+		}
+	}
+	
+	logger.Debug(ctx, "Extracted %d comments from intelligent processing results", len(allComments))
+	return allComments
+}
+
+// convertIntelligentResultToComments converts intelligent processing results to review comments
+func (a *PRReviewAgent) convertIntelligentResultToComments(ctx context.Context, filePath string, reviewData interface{}) []PRReviewComment {
+	var comments []PRReviewComment
+	
+	if reviewMap, ok := reviewData.(map[string]interface{}); ok {
+		if issues, exists := reviewMap["issues"]; exists {
+			if issueList, ok := issues.([]interface{}); ok {
+				for _, issue := range issueList {
+					if issueMap, ok := issue.(map[string]interface{}); ok {
+						comment := PRReviewComment{
+							FilePath:   filePath,
+							Content:    getStringValue(issueMap, "description", "Code issue detected"),
+							Category:   getStringValue(issueMap, "category", "general"),
+							Severity:   getStringValue(issueMap, "severity", "medium"),
+							Suggestion: getStringValue(issueMap, "suggestion", ""),
+							LineNumber: getIntValue(issueMap, "line_number", 1),
+						}
+						comments = append(comments, comment)
+					}
+				}
+			}
+		}
+	}
+	
+	return comments
+}
+
+// convertPatternResultToComments converts pattern analysis results to review comments
+func (a *PRReviewAgent) convertPatternResultToComments(ctx context.Context, filePath string, patternData interface{}) []PRReviewComment {
+	var comments []PRReviewComment
+	
+	if patternMap, ok := patternData.(map[string]interface{}); ok {
+		if violations, exists := patternMap["violations"]; exists {
+			if violationList, ok := violations.([]interface{}); ok {
+				for _, violation := range violationList {
+					if violationMap, ok := violation.(map[string]interface{}); ok {
+						comment := PRReviewComment{
+							FilePath:   filePath,
+							Content:    getStringValue(violationMap, "message", "Pattern violation detected"),
+							Category:   "pattern",
+							Severity:   getStringValue(violationMap, "severity", "low"),
+							Suggestion: getStringValue(violationMap, "fix", ""),
+							LineNumber: getIntValue(violationMap, "line", 1),
+						}
+						comments = append(comments, comment)
+					}
+				}
+			}
+		}
+	}
+	
+	return comments
+}
+
+// Helper functions for safe type conversion
+func getStringValue(m map[string]interface{}, key, defaultValue string) string {
+	if val, exists := m[key]; exists {
+		if str, ok := val.(string); ok {
+			return str
+		}
+	}
+	return defaultValue
+}
+
+func getIntValue(m map[string]interface{}, key string, defaultValue int) int {
+	if val, exists := m[key]; exists {
+		if num, ok := val.(float64); ok {
+			return int(num)
+		}
+		if num, ok := val.(int); ok {
+			return num
+		}
+	}
+	return defaultValue
+}
+
+// processChunksManual handles manual parallel chunk processing (legacy fallback).
+func (a *PRReviewAgent) processChunksManual(ctx context.Context, tasks []PRReviewTask, repoPatterns []*Content, guidelineMatches []*Content, console ConsoleInterface) ([]PRReviewComment, error) {
+	logger := logging.GetLogger()
+	logger.Info(ctx, "🔄 Using manual parallel processing for %d files", len(tasks))
 
 	var allComments []PRReviewComment
 	var mu sync.Mutex // For thread-safe comment aggregation
@@ -842,6 +1696,7 @@ func (a *PRReviewAgent) processChunksParallel(ctx context.Context, tasks []PRRev
 				case <-ctx.Done():
 					return
 				default:
+					chunkStart := time.Now()
 					chunkContext := map[string]interface{}{
 						"file_path": work.task.FilePath,
 						"chunk":     escapeFileContent(ctx, work.chunk.content),
@@ -863,15 +1718,23 @@ func (a *PRReviewAgent) processChunksParallel(ctx context.Context, tasks []PRRev
 						"guidelines":    guidelineMatches,
 					}
 
-					// Process the chunk
-					result, err := a.orchestrator.Process(ctx,
-						fmt.Sprintf("Review chunk %d of %s", work.chunkIdx+1, work.task.FilePath),
-						chunkContext)
+					logger.Debug(ctx, "🔄 Worker %d: Processing chunk %d/%d of %s (lines %d-%d)", 
+						workerID, work.chunkIdx+1, len(work.task.Chunks), work.task.FilePath, work.chunk.startline, work.chunk.endline)
+
+					// Process the chunk with enhanced features if available
+					result, err := a.processChunkWithEnhancements(ctx, work, chunkContext)
+					chunkDuration := time.Since(chunkStart)
+					
 					if err != nil {
+						logger.Error(ctx, "❌ Worker %d: Failed to process chunk %d of %s after %v: %v", 
+							workerID, work.chunkIdx+1, work.task.FilePath, chunkDuration, err)
 						errorChan <- fmt.Errorf("failed to process chunk %d of %s: %w",
 							work.chunkIdx+1, work.task.FilePath, err)
 						continue
 					}
+					
+					logger.Debug(ctx, "✅ Worker %d: Completed chunk %d of %s in %v", 
+						workerID, work.chunkIdx+1, work.task.FilePath, chunkDuration)
 
 					// Process results
 					for _, taskResult := range result.CompletedTasks {
@@ -883,6 +1746,9 @@ func (a *PRReviewAgent) processChunksParallel(ctx context.Context, tasks []PRRev
 						}
 
 						taskType, _ := taskMap["task_type"].(string)
+						
+						// Check for enhanced processing results
+						processingType, hasProcessingType := taskMap["processing_type"].(string)
 
 						switch taskType {
 						case "review_chain":
@@ -906,8 +1772,32 @@ func (a *PRReviewAgent) processChunksParallel(ctx context.Context, tasks []PRRev
 								console.ShowComments(comments, a.Metrics(ctx))
 							}
 							resultChan <- comments
+						case "":
+							// Handle enhanced processing results without task_type
+							if hasProcessingType {
+								logger.Debug(ctx, "Processing enhanced result with type: %s", processingType)
+								comments, err := extractComments(ctx, taskResult, work.task.FilePath, a.Metrics(ctx))
+								if err != nil {
+									logger.Debug(ctx, "Enhanced result extraction failed: %v", err)
+									continue
+								}
+								if len(comments) == 0 {
+									console.NoIssuesFound(work.task.FilePath, work.chunkIdx+1, len(work.task.Chunks))
+								} else {
+									console.ShowComments(comments, a.Metrics(ctx))
+								}
+								resultChan <- comments
+							} else {
+								logger.Debug(ctx, "Empty task result: %+v", taskMap)
+							}
 						default:
-							logger.Warn(ctx, "Unknown task type: %s", taskType)
+							logger.Debug(ctx, "Unknown task type '%s', checking for enhanced result with processing_type: %s", taskType, processingType)
+							// Try to extract comments anyway for enhanced results
+							comments, err := extractComments(ctx, taskResult, work.task.FilePath, a.Metrics(ctx))
+							if err == nil && len(comments) > 0 {
+								console.ShowComments(comments, a.Metrics(ctx))
+								resultChan <- comments
+							}
 						}
 
 					}
@@ -999,7 +1889,7 @@ func (a *PRReviewAgent) processChunksParallel(ctx context.Context, tasks []PRRev
 		return nil, fmt.Errorf("encountered errors during parallel processing: %v", errors)
 	}
 
-	logger.Debug(ctx, "Chunk processing completed with %d comments", len(allComments))
+	logger.Debug(ctx, "Manual chunk processing completed with %d comments", len(allComments))
 	return allComments, nil
 }
 
@@ -1030,7 +1920,16 @@ func (a *PRReviewAgent) processExistingComments(ctx context.Context, prNumber in
 	if err != nil {
 		return fmt.Errorf("failed to fetch existing comments: %w", err)
 	}
-	logger.Debug(ctx, "Found %d existing comments", len(comments))
+	
+	// Also fetch pull request reviews
+	reviews, _, err := githubTools.ListPullRequestReviews(ctx,
+		repoInfo.Owner, repoInfo.Name, prNumber,
+		&github.ListOptions{})
+	if err != nil {
+		logger.Warn(ctx, "Failed to fetch existing reviews: %v", err)
+	}
+	
+	logger.Debug(ctx, "Found %d existing comments and %d reviews", len(comments), len(reviews))
 	commentsByID := make(map[int64]*github.PullRequestComment)
 	threadHistory := make(map[int64][]PRReviewComment)
 	// Debug log to see who made the comments
@@ -1055,6 +1954,12 @@ func (a *PRReviewAgent) processExistingComments(ctx context.Context, prNumber in
 		a.metrics.TrackHistoricalComment(ctx, reviewComment)
 	}
 	for _, comment := range comments {
+		// Skip bot comments (CodeCov, CI bots, etc.)
+		if isBotComment(comment) {
+			logger.Debug(ctx, "Skipping bot comment from %s", comment.GetUser().GetLogin())
+			continue
+		}
+		
 		commentID := comment.GetID()
 		parentID := comment.GetInReplyTo()
 
@@ -1089,6 +1994,23 @@ func (a *PRReviewAgent) processExistingComments(ctx context.Context, prNumber in
 			}
 		}
 	}
+	
+	// Process GitHub Reviews (like the one from gemini-code-assist)
+	for _, review := range reviews {
+		// Skip bot reviews using the same logic
+		if isBotReview(review) {
+			logger.Debug(ctx, "Skipping bot review from %s", review.GetUser().GetLogin())
+			continue
+		}
+		
+		// Only process reviews with a body (general review comments)
+		if review.GetBody() != "" && review.GetState() != "PENDING" {
+			logger.Debug(ctx, "Processing review from %s: %s", 
+				review.GetUser().GetLogin(), review.GetState())
+			a.processReview(ctx, review, prNumber, console)
+		}
+	}
+	
 	return nil
 }
 
@@ -1102,6 +2024,84 @@ func (a *PRReviewAgent) monitorAndRespond(ctx context.Context, prNumber int, con
 		}
 	})
 
+}
+
+// processReview handles the processing of a GitHub review (like from gemini-code-assist)
+func (a *PRReviewAgent) processReview(ctx context.Context, review *github.PullRequestReview, prNumber int, console ConsoleInterface) {
+	logger := logging.GetLogger()
+	
+	// Extract review identifiers  
+	reviewID := review.GetID()
+	reviewBody := review.GetBody()
+	reviewState := review.GetState()
+	reviewUser := review.GetUser().GetLogin()
+	
+	logger.Info(ctx, "Processing review ID: %d from %s, state: %s", reviewID, reviewUser, reviewState)
+	
+	// Create a pseudo-comment to represent this review
+	reviewComment := PRReviewComment{
+		FilePath:    "", // General review comment, not tied to specific file
+		LineNumber:  1,  // Use line 1 for general review comments
+		Content:     reviewBody,
+		Severity:    "info",
+		Category:    "review",
+		Author:      reviewUser,
+		ThreadID:    &reviewID,
+		Timestamp:   review.GetSubmittedAt().Time,
+		MessageType: "review",
+	}
+	
+	// Create a thread tracker for this review
+	threadStatus := &ThreadTracker{
+		LastComment:         &reviewComment,
+		LastUpdate:          review.GetSubmittedAt().Time,
+		Status:              ThreadOpen,
+		ParentCommentID:     0,
+		ThreadID:            reviewID,
+		InReplyToMyComment:  false,
+		ConversationHistory: []PRReviewComment{reviewComment},
+		OriginalAuthor:      reviewUser,
+		FileContent:         "", // No specific file content for general reviews
+	}
+	
+	// Store in active threads
+	a.activeThreads[reviewID] = threadStatus
+	
+	logger.Info(ctx, "Created thread tracker for review ID: %d", reviewID)
+	
+	// Generate a response to this review
+	console.Printf("Generating response to review %d from %s\n", reviewID, reviewUser)
+	response, err := a.generateResponse(ctx, threadStatus, console)
+	if err != nil {
+		console.FileError("", fmt.Errorf("failed to generate response to review: %w", err))
+		return
+	}
+	
+	// Post the response as a new review
+	githubTools := a.GetGitHubTools()
+	repoInfo := githubTools.GetRepositoryInfo(ctx)
+	
+	reviewRequest := &github.PullRequestReviewRequest{
+		Body:  github.Ptr(response.Content),
+		Event: github.Ptr("COMMENT"), // Submit as a comment review
+	}
+	
+	_, _, err = githubTools.CreatePullRequestReviewComment(ctx, 
+		repoInfo.Owner, repoInfo.Name, 
+		extractPRNumberFromContext(ctx), reviewRequest)
+	if err != nil {
+		console.FileError("", fmt.Errorf("failed to post review response: %v", err))
+		return
+	}
+	
+	logger.Info(ctx, "Successfully posted response to review %d", reviewID)
+}
+
+// Helper function to extract PR number from context (you'll need to pass this through)
+func extractPRNumberFromContext(ctx context.Context) int {
+	// This is a placeholder - you'll need to pass the PR number through context
+	// or modify the function signature to include it
+	return 0 // TODO: Fix this
 }
 
 // processComment handles the processing of a single PR comment.
@@ -1154,8 +2154,21 @@ func (a *PRReviewAgent) processComment(ctx context.Context, comment *github.Pull
 		"category":         threadStatus.LastComment.Category,
 	}
 
-	// Generate response using the orchestrator
-	result, err := a.orchestrator.Process(ctx, "Generate response", responseContext)
+	// Generate response using declarative workflow or orchestrator
+	var result *agents.OrchestratorResult
+	var err error
+	
+	if a.declarativeChain != nil && shouldUseDeclarativeWorkflows() {
+		logger.Info(ctx, "🏗️ Using declarative workflow for response generation")
+		result, err = a.generateResponseWithDeclarativeWorkflow(ctx, responseContext)
+		if err != nil {
+			logger.Warn(ctx, "⚠️ Declarative workflow failed, falling back to orchestrator: %v", err)
+			result, err = a.orchestrator.Process(ctx, "Generate response", responseContext)
+		}
+	} else {
+		result, err = a.orchestrator.Process(ctx, "Generate response", responseContext)
+	}
+	
 	if err != nil {
 		console.FileError(threadStatus.LastComment.FilePath,
 			fmt.Errorf("failed to generate response: %w", err))
@@ -1233,7 +2246,18 @@ func (a *PRReviewAgent) generateResponse(ctx context.Context, thread *ThreadTrac
 	var result *agents.OrchestratorResult
 	err := console.WithSpinner(ctx, msg, func() error {
 		var processErr error
-		result, processErr = a.orchestrator.Process(ctx, "Generate response", responseContext)
+		
+		if a.declarativeChain != nil && shouldUseDeclarativeWorkflows() {
+			logger.Info(ctx, "🏗️ Using declarative workflow for response generation in generateResponse()")
+			result, processErr = a.generateResponseWithDeclarativeWorkflow(ctx, responseContext)
+			if processErr != nil {
+				logger.Warn(ctx, "⚠️ Declarative workflow failed, falling back to orchestrator: %v", processErr)
+				result, processErr = a.orchestrator.Process(ctx, "Generate response", responseContext)
+			}
+		} else {
+			result, processErr = a.orchestrator.Process(ctx, "Generate response", responseContext)
+		}
+		
 		return processErr
 	})
 
@@ -1367,6 +2391,86 @@ func convertGitHubComment(comment *github.PullRequestComment) PRReviewComment {
 		Timestamp:  comment.GetCreatedAt().Time,
 		Author:     comment.GetUser().GetLogin(),
 	}
+}
+
+// isBotComment checks if a comment is from a known bot
+func isBotComment(comment *github.PullRequestComment) bool {
+	if comment == nil || comment.GetUser() == nil {
+		return false
+	}
+	
+	userLogin := strings.ToLower(comment.GetUser().GetLogin())
+	
+	// Known bot patterns
+	botPatterns := []string{
+		"codecov",
+		"dependabot",
+		"renovate",
+		"github-actions",
+		"greenkeeper",
+		"snyk-bot",
+		"sonarcloud",
+		"sonarqube",
+		"codeclimate",
+		"coveralls",
+		"circleci",
+		"travis-ci",
+		"jenkins",
+		"azure-pipelines",
+	}
+	
+	for _, pattern := range botPatterns {
+		if strings.Contains(userLogin, pattern) {
+			return true
+		}
+	}
+	
+	// Check if user type is "Bot"
+	if comment.GetUser().GetType() == "Bot" {
+		return true
+	}
+	
+	return false
+}
+
+// isBotReview checks if a review is from a known bot (similar to isBotComment)
+func isBotReview(review *github.PullRequestReview) bool {
+	if review == nil || review.GetUser() == nil {
+		return false
+	}
+	
+	userLogin := strings.ToLower(review.GetUser().GetLogin())
+	
+	// Use same bot patterns as comments
+	botPatterns := []string{
+		"codecov",
+		"dependabot", 
+		"renovate",
+		"github-actions",
+		"greenkeeper",
+		"snyk-bot",
+		"sonarcloud",
+		"sonarqube",
+		"codeclimate",
+		"coveralls",
+		"circleci",
+		"travis-ci",
+		"jenkins",
+		"azure-pipelines",
+	}
+	
+	for _, pattern := range botPatterns {
+		if strings.Contains(userLogin, pattern) {
+			return true
+		}
+	}
+	
+	// Check if user type is "Bot"
+	if review.GetUser().GetType() == "Bot" {
+		return true
+	}
+	
+	return false
 }
 
 func isReplyToMyComment(comment *github.PullRequestComment,
