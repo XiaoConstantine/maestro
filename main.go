@@ -253,7 +253,7 @@ You can also set this via environment variables:
 }
 
 // Create an interactive command system using Cobra.
-func createInteractiveCommands(cfg *config, console ConsoleInterface) *cobra.Command {
+func createInteractiveCommands(cfg *config, console ConsoleInterface, agent ReviewAgent) *cobra.Command {
 	ctx := context.Background()
 
 	// Create a root command for interactive mode
@@ -265,7 +265,7 @@ func createInteractiveCommands(cfg *config, console ConsoleInterface) *cobra.Com
 			if len(args) > 0 {
 				// Treat as a question if not a command
 				question := strings.Join(args, " ")
-				if err := initializeAndAskQuestions(ctx, cfg, console, question); err != nil {
+				if err := askQuestionWithAgent(ctx, cfg, console, agent, question); err != nil {
 					console.Printf("Error: %v\n", err)
 				}
 			}
@@ -329,7 +329,7 @@ func createInteractiveCommands(cfg *config, console ConsoleInterface) *cobra.Com
 		Args:  cobra.MinimumNArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
 			question := strings.Join(args, " ")
-			if err := initializeAndAskQuestions(ctx, cfg, console, question); err != nil {
+			if err := askQuestionWithAgent(ctx, cfg, console, agent, question); err != nil {
 				console.Printf("Error: %v\n", err)
 			}
 		},
@@ -337,6 +337,49 @@ func createInteractiveCommands(cfg *config, console ConsoleInterface) *cobra.Com
 	rootCmd.AddCommand(askCmd)
 
 	return rootCmd
+}
+
+// askQuestionWithAgent uses the pre-initialized agent to ask questions
+func askQuestionWithAgent(ctx context.Context, cfg *config, console ConsoleInterface, agent ReviewAgent, question string) error {
+	qaProcessor, _ := agent.Orchestrator(ctx).GetProcessor("repo_qa")
+
+	result, err := qaProcessor.Process(ctx, agents.Task{
+		ID: "qa",
+		Metadata: map[string]interface{}{
+			"question": question,
+		},
+	}, nil)
+
+	if err != nil {
+		return fmt.Errorf("error processing question: %w", err)
+	}
+	
+	if response, ok := result.(*QAResponse); ok {
+		// Print a separator line for visual clarity
+		console.Println("\n" + strings.Repeat("─", 80))
+
+		// Format and print the main answer using structured sections
+		formattedAnswer := formatStructuredAnswer(response.Answer)
+		console.Println(formattedAnswer)
+
+		// Print source files in a tree-like structure if available
+		if len(response.SourceFiles) > 0 {
+			if console.Color() {
+				console.Println("\n" + aurora.Blue("Source Files:").String())
+			} else {
+				console.Println("\nSource Files:")
+			}
+
+			// Group files by directory for better organization
+			filesByDir := groupFilesByDirectory(response.SourceFiles)
+			printFileTree(console, filesByDir)
+		}
+
+		// Print final separator
+		console.Println("\n" + strings.Repeat("─", 80) + "\n")
+	}
+	
+	return nil
 }
 
 func printMaestroBanner() {
@@ -406,6 +449,9 @@ func printMaestroBanner() {
 func main() {
 	cfg := &config{}
 	sqlite_vec.Auto()
+	
+	// Initialize enhanced DSPy-Go features
+	InitializeEnhancedFeatures()
 	// Create root command
 	rootCmd := &cobra.Command{
 		Use:   "Maestro",
@@ -437,7 +483,8 @@ Available slash commands in conversation mode:
 			}
 
 			interactive, _ := cmd.Flags().GetBool("interactive")
-			if interactive || cmd.Flags().NFlag() == 0 {
+			// Force interactive mode if no PR number is specified, even when other flags are set
+			if interactive || cmd.Flags().NFlag() == 0 || cfg.prNumber == 0 {
 				return runInteractiveMode(cfg)
 			}
 			return runCLI(cfg)
@@ -542,6 +589,13 @@ func runCLIWithoutBanner(cfg *config) error {
 		panic(err)
 	}
 
+	// Validate PR number
+	if cfg.prNumber <= 0 {
+		logger.Error(ctx, "Invalid PR number: %d. Please specify a valid PR number with --pr flag", cfg.prNumber)
+		fmt.Fprintf(os.Stderr, "Error: Invalid PR number %d. Please specify a valid PR number with --pr flag\n", cfg.prNumber)
+		os.Exit(1)
+	}
+
 	logger.Debug(ctx, "Fetching changes for PR #%d", cfg.prNumber)
 	// Before calling changes, err := githubTools.GetPullRequestChanges()
 	if console.Color() {
@@ -553,7 +607,11 @@ func runCLIWithoutBanner(cfg *config) error {
 	} else {
 		console.Printf("↳ Fetching changes for PR #%d\n", cfg.prNumber)
 	}
-	pr, _, _ := githubTools.Client().PullRequests.Get(ctx, cfg.owner, cfg.repo, cfg.prNumber)
+	pr, _, err := githubTools.Client().PullRequests.Get(ctx, cfg.owner, cfg.repo, cfg.prNumber)
+	if err != nil {
+		logger.Error(ctx, "Failed to get PR #%d: %v", cfg.prNumber, err)
+		os.Exit(1)
+	}
 	console.StartReview(pr)
 
 	changes, err := githubTools.GetPullRequestChanges(ctx, cfg.prNumber)
@@ -831,11 +889,27 @@ Examples:
 		return fmt.Errorf("failed to configure embedding LLM: %w", err)
 	}
 
-	console.Println("Type /help to see available commands, or ask a question directly.")
-	console.Printf("🔄 Repository indexing will start in the background for enhanced code analysis.\n")
+	// Initialize GitHub tools and agent immediately for background indexing
+	githubTools := NewGitHubTools(cfg.githubToken, cfg.owner, cfg.repo)
+	dbPath, err := CreateStoragePath(ctx, cfg.owner, cfg.repo)
+	if err != nil {
+		return fmt.Errorf("failed to create storage path: %w", err)
+	}
+	
+	// Create agent immediately to start background indexing
+	agent, err := NewPRReviewAgent(ctx, githubTools, dbPath, &AgentConfig{
+		IndexWorkers:  cfg.indexWorkers,
+		ReviewWorkers: cfg.reviewWorkers,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to initialize agent: %w", err)
+	}
 
-	// Create interactive commands
-	interactiveCmd := createInteractiveCommands(cfg, console)
+	console.Println("Type /help to see available commands, or ask a question directly.")
+	console.Printf("🔄 Repository indexing started in the background for enhanced code analysis.\n")
+
+	// Create interactive commands with the pre-initialized agent
+	interactiveCmd := createInteractiveCommands(cfg, console, agent)
 	ctrlCPressed := false
 	ctrlCTimer := time.NewTimer(0)
 	ctrlCTimer.Stop() // Initialize in stopped state
@@ -919,7 +993,7 @@ Examples:
 				}
 			} else if input != "" {
 				// Treat as a question if not empty
-				if err := initializeAndAskQuestions(ctx, cfg, console, input); err != nil {
+				if err := askQuestionWithAgent(ctx, cfg, console, agent, input); err != nil {
 					console.Printf("Error: %v\n", err)
 				}
 			}
