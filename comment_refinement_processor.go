@@ -12,14 +12,14 @@ import (
 	"github.com/XiaoConstantine/dspy-go/pkg/modules"
 )
 
-// CommentRefinementProcessor implements iterative comment improvement using Refine module
+// CommentRefinementProcessor implements iterative comment improvement using Refine module.
 type CommentRefinementProcessor struct {
 	refiner *modules.Refine
 	metrics MetricsCollector
 	logger  *logging.Logger
 }
 
-// RefinedComment represents a refined review comment
+// RefinedComment represents a refined review comment.
 type RefinedComment struct {
 	FilePath        string  `json:"file_path"`
 	LineNumber      int     `json:"line_number"`
@@ -33,7 +33,7 @@ type RefinedComment struct {
 	Suggestion      string  `json:"suggestion"`
 }
 
-// CommentRefinementResult represents the output of comment refinement
+// CommentRefinementResult represents the output of comment refinement.
 type CommentRefinementResult struct {
 	RefinedComments []RefinedComment `json:"refined_comments"`
 	ProcessingTime  float64          `json:"processing_time_ms"`
@@ -41,7 +41,7 @@ type CommentRefinementResult struct {
 	TotalAttempts   int              `json:"total_refine_attempts"`
 }
 
-// CommentQualityMetrics tracks comment quality aspects
+// CommentQualityMetrics tracks comment quality aspects.
 type CommentQualityMetrics struct {
 	Clarity         float64 `json:"clarity"`
 	Actionability   float64 `json:"actionability"`
@@ -51,7 +51,7 @@ type CommentQualityMetrics struct {
 	Overall         float64 `json:"overall"`
 }
 
-// NewCommentRefinementProcessor creates a new comment refinement processor
+// NewCommentRefinementProcessor creates a new comment refinement processor.
 func NewCommentRefinementProcessor(metrics MetricsCollector, logger *logging.Logger) *CommentRefinementProcessor {
 	// Create comment generation and refinement signature
 	commentSig := core.NewSignature(
@@ -154,7 +154,7 @@ OUTPUT:
 	}
 }
 
-// Process performs comment refinement on validated issues
+// Process performs comment refinement on validated issues.
 func (p *CommentRefinementProcessor) Process(ctx context.Context, task agents.Task, taskContext map[string]interface{}) (interface{}, error) {
 	// Check if comment refinement is enabled
 	if !isCommentRefinementEnabled() {
@@ -211,7 +211,7 @@ func (p *CommentRefinementProcessor) Process(ctx context.Context, task agents.Ta
 	return result, nil
 }
 
-// refineCommentForIssue refines a comment for a single issue
+// refineCommentForIssue refines a comment for a single issue.
 func (p *CommentRefinementProcessor) refineCommentForIssue(ctx context.Context, issue ReviewIssue, taskContext map[string]interface{}) (*RefinedComment, int, error) {
 	// Prepare inputs for refinement
 	inputs := map[string]interface{}{
@@ -236,7 +236,7 @@ func (p *CommentRefinementProcessor) refineCommentForIssue(ctx context.Context, 
 	return refined, attempts, nil
 }
 
-// parseRefinementResult parses the output from the refine module
+// parseRefinementResult parses the output from the refine module.
 func (p *CommentRefinementProcessor) parseRefinementResult(result map[string]interface{}, issue ReviewIssue) (*RefinedComment, int) {
 	// Extract refined comment
 	comment, _ := result["comment"].(string)
@@ -275,7 +275,7 @@ func (p *CommentRefinementProcessor) parseRefinementResult(result map[string]int
 	}, attempts
 }
 
-// parseQualityMetrics parses quality metrics from the result
+// parseQualityMetrics parses quality metrics from the result.
 func (p *CommentRefinementProcessor) parseQualityMetrics(metricsData interface{}) CommentQualityMetrics {
 	// Default metrics
 	metrics := CommentQualityMetrics{
@@ -307,7 +307,7 @@ func (p *CommentRefinementProcessor) parseQualityMetrics(metricsData interface{}
 	return metrics
 }
 
-// extractValidatedIssues extracts validated issues from task data
+// extractValidatedIssues extracts validated issues from task data.
 func (p *CommentRefinementProcessor) extractValidatedIssues(task agents.Task, taskContext map[string]interface{}) ([]ReviewIssue, error) {
 	var issues []ReviewIssue
 
@@ -337,7 +337,7 @@ func (p *CommentRefinementProcessor) extractValidatedIssues(task agents.Task, ta
 	return issues, nil
 }
 
-// generateBasicComment creates a fallback comment for an issue
+// generateBasicComment creates a fallback comment for an issue.
 func (p *CommentRefinementProcessor) generateBasicComment(issue ReviewIssue) RefinedComment {
 	comment := fmt.Sprintf("%s\n\n%s", issue.Description, issue.Suggestion)
 
@@ -355,7 +355,7 @@ func (p *CommentRefinementProcessor) generateBasicComment(issue ReviewIssue) Ref
 	}
 }
 
-// calculateAverageQuality calculates the average quality score
+// calculateAverageQuality calculates the average quality score.
 func (p *CommentRefinementProcessor) calculateAverageQuality(comments []RefinedComment) float64 {
 	if len(comments) == 0 {
 		return 0.0
@@ -369,7 +369,7 @@ func (p *CommentRefinementProcessor) calculateAverageQuality(comments []RefinedC
 	return total / float64(len(comments))
 }
 
-// fallbackToBasicComments provides fallback when refinement is disabled
+// fallbackToBasicComments provides fallback when refinement is disabled.
 func (p *CommentRefinementProcessor) fallbackToBasicComments(ctx context.Context, task agents.Task, taskContext map[string]interface{}) (interface{}, error) {
 	p.logger.Info(ctx, "Using basic comment generation fallback")
 
@@ -391,14 +391,9 @@ func (p *CommentRefinementProcessor) fallbackToBasicComments(ctx context.Context
 	}, nil
 }
 
-// trackRefinementMetrics records metrics for refinement processing
+// trackRefinementMetrics records metrics for refinement processing.
 func (p *CommentRefinementProcessor) trackRefinementMetrics(ctx context.Context, result *CommentRefinementResult) {
-	if p.metrics != nil {
-		// Basic metrics tracking - extend MetricsCollector interface as needed
-		// p.metrics.TrackProcessingTime(ctx, "comment_refinement", result.ProcessingTime)
-		// p.metrics.TrackCommentQuality(ctx, result.AverageQuality)
-		// p.metrics.TrackRefinementAttempts(ctx, result.TotalAttempts)
-	}
+	_ = p.metrics // Metrics tracking not yet implemented
 }
 
 // Helper functions for comment quality evaluation

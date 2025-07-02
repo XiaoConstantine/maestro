@@ -11,14 +11,14 @@ import (
 	"github.com/XiaoConstantine/dspy-go/pkg/modules"
 )
 
-// ConsensusValidationProcessor implements multi-chain comparison for robust validation
+// ConsensusValidationProcessor implements multi-chain comparison for robust validation.
 type ConsensusValidationProcessor struct {
 	validator *modules.MultiChainComparison
 	metrics   MetricsCollector
 	logger    *logging.Logger
 }
 
-// ConsensusValidationResult represents the output of consensus validation
+// ConsensusValidationResult represents the output of consensus validation.
 type ConsensusValidationResult struct {
 	ValidatedIssues   []ReviewIssue     `json:"validated_issues"`
 	RejectedIssues    []ReviewIssue     `json:"rejected_issues"`
@@ -28,7 +28,7 @@ type ConsensusValidationResult struct {
 	ValidatorResults  []ValidatorResult `json:"validator_results"`
 }
 
-// ValidatorResult represents the result from a single validator
+// ValidatorResult represents the result from a single validator.
 type ValidatorResult struct {
 	ValidatorType string  `json:"validator_type"`
 	Decision      string  `json:"decision"` // "accept", "reject", "uncertain"
@@ -36,7 +36,7 @@ type ValidatorResult struct {
 	Reasoning     string  `json:"reasoning"`
 }
 
-// IssueValidationInput represents input for validating a single issue
+// IssueValidationInput represents input for validating a single issue.
 type IssueValidationInput struct {
 	Issue       ReviewIssue `json:"issue"`
 	CodeContext string      `json:"code_context"`
@@ -44,7 +44,7 @@ type IssueValidationInput struct {
 	RepoContext string      `json:"repo_context"`
 }
 
-// NewConsensusValidationProcessor creates a new consensus validation processor
+// NewConsensusValidationProcessor creates a new consensus validation processor.
 func NewConsensusValidationProcessor(metrics MetricsCollector, logger *logging.Logger) *ConsensusValidationProcessor {
 	// Create multi-chain comparison signature for consensus validation
 	signature := core.NewSignature(
@@ -108,7 +108,7 @@ Be thorough but practical. Focus on filtering out false positives while preservi
 	}
 }
 
-// Process performs consensus validation on review issues
+// Process performs consensus validation on review issues.
 func (p *ConsensusValidationProcessor) Process(ctx context.Context, task agents.Task, taskContext map[string]interface{}) (interface{}, error) {
 	// Check if consensus validation is enabled
 	if !isConsensusValidationEnabled() {
@@ -182,7 +182,7 @@ func (p *ConsensusValidationProcessor) Process(ctx context.Context, task agents.
 	return result, nil
 }
 
-// validateSingleIssue performs consensus validation on a single issue
+// validateSingleIssue performs consensus validation on a single issue.
 func (p *ConsensusValidationProcessor) validateSingleIssue(ctx context.Context, input IssueValidationInput) (*SingleValidationResult, error) {
 	// Prepare inputs for multi-chain comparison
 	inputs := map[string]interface{}{
@@ -203,7 +203,7 @@ func (p *ConsensusValidationProcessor) validateSingleIssue(ctx context.Context, 
 	return p.parseValidationResult(result)
 }
 
-// SingleValidationResult represents the result of validating one issue
+// SingleValidationResult represents the result of validating one issue.
 type SingleValidationResult struct {
 	ConsensusDecision   string            `json:"consensus_decision"`
 	ConsensusConfidence float64           `json:"consensus_confidence"`
@@ -211,7 +211,7 @@ type SingleValidationResult struct {
 	ValidatorResults    []ValidatorResult `json:"validator_results"`
 }
 
-// parseValidationResult parses the output from the multi-chain validator
+// parseValidationResult parses the output from the multi-chain validator.
 func (p *ConsensusValidationProcessor) parseValidationResult(result map[string]interface{}) (*SingleValidationResult, error) {
 	// Extract consensus decision
 	decision, _ := result["consensus_decision"].(string)
@@ -241,7 +241,7 @@ func (p *ConsensusValidationProcessor) parseValidationResult(result map[string]i
 	}, nil
 }
 
-// parseValidatorPerspectives parses individual validator results from JSON
+// parseValidatorPerspectives parses individual validator results from JSON.
 func (p *ConsensusValidationProcessor) parseValidatorPerspectives(perspectivesData interface{}) []ValidatorResult {
 	var results []ValidatorResult
 
@@ -260,7 +260,7 @@ func (p *ConsensusValidationProcessor) parseValidatorPerspectives(perspectivesDa
 	}
 }
 
-// extractValidationInput extracts validation inputs from task and context
+// extractValidationInput extracts validation inputs from task and context.
 func (p *ConsensusValidationProcessor) extractValidationInput(task agents.Task, taskContext map[string]interface{}) ([]IssueValidationInput, error) {
 	// Extract issues from task metadata
 	var issues []ReviewIssue
@@ -304,7 +304,7 @@ func (p *ConsensusValidationProcessor) extractValidationInput(task agents.Task, 
 	return inputs, nil
 }
 
-// calculateOverallConsensusScore calculates the overall consensus quality
+// calculateOverallConsensusScore calculates the overall consensus quality.
 func (p *ConsensusValidationProcessor) calculateOverallConsensusScore(results []ValidatorResult) float64 {
 	if len(results) == 0 {
 		return 0.5
@@ -318,7 +318,7 @@ func (p *ConsensusValidationProcessor) calculateOverallConsensusScore(results []
 	return totalScore / float64(len(results))
 }
 
-// fallbackToSingleValidation provides fallback when consensus validation is disabled
+// fallbackToSingleValidation provides fallback when consensus validation is disabled.
 func (p *ConsensusValidationProcessor) fallbackToSingleValidation(ctx context.Context, task agents.Task, taskContext map[string]interface{}) (interface{}, error) {
 	p.logger.Info(ctx, "Using single validation fallback")
 
@@ -341,14 +341,9 @@ func (p *ConsensusValidationProcessor) fallbackToSingleValidation(ctx context.Co
 	}, nil
 }
 
-// trackValidationMetrics records metrics for validation processing
+// trackValidationMetrics records metrics for validation processing.
 func (p *ConsensusValidationProcessor) trackValidationMetrics(ctx context.Context, result *ConsensusValidationResult) {
-	if p.metrics != nil {
-		// Basic metrics tracking - extend MetricsCollector interface as needed
-		// p.metrics.TrackProcessingTime(ctx, "consensus_validation", result.ProcessingTime)
-		// p.metrics.TrackValidationResults(ctx, len(result.ValidatedIssues), len(result.RejectedIssues))
-		// p.metrics.TrackConsensusScore(ctx, result.ConsensusScore)
-	}
+	_ = p.metrics // Metrics tracking not yet implemented
 }
 
 // Helper functions

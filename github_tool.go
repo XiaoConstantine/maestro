@@ -235,7 +235,7 @@ func (g *GitHubTools) GetPullRequestChanges(ctx context.Context, prNumber int) (
 func (g *GitHubTools) CreateReviewComments(ctx context.Context, prNumber int, comments []PRReviewComment) error {
 	changes, err := g.GetPullRequestChanges(ctx, prNumber)
 	if err != nil {
-		return fmt.Errorf("Failed to get changes for: %d", prNumber)
+		return fmt.Errorf("failed to get changes for: %d", prNumber)
 	}
 	// Map file paths to their hunks for quick lookup
 	hunksByFile := make(map[string][]ChangeHunk)
@@ -952,12 +952,12 @@ func parseHunks(patch string, filePath string) ([]ChangeHunk, error) {
 	return hunks, nil
 }
 
-// ListPullRequestReviews retrieves all reviews for a pull request
+// ListPullRequestReviews retrieves all reviews for a pull request.
 func (g *GitHubTools) ListPullRequestReviews(ctx context.Context, owner, repo string, prNumber int, opts *github.ListOptions) ([]*github.PullRequestReview, *github.Response, error) {
 	return g.client.PullRequests.ListReviews(ctx, owner, repo, prNumber, opts)
 }
 
-// CreatePullRequestReviewComment creates a review comment on a pull request
+// CreatePullRequestReviewComment creates a review comment on a pull request.
 func (g *GitHubTools) CreatePullRequestReviewComment(ctx context.Context, owner, repo string, prNumber int, comment *github.PullRequestReviewRequest) (*github.PullRequestReview, *github.Response, error) {
 	return g.client.PullRequests.CreateReview(ctx, owner, repo, prNumber, comment)
 }

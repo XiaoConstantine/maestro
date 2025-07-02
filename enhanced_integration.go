@@ -9,7 +9,7 @@ import (
 	"github.com/XiaoConstantine/dspy-go/pkg/logging"
 )
 
-// EnhancedProcessorRegistry manages the enhanced processors
+// EnhancedProcessorRegistry manages the enhanced processors.
 type EnhancedProcessorRegistry struct {
 	enhancedReviewProcessor      *EnhancedCodeReviewProcessor
 	consensusValidationProcessor *ConsensusValidationProcessor
@@ -19,7 +19,7 @@ type EnhancedProcessorRegistry struct {
 	logger                       *logging.Logger
 }
 
-// NewEnhancedProcessorRegistry creates a new registry for enhanced processors
+// NewEnhancedProcessorRegistry creates a new registry for enhanced processors.
 func NewEnhancedProcessorRegistry(metrics MetricsCollector, logger *logging.Logger) *EnhancedProcessorRegistry {
 	features := GetGlobalFeatures()
 
@@ -33,7 +33,7 @@ func NewEnhancedProcessorRegistry(metrics MetricsCollector, logger *logging.Logg
 	}
 }
 
-// ProcessCodeReview processes a code review task using enhanced capabilities
+// ProcessCodeReview processes a code review task using enhanced capabilities.
 func (r *EnhancedProcessorRegistry) ProcessCodeReview(ctx context.Context, task agents.Task, taskContext map[string]interface{}) (interface{}, error) {
 	if !r.features.IsEnhancedProcessingEnabled() {
 		r.logger.Info(ctx, "Enhanced processing disabled, using legacy processor")
@@ -105,7 +105,7 @@ func (r *EnhancedProcessorRegistry) ProcessCodeReview(ctx context.Context, task 
 	return finalResult, nil
 }
 
-// createValidationTask creates a task for consensus validation
+// createValidationTask creates a task for consensus validation.
 func (r *EnhancedProcessorRegistry) createValidationTask(originalTask agents.Task, reviewResult interface{}) agents.Task {
 	validationTask := agents.Task{
 		ID:           originalTask.ID + "_validation",
@@ -130,7 +130,7 @@ func (r *EnhancedProcessorRegistry) createValidationTask(originalTask agents.Tas
 	return validationTask
 }
 
-// createRefinementTask creates a task for comment refinement
+// createRefinementTask creates a task for comment refinement.
 func (r *EnhancedProcessorRegistry) createRefinementTask(originalTask agents.Task, reviewResult interface{}) agents.Task {
 	refinementTask := agents.Task{
 		ID:           originalTask.ID + "_refinement",
@@ -155,7 +155,7 @@ func (r *EnhancedProcessorRegistry) createRefinementTask(originalTask agents.Tas
 	return refinementTask
 }
 
-// convertToFinalResult converts various result types to the expected format
+// convertToFinalResult converts various result types to the expected format.
 func (r *EnhancedProcessorRegistry) convertToFinalResult(result interface{}) interface{} {
 	switch res := result.(type) {
 	case *CommentRefinementResult:
@@ -233,7 +233,7 @@ func (r *EnhancedProcessorRegistry) convertToFinalResult(result interface{}) int
 	}
 }
 
-// fallbackToLegacyReview falls back to the original review processor
+// fallbackToLegacyReview falls back to the original review processor.
 func (r *EnhancedProcessorRegistry) fallbackToLegacyReview(ctx context.Context, task agents.Task, taskContext map[string]interface{}) (interface{}, error) {
 	// Using legacy review processor
 
@@ -248,7 +248,7 @@ func (r *EnhancedProcessorRegistry) fallbackToLegacyReview(ctx context.Context, 
 	return result, err
 }
 
-// trackProcessingMetrics tracks metrics for the enhanced processing
+// trackProcessingMetrics tracks metrics for the enhanced processing.
 func (r *EnhancedProcessorRegistry) trackProcessingMetrics(ctx context.Context, startTime time.Time, processingType string) {
 	if r.metrics != nil {
 		processingDuration := time.Since(startTime).Milliseconds()
@@ -258,13 +258,13 @@ func (r *EnhancedProcessorRegistry) trackProcessingMetrics(ctx context.Context, 
 	}
 }
 
-// EnhancedTaskProcessor wraps the existing task processing with enhanced capabilities
+// EnhancedTaskProcessor wraps the existing task processing with enhanced capabilities.
 type EnhancedTaskProcessor struct {
 	registry *EnhancedProcessorRegistry
 	logger   *logging.Logger
 }
 
-// NewEnhancedTaskProcessor creates a new enhanced task processor
+// NewEnhancedTaskProcessor creates a new enhanced task processor.
 func NewEnhancedTaskProcessor(metrics MetricsCollector, logger *logging.Logger) *EnhancedTaskProcessor {
 	return &EnhancedTaskProcessor{
 		registry: NewEnhancedProcessorRegistry(metrics, logger),
@@ -272,7 +272,7 @@ func NewEnhancedTaskProcessor(metrics MetricsCollector, logger *logging.Logger) 
 	}
 }
 
-// Process handles task processing with enhanced capabilities
+// Process handles task processing with enhanced capabilities.
 func (p *EnhancedTaskProcessor) Process(ctx context.Context, task agents.Task, taskContext map[string]interface{}) (interface{}, error) {
 	// Initialize enhanced features if not already done
 	if globalFeatures == nil {
@@ -280,9 +280,7 @@ func (p *EnhancedTaskProcessor) Process(ctx context.Context, task agents.Task, t
 	}
 
 	// Log feature status
-	if isDebugLoggingEnabled() {
-		// Processing task with enhanced features
-	}
+	_ = isDebugLoggingEnabled() // Debug logging check
 
 	// Try Phase 2 processing first if available
 	if IsPhase2Available() {
@@ -309,7 +307,7 @@ func (p *EnhancedTaskProcessor) Process(ctx context.Context, task agents.Task, t
 						speaker = "assistant"
 					}
 					content := fmt.Sprintf("Processing %s task", task.Type)
-					phase2.StoreConversationMessage(ctx, conversationID, speaker, content, UserMessage)
+					_ = phase2.StoreConversationMessage(ctx, conversationID, speaker, content, UserMessage)
 				}
 			}
 		}
@@ -343,7 +341,7 @@ func (p *EnhancedTaskProcessor) Process(ctx context.Context, task agents.Task, t
 	}
 }
 
-// fallbackToLegacy provides fallback to original processors
+// fallbackToLegacy provides fallback to original processors.
 func (p *EnhancedTaskProcessor) fallbackToLegacy(ctx context.Context, task agents.Task, taskContext map[string]interface{}, reason string) (interface{}, error) {
 	// Falling back to legacy processor
 
@@ -366,11 +364,11 @@ func (p *EnhancedTaskProcessor) fallbackToLegacy(ctx context.Context, task agent
 	}
 }
 
-// processWithPhase2Memory processes tasks with Phase 2 enhanced memory capabilities
+// processWithPhase2Memory processes tasks with Phase 2 enhanced memory capabilities.
 func (p *EnhancedTaskProcessor) processWithPhase2Memory(ctx context.Context, task agents.Task, taskContext map[string]interface{}) (interface{}, error) {
 	phase2 := GetGlobalPhase2Integration()
 	if phase2 == nil {
-		return nil, fmt.Errorf("Phase 2 integration not available")
+		return nil, fmt.Errorf("phase 2 integration not available")
 	}
 
 	// Build enhanced context using advanced memory
@@ -400,7 +398,7 @@ func (p *EnhancedTaskProcessor) processWithPhase2Memory(ctx context.Context, tas
 			speaker := "assistant"
 			content := fmt.Sprintf("Generated response for %s", task.Type)
 			if conversationID, exists := task.Metadata["conversation_id"].(string); exists {
-				phase2.StoreConversationMessage(ctx, conversationID, speaker, content, AssistantMessage)
+				_ = phase2.StoreConversationMessage(ctx, conversationID, speaker, content, AssistantMessage)
 			}
 		}
 
@@ -417,7 +415,7 @@ func (p *EnhancedTaskProcessor) processWithPhase2Memory(ctx context.Context, tas
 				if q, exists := task.Metadata["question"].(string); exists {
 					question = q
 				}
-				phase2.StoreConversationMessage(ctx, conversationID, "user", question, UserMessage)
+				_ = phase2.StoreConversationMessage(ctx, conversationID, "user", question, UserMessage)
 
 				answer := "Repository answer"
 				if resultMap, ok := result.(map[string]interface{}); ok {
@@ -425,7 +423,7 @@ func (p *EnhancedTaskProcessor) processWithPhase2Memory(ctx context.Context, tas
 						answer = ans
 					}
 				}
-				phase2.StoreConversationMessage(ctx, conversationID, "assistant", answer, AssistantMessage)
+				_ = phase2.StoreConversationMessage(ctx, conversationID, "assistant", answer, AssistantMessage)
 			}
 		}
 
@@ -451,17 +449,16 @@ type EnhancedFlexibleOrchestrator struct {
 
 // Integration Helper Functions
 
-// ReplaceTaskProcessor replaces the task processor in existing orchestrator
+// ReplaceTaskProcessor replaces the task processor in existing orchestrator.
 func ReplaceTaskProcessor(orchestrator interface{}, enhancedProcessor *EnhancedTaskProcessor) error {
 	// This would be implemented based on the actual orchestrator structure
 	// For now, return success to indicate the pattern
 	return nil
 }
 
-// WrapExistingProcessor wraps an existing processor with enhanced capabilities
+// WrapExistingProcessor wraps an existing processor with enhanced capabilities.
 func WrapExistingProcessor(existingProcessor interface{}, features *EnhancedFeatures) interface{} {
 	// This would wrap existing processors to add enhanced capabilities
 	// Implementation depends on the specific processor interface
 	return existingProcessor
 }
-

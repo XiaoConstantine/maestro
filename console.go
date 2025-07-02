@@ -186,7 +186,7 @@ func (c *Console) Confirm(opts PromptOptions) (bool, error) {
 		// Fallback to simple input for problematic terminals
 		fmt.Printf("%s (Y/n): ", opts.Message)
 		var input string
-		fmt.Scanln(&input)
+		_, _ = fmt.Scanln(&input)
 		return input == "" || strings.ToLower(input) == "y" || strings.ToLower(input) == "yes", nil
 	}
 
@@ -571,26 +571,26 @@ func (c *Console) collectFeedback(comment PRReviewComment, metric MetricsCollect
 	return nil
 }
 
-// CollectAllFeedback collects feedback for all comments at the end of the review
+// CollectAllFeedback collects feedback for all comments at the end of the review.
 func (c *Console) CollectAllFeedback(comments []PRReviewComment, metric MetricsCollector) error {
 	if len(comments) == 0 {
 		return nil
 	}
-	
+
 	// Check if feedback collection is disabled
 	if os.Getenv("MAESTRO_DISABLE_FEEDBACK") == "true" {
 		return nil
 	}
-	
+
 	c.PrintHeader("Feedback Collection")
 	c.Println("Please provide feedback on the review comments to help improve the system.")
 	c.Println()
-	
+
 	for i, comment := range comments {
 		// Show a brief summary of the comment
 		c.Printf("Comment %d/%d - %s:%d\n", i+1, len(comments), comment.FilePath, comment.LineNumber)
 		c.Printf("Category: %s | Severity: %s\n", comment.Category, comment.Severity)
-		
+
 		// Show first 100 chars of content
 		content := comment.Content
 		if len(content) > 100 {
@@ -598,7 +598,7 @@ func (c *Console) CollectAllFeedback(comments []PRReviewComment, metric MetricsC
 		}
 		c.Printf("Content: %s\n", content)
 		c.Println()
-		
+
 		// Collect feedback for this comment
 		if err := c.collectFeedback(comment, metric); err != nil {
 			c.logger.Warn(context.Background(), "Failed to collect feedback for comment %d: %v", i+1, err)
@@ -606,7 +606,7 @@ func (c *Console) CollectAllFeedback(comments []PRReviewComment, metric MetricsC
 		}
 		c.Println()
 	}
-	
+
 	c.Println("Thank you for your feedback!")
 	return nil
 }
