@@ -365,21 +365,25 @@ func (p2 *Phase2Integration) storeProcessingPattern(ctx context.Context, task ag
 
 // checkResourceConstraints checks if system resources allow for advanced processing
 func (p2 *Phase2Integration) checkResourceConstraints(ctx context.Context) error {
+	if p2.intelligentProcessor == nil {
+		return nil
+	}
+
 	var m runtime.MemStats
 	runtime.ReadMemStats(&m)
-	
-	// Check memory usage
-	memoryMB := m.Sys / 1024 / 1024
-	if memoryMB > 6144 { // 6GB warning threshold
-		return fmt.Errorf("memory usage too high: %d MB", memoryMB)
+
+	memoryMB := m.Alloc / 1024 / 1024
+	memoryWarningThreshold := p2.intelligentProcessor.config.ResourceLimits.MemoryWarning
+	if memoryMB > uint64(memoryWarningThreshold) {
+		return fmt.Errorf("memory usage high: %d MB (warning at %d MB)", memoryMB, memoryWarningThreshold)
 	}
-	
-	// Check goroutine count
+
 	goroutines := runtime.NumGoroutine()
-	if goroutines > 500 {
-		return fmt.Errorf("too many goroutines: %d", goroutines)
+	warningGoroutines := p2.intelligentProcessor.config.ResourceLimits.MaxGoroutines / 2
+	if goroutines > warningGoroutines {
+		return fmt.Errorf("high number of goroutines: %d (warning at %d)", goroutines, warningGoroutines)
 	}
-	
+
 	return nil
 }
 

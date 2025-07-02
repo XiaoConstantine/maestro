@@ -22,7 +22,7 @@ type EnhancedProcessorRegistry struct {
 // NewEnhancedProcessorRegistry creates a new registry for enhanced processors
 func NewEnhancedProcessorRegistry(metrics MetricsCollector, logger *logging.Logger) *EnhancedProcessorRegistry {
 	features := GetGlobalFeatures()
-	
+
 	return &EnhancedProcessorRegistry{
 		enhancedReviewProcessor:      NewEnhancedCodeReviewProcessor(metrics, logger),
 		consensusValidationProcessor: NewConsensusValidationProcessor(metrics, logger),
@@ -40,7 +40,7 @@ func (r *EnhancedProcessorRegistry) ProcessCodeReview(ctx context.Context, task 
 		return r.fallbackToLegacyReview(ctx, task, taskContext)
 	}
 
-	r.logger.Info(ctx, "Starting enhanced code review processing")
+	r.logger.Debug(ctx, "Starting enhanced code review processing")
 	startTime := time.Now()
 
 	// Phase 1: Enhanced Reasoning
@@ -68,7 +68,7 @@ func (r *EnhancedProcessorRegistry) ProcessCodeReview(ctx context.Context, task 
 	// Phase 2: Consensus Validation
 	if r.features.ConsensusValidation {
 		// Applying consensus validation
-		
+
 		// Prepare validation task with review results
 		validationTask := r.createValidationTask(task, reviewResult)
 		validationResult, err := r.consensusValidationProcessor.Process(ctx, validationTask, taskContext)
@@ -84,7 +84,7 @@ func (r *EnhancedProcessorRegistry) ProcessCodeReview(ctx context.Context, task 
 	// Phase 3: Comment Refinement
 	if r.features.CommentRefinement {
 		// Applying comment refinement
-		
+
 		// Prepare refinement task
 		refinementTask := r.createRefinementTask(task, reviewResult)
 		refinementResult, err := r.commentRefinementProcessor.Process(ctx, refinementTask, taskContext)
@@ -172,13 +172,13 @@ func (r *EnhancedProcessorRegistry) convertToFinalResult(result interface{}) int
 			}
 			comments = append(comments, comment)
 		}
-		
+
 		return map[string]interface{}{
-			"comments":         comments,
-			"processing_type":  "enhanced_refined",
-			"quality_score":    res.AverageQuality,
-			"processing_time":  res.ProcessingTime,
-			"total_attempts":   res.TotalAttempts,
+			"comments":        comments,
+			"processing_type": "enhanced_refined",
+			"quality_score":   res.AverageQuality,
+			"processing_time": res.ProcessingTime,
+			"total_attempts":  res.TotalAttempts,
 		}
 
 	case *EnhancedReviewResult:
@@ -195,7 +195,7 @@ func (r *EnhancedProcessorRegistry) convertToFinalResult(result interface{}) int
 			}
 			comments = append(comments, comment)
 		}
-		
+
 		return map[string]interface{}{
 			"comments":        comments,
 			"processing_type": "enhanced_reasoning",
@@ -218,7 +218,7 @@ func (r *EnhancedProcessorRegistry) convertToFinalResult(result interface{}) int
 			}
 			comments = append(comments, comment)
 		}
-		
+
 		return map[string]interface{}{
 			"comments":        comments,
 			"processing_type": "consensus_validated",
@@ -236,15 +236,15 @@ func (r *EnhancedProcessorRegistry) convertToFinalResult(result interface{}) int
 // fallbackToLegacyReview falls back to the original review processor
 func (r *EnhancedProcessorRegistry) fallbackToLegacyReview(ctx context.Context, task agents.Task, taskContext map[string]interface{}) (interface{}, error) {
 	// Using legacy review processor
-	
+
 	// Use the original CodeReviewProcessor
 	legacyProcessor := &CodeReviewProcessor{metrics: r.metrics}
 	result, err := legacyProcessor.Process(ctx, task, taskContext)
-	
+
 	if err == nil {
 		GetGlobalMetrics().TrackFeatureUsage(r.features, "legacy_fallback")
 	}
-	
+
 	return result, err
 }
 
@@ -289,7 +289,7 @@ func (p *EnhancedTaskProcessor) Process(ctx context.Context, task agents.Task, t
 		phase2 := GetGlobalPhase2Integration()
 		if phase2 != nil {
 			capabilities := phase2.GetProcessingCapabilities()
-			
+
 			// Use Phase 2 declarative workflows for code review
 			if task.Type == "code_review" && capabilities.DeclarativeWorkflows {
 				// Using Phase 2 declarative workflow processing
@@ -299,7 +299,7 @@ func (p *EnhancedTaskProcessor) Process(ctx context.Context, task agents.Task, t
 				}
 				p.logger.Warn(ctx, "Phase 2 processing failed, falling back: %v", err)
 			}
-			
+
 			// Enhanced memory for conversation context
 			if capabilities.AdvancedMemory {
 				if conversationID, exists := task.Metadata["conversation_id"].(string); exists {
@@ -319,7 +319,7 @@ func (p *EnhancedTaskProcessor) Process(ctx context.Context, task agents.Task, t
 	switch task.Type {
 	case "code_review":
 		return p.registry.ProcessCodeReview(ctx, task, taskContext)
-		
+
 	case "comment_response":
 		// Enhanced with Phase 2 memory if available
 		if IsPhase2Available() {
@@ -328,7 +328,7 @@ func (p *EnhancedTaskProcessor) Process(ctx context.Context, task agents.Task, t
 			}
 		}
 		return p.fallbackToLegacy(ctx, task, taskContext, "comment_response")
-		
+
 	case "repo_qa":
 		// Enhanced with Phase 2 memory if available
 		if IsPhase2Available() {
@@ -337,7 +337,7 @@ func (p *EnhancedTaskProcessor) Process(ctx context.Context, task agents.Task, t
 			}
 		}
 		return p.fallbackToLegacy(ctx, task, taskContext, "repo_qa")
-		
+
 	default:
 		return p.fallbackToLegacy(ctx, task, taskContext, "unknown")
 	}
@@ -346,21 +346,21 @@ func (p *EnhancedTaskProcessor) Process(ctx context.Context, task agents.Task, t
 // fallbackToLegacy provides fallback to original processors
 func (p *EnhancedTaskProcessor) fallbackToLegacy(ctx context.Context, task agents.Task, taskContext map[string]interface{}, reason string) (interface{}, error) {
 	// Falling back to legacy processor
-	
+
 	// Use the original task processors based on type
 	switch task.Type {
 	case "code_review":
 		processor := &CodeReviewProcessor{metrics: p.registry.metrics}
 		return processor.Process(ctx, task, taskContext)
-		
+
 	case "comment_response":
 		processor := &CommentResponseProcessor{metrics: p.registry.metrics}
 		return processor.Process(ctx, task, taskContext)
-		
+
 	case "repo_qa":
 		processor := &RepoQAProcessor{}
 		return processor.Process(ctx, task, taskContext)
-		
+
 	default:
 		return nil, fmt.Errorf("unknown task type: %s", task.Type)
 	}
@@ -394,7 +394,7 @@ func (p *EnhancedTaskProcessor) processWithPhase2Memory(ctx context.Context, tas
 	case "comment_response":
 		processor := &CommentResponseProcessor{metrics: p.registry.metrics}
 		result, err := processor.Process(ctx, task, taskContext)
-		
+
 		// Store the result in memory for learning
 		if err == nil && phase2 != nil {
 			speaker := "assistant"
@@ -403,13 +403,13 @@ func (p *EnhancedTaskProcessor) processWithPhase2Memory(ctx context.Context, tas
 				phase2.StoreConversationMessage(ctx, conversationID, speaker, content, AssistantMessage)
 			}
 		}
-		
+
 		return result, err
-		
+
 	case "repo_qa":
 		processor := &RepoQAProcessor{}
 		result, err := processor.Process(ctx, task, taskContext)
-		
+
 		// Store the Q&A interaction
 		if err == nil && phase2 != nil {
 			if conversationID, exists := task.Metadata["conversation_id"].(string); exists {
@@ -418,7 +418,7 @@ func (p *EnhancedTaskProcessor) processWithPhase2Memory(ctx context.Context, tas
 					question = q
 				}
 				phase2.StoreConversationMessage(ctx, conversationID, "user", question, UserMessage)
-				
+
 				answer := "Repository answer"
 				if resultMap, ok := result.(map[string]interface{}); ok {
 					if ans, exists := resultMap["answer"].(string); exists {
@@ -428,9 +428,9 @@ func (p *EnhancedTaskProcessor) processWithPhase2Memory(ctx context.Context, tas
 				phase2.StoreConversationMessage(ctx, conversationID, "assistant", answer, AssistantMessage)
 			}
 		}
-		
+
 		return result, err
-		
+
 	default:
 		return nil, fmt.Errorf("unsupported task type for Phase 2 memory processing: %s", task.Type)
 	}
@@ -464,3 +464,4 @@ func WrapExistingProcessor(existingProcessor interface{}, features *EnhancedFeat
 	// Implementation depends on the specific processor interface
 	return existingProcessor
 }
+
