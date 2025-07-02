@@ -6,37 +6,33 @@ import (
 	"testing"
 
 	"github.com/XiaoConstantine/dspy-go/pkg/agents"
+	"github.com/XiaoConstantine/dspy-go/pkg/logging"
 )
 
 // MockMetricsCollector for testing
 type MockMetricsCollector struct{}
 
-func (m *MockMetricsCollector) TrackReviewComment(ctx context.Context, comment PRReviewComment, enhanced bool) {}
-func (m *MockMetricsCollector) TrackProcessingTime(ctx context.Context, processingType string, duration float64) {}
-func (m *MockMetricsCollector) TrackIssueCount(ctx context.Context, category string, count int) {}
-func (m *MockMetricsCollector) TrackConfidenceScore(ctx context.Context, score float64) {}
-func (m *MockMetricsCollector) TrackValidationResults(ctx context.Context, validated, rejected int) {}
-func (m *MockMetricsCollector) TrackConsensusScore(ctx context.Context, score float64) {}
-func (m *MockMetricsCollector) TrackCommentQuality(ctx context.Context, quality float64) {}
-func (m *MockMetricsCollector) TrackRefinementAttempts(ctx context.Context, attempts int) {}
-
-// MockLogger for testing
-type MockLogger struct{}
-
-func (l *MockLogger) Debug(ctx context.Context, format string, args ...interface{}) {}
-func (l *MockLogger) Info(ctx context.Context, format string, args ...interface{}) {}
-func (l *MockLogger) Warning(ctx context.Context, format string, args ...interface{}) {}
-func (l *MockLogger) Error(ctx context.Context, format string, args ...interface{}) {}
+func (m *MockMetricsCollector) TrackReviewStart(ctx context.Context, category string) {}
+func (m *MockMetricsCollector) TrackNewThread(ctx context.Context, threadID int64, comment PRReviewComment) {}
+func (m *MockMetricsCollector) TrackCommentResolution(ctx context.Context, threadID int64, resolution ResolutionOutcome) {}
+func (m *MockMetricsCollector) TrackReviewComment(ctx context.Context, comment PRReviewComment, isValid bool) {}
+func (m *MockMetricsCollector) TrackHistoricalComment(ctx context.Context, comment PRReviewComment) {}
+func (m *MockMetricsCollector) TrackUserFeedback(ctx context.Context, threadID int64, helpful bool, reason string) {}
+func (m *MockMetricsCollector) GetOutdatedRate(category string) float64 { return 0.0 }
+func (m *MockMetricsCollector) GetPrecision(category string) float64 { return 0.0 }
+func (m *MockMetricsCollector) GenerateReport(ctx context.Context) *BusinessReport { return &BusinessReport{} }
+func (m *MockMetricsCollector) GetCategoryMetrics(category string) *CategoryStats { return &CategoryStats{} }
 
 // Test setup
-func setupTest() (*MockMetricsCollector, *MockLogger) {
+func setupTest() (*MockMetricsCollector, *logging.Logger) {
 	// Set conservative feature flags for testing
 	os.Setenv("MAESTRO_ADVANCED_REASONING", "true")
 	os.Setenv("MAESTRO_CONSENSUS_VALIDATION", "true")
 	os.Setenv("MAESTRO_COMMENT_REFINEMENT", "true")
 	os.Setenv("MAESTRO_FALLBACK_LEGACY", "true")
 	
-	return &MockMetricsCollector{}, &MockLogger{}
+	logger := logging.GetLogger()
+	return &MockMetricsCollector{}, logger
 }
 
 // Test EnhancedCodeReviewProcessor
@@ -495,7 +491,7 @@ func TestErrorHandlingAndFallbacks(t *testing.T) {
 // Test metrics collection
 func TestMetricsCollection(t *testing.T) {
 	metrics := &MockMetricsCollector{}
-	logger := &MockLogger{}
+	logger := logging.GetLogger()
 	
 	// Initialize global metrics
 	InitializeEnhancedFeatures()

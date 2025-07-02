@@ -63,14 +63,14 @@ func (p2 *Phase2Integration) initialize(ragSystem RAGStore) error {
 	
 	// Initialize declarative workflows if enabled
 	if p2.features.DeclarativeWorkflows {
-		p2.logger.Debug(ctx, "📋 Initializing declarative workflow chain")
+		// Initializing declarative workflow chain
 		chain := NewDeclarativeReviewChain(ctx)
 		p2.declarativeChain = chain
 	}
 	
 	// Initialize intelligent parallel processing if enabled
 	if p2.features.IntelligentParallelProcessing {
-		p2.logger.Debug(ctx, "⚡ Initializing intelligent parallel processor")
+		// Initializing intelligent parallel processor
 		
 		config := IntelligentProcessingConfig{
 			MaxConcurrent:     runtime.NumCPU() * 2,
@@ -95,7 +95,7 @@ func (p2 *Phase2Integration) initialize(ragSystem RAGStore) error {
 	
 	// Initialize enhanced memory management if enabled
 	if p2.features.AdvancedMemory {
-		p2.logger.Debug(ctx, "💭 Initializing enhanced memory manager")
+		// Initializing enhanced memory manager
 		
 		memoryConfig := MemoryConfig{
 			MaxTokens:              100000,
@@ -130,7 +130,7 @@ func (p2 *Phase2Integration) ProcessWithPhase2Features(ctx context.Context, task
 	usePhase2 := p2.shouldUsePhase2Features(ctx, task, taskContext)
 	
 	if !usePhase2 {
-		p2.logger.Debug(ctx, "⚠️ Task complexity low, delegating to Phase 1 processing")
+		// Task complexity low, delegating to Phase 1
 		return p2.fallbackToPhase1(ctx, task, taskContext)
 	}
 	
@@ -143,7 +143,7 @@ func (p2 *Phase2Integration) ProcessWithPhase2Features(ctx context.Context, task
 	
 	// Use declarative workflows if enabled
 	if p2.features.DeclarativeWorkflows && p2.declarativeChain != nil {
-		p2.logger.Debug(ctx, "📋 Using declarative workflow processing")
+		// Using declarative workflow processing
 		result, err := p2.declarativeChain.Process(ctx, task, taskContext)
 		if err != nil {
 			p2.logger.Warn(ctx, "Declarative workflow failed, falling back: %v", err)
@@ -199,7 +199,7 @@ func (p2 *Phase2Integration) BuildEnhancedContext(ctx context.Context, conversat
 		return nil, fmt.Errorf("advanced memory management not available")
 	}
 	
-	p2.logger.Debug(ctx, "🔍 Building enhanced context for conversation")
+	// Building enhanced context
 	
 	request := ContextRequest{
 		ConversationID: conversationID,
@@ -385,23 +385,23 @@ func (p2 *Phase2Integration) checkResourceConstraints(ctx context.Context) error
 
 // recordProcessingMetrics records metrics for adaptive strategy
 func (p2 *Phase2Integration) recordProcessingMetrics(ctx context.Context, tasks []PRReviewTask, result map[string]interface{}) {
-	p2.logger.Debug(ctx, "📊 Recording processing metrics for adaptation")
+	// Recording processing metrics
 	
 	// In a real implementation, this would store detailed metrics
 	// for the adaptive strategy to learn from
-	metrics := map[string]interface{}{
+	_ = map[string]interface{}{
 		"task_count":      len(tasks),
 		"processing_time": time.Now(), // Would track actual duration
 		"success":         result != nil,
 		"result_quality":  extractQualityScore(result),
 	}
 	
-	p2.logger.Debug(ctx, "Metrics recorded: %+v", metrics)
+	// Metrics recorded
 }
 
 // fallbackToPhase1 falls back to Phase 1 processing
 func (p2 *Phase2Integration) fallbackToPhase1(ctx context.Context, task agents.Task, taskContext map[string]interface{}) (interface{}, error) {
-	p2.logger.Debug(ctx, "⬇️ Falling back to Phase 1 processing")
+	// Falling back to Phase 1 processing
 	
 	// Use the existing enhanced integration from Phase 1
 	// TODO: Implement proper fallback to Phase 1
@@ -417,7 +417,7 @@ func (p2 *Phase2Integration) fallbackToPhase1(ctx context.Context, task agents.T
 
 // fallbackToStandardParallel falls back to standard parallel processing
 func (p2 *Phase2Integration) fallbackToStandardParallel(ctx context.Context, tasks []PRReviewTask) (map[string]interface{}, error) {
-	p2.logger.Debug(ctx, "⬇️ Falling back to standard parallel processing")
+	// Falling back to standard parallel processing
 	
 	// Use existing parallel processing logic
 	results := make(map[string]interface{})

@@ -176,7 +176,7 @@ func NewReviewChainProcessor(ctx context.Context, metrics MetricsCollector, logg
 	// Step 1: Rule Checking
 	ruleCheckStep := &workflows.Step{
 		ID:     "rule_checking",
-		Module: modules.NewPredict(ruleSignature),
+		Module: modules.NewPredict(ruleSignature).WithName("RuleChecker"),
 	}
 
 	contextValidationStep := &workflows.Step{
@@ -203,7 +203,7 @@ func NewReviewChainProcessor(ctx context.Context, metrics MetricsCollector, logg
 	- potential_issues: same issues from input
         - context_valid: boolean indicating if issue is valid in context
         - confidence: float between 0-1 indicating confidence level
-        - enhanced_context: any additional context that helps understand the issue`)),
+        - enhanced_context: any additional context that helps understand the issue`)).WithName("ContextValidator"),
 	}
 
 	// Define rule compliance validation step
@@ -226,7 +226,7 @@ func NewReviewChainProcessor(ctx context.Context, metrics MetricsCollector, logg
 			- rule_compliant: whether the issue match rule's criteria exactly 
 			- refined_suggestion: Can the suggestion be improved based on the specific context
         
-        Only mark as compliant if the issue is a clear violation of the rule.`)),
+        Only mark as compliant if the issue is a clear violation of the rule.`)).WithName("RuleComplianceValidator"),
 	}
 
 	// Define practical impact validation step
@@ -247,7 +247,7 @@ func NewReviewChainProcessor(ctx context.Context, metrics MetricsCollector, logg
 			Provide:
 			- is_actionable: boolean indicating if the issue requires action
 			- final_suggestion: string with the final suggestion
-			- severity: string indicating severity level (low, medium, high)`)),
+			- severity: string indicating severity level (low, medium, high)`)).WithName("PracticalImpactValidator"),
 	}
 
 	addStepWithErrorHandling := func(step *workflows.Step, stepName string) error {

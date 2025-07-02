@@ -48,6 +48,9 @@ type RAGStore interface {
 
 	StoreRule(ctx context.Context, rule ReviewRule) error
 
+	// HasContent checks if the database contains any indexed content
+	HasContent(ctx context.Context) (bool, error)
+
 	// DB version control
 	GetMetadata(ctx context.Context, key string) (string, error)
 	SetMetadata(ctx context.Context, key, value string) error
@@ -527,6 +530,24 @@ func (s *sqliteRAGStore) StoreRule(ctx context.Context, rule ReviewRule) error {
 	}
 
 	return nil
+}
+
+// HasContent implements RAGStore interface.
+func (s *sqliteRAGStore) HasContent(ctx context.Context) (bool, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if s.closed {
+		return false, fmt.Errorf("store is closed")
+	}
+
+	var count int
+	err := s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM contents").Scan(&count)
+	if err != nil {
+		return false, fmt.Errorf("failed to count contents: %w", err)
+	}
+
+	return count > 0, nil
 }
 
 // Close implements RAGStore interface.

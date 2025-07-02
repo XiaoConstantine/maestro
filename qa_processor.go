@@ -2,14 +2,46 @@ package main
 
 import (
 	"context"
+	"crypto/md5"
+	"encoding/hex"
 	"fmt"
 	"strings"
+	"sync"
 
 	"github.com/XiaoConstantine/dspy-go/pkg/agents"
 	"github.com/XiaoConstantine/dspy-go/pkg/core"
 	"github.com/XiaoConstantine/dspy-go/pkg/logging"
 	"github.com/XiaoConstantine/dspy-go/pkg/modules"
 )
+
+// Simple cache for Predict modules
+var qaModuleCache = sync.Map{}
+
+// getCachedPredictModule returns a cached Predict module or creates a new one
+func getCachedPredictModule(signature core.Signature) *modules.Predict {
+	// Create signature hash
+	hasher := md5.New()
+	for _, input := range signature.Inputs {
+		hasher.Write([]byte(input.Name + ":" + input.Description))
+	}
+	for _, output := range signature.Outputs {
+		hasher.Write([]byte(output.Name + ":" + output.Description))
+	}
+	hasher.Write([]byte(signature.Instruction))
+	signatureHash := hex.EncodeToString(hasher.Sum(nil))
+	
+	// Try to get from cache
+	if cached, ok := qaModuleCache.Load(signatureHash); ok {
+		if predict, ok := cached.(*modules.Predict); ok {
+			return predict
+		}
+	}
+	
+	// Create new and cache
+	predict := modules.NewPredict(signature).WithName("QAAnalyzer")
+	qaModuleCache.Store(signatureHash, predict)
+	return predict
+}
 
 type RepoQAProcessor struct {
 	ragStore RAGStore
@@ -77,8 +109,8 @@ func (p *RepoQAProcessor) Process(ctx context.Context, task agents.Task, context
 		sourceFiles = append(sourceFiles, content.Metadata["file_path"])
 	}
 
-	// Use predict module like other processors
-	predict := modules.NewPredict(signature)
+	// Use cached predict module
+	predict := getCachedPredictModule(signature)
 	streamHandler := CreateStreamHandler(ctx, logging.GetLogger())
 	result, err := predict.Process(ctx, map[string]interface{}{
 		"question":         metadata.Question,

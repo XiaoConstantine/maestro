@@ -31,6 +31,7 @@ type ConsoleInterface interface {
 	ReviewComplete()
 	UpdateSpinnerText(text string)
 	ShowReviewMetrics(metrics MetricsCollector, comments []PRReviewComment)
+	CollectAllFeedback(comments []PRReviewComment, metric MetricsCollector) error
 	Confirm(opts PromptOptions) (bool, error)
 	FileError(filepath string, err error)
 	Printf(format string, a ...interface{})
@@ -155,20 +156,38 @@ func (c *Console) Confirm(opts PromptOptions) (bool, error) {
 		Help:    opts.HelpText,
 	}
 
-	// Configure survey settings
+	// Configure survey settings with better terminal compatibility
 	surveyOpts := []survey.AskOpt{
 		survey.WithIcons(func(icons *survey.IconSet) {
 			if c.color {
 				icons.Question.Text = "?"
 				icons.Question.Format = "cyan+b"
 				icons.Help.Format = "blue"
+			} else {
+				// Disable all formatting for better compatibility
+				icons.Question.Text = "?"
+				icons.Question.Format = ""
+				icons.Help.Format = ""
 			}
 		}),
+		// Disable terminal features that might cause escape sequence issues
+		survey.WithRemoveSelectAll(),
+		survey.WithRemoveSelectNone(),
 	}
 
 	// Handle piped input (non-interactive mode)
 	if !isatty.IsTerminal(os.Stdin.Fd()) {
 		return opts.Default, nil
+	}
+
+	// Check for problematic terminal environments
+	termType := os.Getenv("TERM")
+	if termType == "" || strings.Contains(termType, "dumb") {
+		// Fallback to simple input for problematic terminals
+		fmt.Printf("%s (Y/n): ", opts.Message)
+		var input string
+		fmt.Scanln(&input)
+		return input == "" || strings.ToLower(input) == "y" || strings.ToLower(input) == "yes", nil
 	}
 
 	var response bool
@@ -341,10 +360,7 @@ func (c *Console) ShowComments(comments []PRReviewComment, metric MetricsCollect
 			c.Println(indent(comment.Suggestion, 4))
 		}
 		c.Println()
-
-		if err := c.collectFeedback(comment, metric); err != nil {
-			c.logger.Warn(context.Background(), "Failed to collect feedback: %v", err)
-		}
+		// Note: Feedback collection moved to end of review process
 	}
 }
 
@@ -537,11 +553,61 @@ func (c *Console) collectFeedback(comment PRReviewComment, metric MetricsCollect
 		if err != nil {
 			return err
 		}
-		metric.TrackUserFeedback(context.Background(), *comment.ThreadID, false, reason)
+		// Check for nil ThreadID before dereferencing
+		var threadID int64
+		if comment.ThreadID != nil {
+			threadID = *comment.ThreadID
+		}
+		metric.TrackUserFeedback(context.Background(), threadID, false, reason)
 	} else {
-		metric.TrackUserFeedback(context.Background(), *comment.ThreadID, true, "")
+		// Check for nil ThreadID before dereferencing
+		var threadID int64
+		if comment.ThreadID != nil {
+			threadID = *comment.ThreadID
+		}
+		metric.TrackUserFeedback(context.Background(), threadID, true, "")
 	}
 
+	return nil
+}
+
+// CollectAllFeedback collects feedback for all comments at the end of the review
+func (c *Console) CollectAllFeedback(comments []PRReviewComment, metric MetricsCollector) error {
+	if len(comments) == 0 {
+		return nil
+	}
+	
+	// Check if feedback collection is disabled
+	if os.Getenv("MAESTRO_DISABLE_FEEDBACK") == "true" {
+		return nil
+	}
+	
+	c.PrintHeader("Feedback Collection")
+	c.Println("Please provide feedback on the review comments to help improve the system.")
+	c.Println()
+	
+	for i, comment := range comments {
+		// Show a brief summary of the comment
+		c.Printf("Comment %d/%d - %s:%d\n", i+1, len(comments), comment.FilePath, comment.LineNumber)
+		c.Printf("Category: %s | Severity: %s\n", comment.Category, comment.Severity)
+		
+		// Show first 100 chars of content
+		content := comment.Content
+		if len(content) > 100 {
+			content = content[:100] + "..."
+		}
+		c.Printf("Content: %s\n", content)
+		c.Println()
+		
+		// Collect feedback for this comment
+		if err := c.collectFeedback(comment, metric); err != nil {
+			c.logger.Warn(context.Background(), "Failed to collect feedback for comment %d: %v", i+1, err)
+			continue
+		}
+		c.Println()
+	}
+	
+	c.Println("Thank you for your feedback!")
 	return nil
 }
 
