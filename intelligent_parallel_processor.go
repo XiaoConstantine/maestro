@@ -15,7 +15,7 @@ import (
 	"github.com/XiaoConstantine/dspy-go/pkg/modules"
 )
 
-// IntelligentFileProcessor provides advanced parallel processing with adaptive strategies
+// IntelligentFileProcessor provides advanced parallel processing with adaptive strategies.
 type IntelligentFileProcessor struct {
 	chunkProcessor   core.Module
 	adaptiveStrategy *AdaptiveStrategy
@@ -23,11 +23,11 @@ type IntelligentFileProcessor struct {
 	loadBalancer     *LoadBalancer
 	circuitBreaker   *CircuitBreaker
 	metrics          *ParallelProcessingMetrics
-	logger           logging.Logger
+	logger           *logging.Logger
 	config           IntelligentProcessingConfig
 }
 
-// IntelligentProcessingConfig configures the intelligent processor
+// IntelligentProcessingConfig configures the intelligent processor.
 type IntelligentProcessingConfig struct {
 	MaxConcurrent        int
 	AdaptiveThreshold    float64
@@ -39,7 +39,7 @@ type IntelligentProcessingConfig struct {
 	EnableCircuitBreaker bool
 }
 
-// ResourceLimits defines system resource constraints
+// ResourceLimits defines system resource constraints.
 type ResourceLimits struct {
 	MaxMemoryMB   int64
 	MaxCPUPercent float64
@@ -48,7 +48,7 @@ type ResourceLimits struct {
 	CPUWarning    float64
 }
 
-// AdaptiveStrategy manages dynamic optimization of processing
+// AdaptiveStrategy manages dynamic optimization of processing.
 type AdaptiveStrategy struct {
 	currentStrategy ProcessingStrategy
 	performance     *PerformanceTracker
@@ -65,7 +65,7 @@ const (
 	CustomStrategy
 )
 
-// AdaptationRule defines when and how to adapt processing strategy
+// AdaptationRule defines when and how to adapt processing strategy.
 type AdaptationRule struct {
 	Name      string
 	Condition func(*PerformanceMetrics) bool
@@ -73,7 +73,7 @@ type AdaptationRule struct {
 	Priority  int
 }
 
-// PerformanceTracker monitors processing performance
+// PerformanceTracker monitors processing performance.
 type PerformanceTracker struct {
 	metrics    []PerformanceMetrics
 	windowSize int
@@ -81,7 +81,7 @@ type PerformanceTracker struct {
 	mu         sync.RWMutex
 }
 
-// PerformanceMetrics captures processing performance data
+// PerformanceMetrics captures processing performance data.
 type PerformanceMetrics struct {
 	Timestamp        time.Time
 	ThroughputMBPS   float64
@@ -92,7 +92,7 @@ type PerformanceMetrics struct {
 	QueueDepth       int
 }
 
-// ResourceUsage tracks system resource consumption
+// ResourceUsage tracks system resource consumption.
 type ResourceUsage struct {
 	MemoryMB       int64
 	CPUPercent     float64
@@ -100,17 +100,16 @@ type ResourceUsage struct {
 	GCPauses       time.Duration
 }
 
-// ResourceMonitor tracks system resources in real-time
+// ResourceMonitor tracks system resources in real-time.
 type ResourceMonitor struct {
 	usage           ResourceUsage
 	updateInterval  time.Duration
 	alertThresholds ResourceLimits
-	alerts          []ResourceAlert
 	mu              sync.RWMutex
 	stopCh          chan struct{}
 }
 
-// ResourceAlert represents a resource threshold violation
+// ResourceAlert represents a resource threshold violation.
 type ResourceAlert struct {
 	Type      AlertType
 	Message   string
@@ -133,7 +132,7 @@ const (
 	Emergency
 )
 
-// LoadBalancer distributes work across available workers
+// LoadBalancer distributes work across available workers.
 type LoadBalancer struct {
 	workers  []*Worker
 	strategy LoadBalancingStrategy
@@ -151,7 +150,7 @@ const (
 	ResourceAware
 )
 
-// Worker represents a processing worker with capabilities tracking
+// Worker represents a processing worker with capabilities tracking.
 type Worker struct {
 	ID             int
 	Capacity       int
@@ -173,7 +172,7 @@ const (
 	FastProcessing
 )
 
-// LoadBalancingMetrics tracks load balancing performance
+// LoadBalancingMetrics tracks load balancing performance.
 type LoadBalancingMetrics struct {
 	TotalRequests     int64
 	AverageLatency    time.Duration
@@ -181,7 +180,7 @@ type LoadBalancingMetrics struct {
 	WorkerUtilization map[int]float64
 }
 
-// CircuitBreaker prevents system overload
+// CircuitBreaker prevents system overload.
 type CircuitBreaker struct {
 	state           CircuitState
 	failureCount    int
@@ -199,7 +198,7 @@ const (
 	CircuitHalfOpen
 )
 
-// ParallelProcessingMetrics tracks overall parallel processing performance
+// ParallelProcessingMetrics tracks overall parallel processing performance.
 type ParallelProcessingMetrics struct {
 	TotalTasks       int64
 	CompletedTasks   int64
@@ -211,7 +210,7 @@ type ParallelProcessingMetrics struct {
 	mu               sync.RWMutex
 }
 
-// NewIntelligentFileProcessor creates an advanced parallel processing system
+// NewIntelligentFileProcessor creates an advanced parallel processing system.
 func NewIntelligentFileProcessor(config IntelligentProcessingConfig) *IntelligentFileProcessor {
 	logger := logging.GetLogger()
 
@@ -262,12 +261,12 @@ func NewIntelligentFileProcessor(config IntelligentProcessingConfig) *Intelligen
 		loadBalancer:     loadBalancer,
 		circuitBreaker:   circuitBreaker,
 		metrics:          NewParallelProcessingMetrics(),
-		logger:           *logger,
+		logger:           logger,
 		config:           config,
 	}
 }
 
-// ProcessFiles intelligently processes multiple files with adaptive optimization
+// ProcessFiles intelligently processes multiple files with adaptive optimization.
 func (p *IntelligentFileProcessor) ProcessFiles(ctx context.Context, tasks []PRReviewTask) (map[string]interface{}, error) {
 	p.logger.Info(ctx, "🚀 Starting intelligent parallel processing for %d files", len(tasks))
 
@@ -305,7 +304,7 @@ func (p *IntelligentFileProcessor) ProcessFiles(ctx context.Context, tasks []PRR
 	return results, nil
 }
 
-// createAdaptiveChunks creates intelligent chunks based on multiple factors
+// createAdaptiveChunks creates intelligent chunks based on multiple factors.
 func (p *IntelligentFileProcessor) createAdaptiveChunks(ctx context.Context, tasks []PRReviewTask) map[string][]AdaptiveChunk {
 	p.logger.Debug(ctx, "🔍 Creating adaptive chunks for %d files", len(tasks))
 
@@ -326,7 +325,7 @@ func (p *IntelligentFileProcessor) createAdaptiveChunks(ctx context.Context, tas
 	return adaptiveChunks
 }
 
-// AdaptiveChunk represents an intelligently created chunk
+// AdaptiveChunk represents an intelligently created chunk.
 type AdaptiveChunk struct {
 	Content       string
 	StartLine     int
@@ -338,7 +337,7 @@ type AdaptiveChunk struct {
 	Metadata      map[string]interface{}
 }
 
-// FileAnalysis contains comprehensive file analysis
+// FileAnalysis contains comprehensive file analysis.
 type FileAnalysis struct {
 	FilePath          string
 	Language          string
@@ -360,7 +359,7 @@ const (
 	ExpertReview
 )
 
-// analyzeFile performs comprehensive file analysis
+// analyzeFile performs comprehensive file analysis.
 func (p *IntelligentFileProcessor) analyzeFile(task PRReviewTask) FileAnalysis {
 	content := task.FileContent
 	lines := strings.Split(content, "\n")
@@ -392,7 +391,7 @@ func (p *IntelligentFileProcessor) analyzeFile(task PRReviewTask) FileAnalysis {
 	return analysis
 }
 
-// calculateComplexity uses sophisticated complexity analysis
+// calculateComplexity uses sophisticated complexity analysis.
 func (p *IntelligentFileProcessor) calculateComplexity(content string, lines []string) float64 {
 	complexity := 0.0
 
@@ -438,7 +437,7 @@ func (p *IntelligentFileProcessor) calculateComplexity(content string, lines []s
 	return math.Min(complexity, 1.0)
 }
 
-// calculatePriority determines processing priority
+// calculatePriority determines processing priority.
 func (p *IntelligentFileProcessor) calculatePriority(task PRReviewTask, complexity float64) int {
 	priority := 5 // Base priority
 
@@ -473,7 +472,7 @@ func (p *IntelligentFileProcessor) calculatePriority(task PRReviewTask, complexi
 	return maxInt(1, minInt(priority, 10))
 }
 
-// createChunksForFile creates optimal chunks for a file
+// createChunksForFile creates optimal chunks for a file.
 func (p *IntelligentFileProcessor) createChunksForFile(task PRReviewTask, analysis FileAnalysis) []AdaptiveChunk {
 	lines := strings.Split(task.FileContent, "\n")
 	chunks := []AdaptiveChunk{}
@@ -549,7 +548,7 @@ func (p *IntelligentFileProcessor) createChunksForFile(task PRReviewTask, analys
 	return chunks
 }
 
-// ProcessingPlan contains the execution plan for parallel processing
+// ProcessingPlan contains the execution plan for parallel processing.
 type ProcessingPlan struct {
 	TotalChunks       int
 	PriorityGroups    map[int][]ChunkTask
@@ -558,7 +557,7 @@ type ProcessingPlan struct {
 	EstimatedDuration time.Duration
 }
 
-// ChunkTask represents a chunk processing task
+// ChunkTask represents a chunk processing task.
 type ChunkTask struct {
 	ID           string
 	FilePath     string
@@ -567,7 +566,7 @@ type ChunkTask struct {
 	Worker       *Worker
 }
 
-// createProcessingPlan creates an intelligent processing plan
+// createProcessingPlan creates an intelligent processing plan.
 func (p *IntelligentFileProcessor) createProcessingPlan(ctx context.Context, adaptiveChunks map[string][]AdaptiveChunk) *ProcessingPlan {
 	p.logger.Debug(ctx, "📋 Creating intelligent processing plan")
 
@@ -618,7 +617,7 @@ func (p *IntelligentFileProcessor) createProcessingPlan(ctx context.Context, ada
 	return plan
 }
 
-// executeIntelligentProcessing executes the processing plan with full intelligence
+// executeIntelligentProcessing executes the processing plan with full intelligence.
 func (p *IntelligentFileProcessor) executeIntelligentProcessing(ctx context.Context, plan *ProcessingPlan) (map[string]interface{}, error) {
 	p.logger.Info(ctx, "⚡ Executing intelligent processing plan")
 
@@ -666,7 +665,7 @@ func (p *IntelligentFileProcessor) executeIntelligentProcessing(ctx context.Cont
 	return results, nil
 }
 
-// executeTaskGroup executes a group of tasks with intelligent coordination
+// executeTaskGroup executes a group of tasks with intelligent coordination.
 func (p *IntelligentFileProcessor) executeTaskGroup(ctx context.Context, tasks []ChunkTask, concurrency int) (map[string]interface{}, error) {
 	// Create worker pool
 	taskCh := make(chan ChunkTask, len(tasks))
@@ -708,7 +707,7 @@ func (p *IntelligentFileProcessor) executeTaskGroup(ctx context.Context, tasks [
 	return results, nil
 }
 
-// TaskResult represents the result of a task execution
+// TaskResult represents the result of a task execution.
 type TaskResult struct {
 	TaskID   string
 	Data     interface{}
@@ -716,7 +715,7 @@ type TaskResult struct {
 	Duration time.Duration
 }
 
-// processWorker processes tasks with intelligent optimization
+// processWorker processes tasks with intelligent optimization.
 func (p *IntelligentFileProcessor) processWorker(ctx context.Context, workerID int, taskCh <-chan ChunkTask, resultCh chan<- TaskResult) {
 	worker := p.loadBalancer.GetWorker(workerID)
 
@@ -749,7 +748,7 @@ func (p *IntelligentFileProcessor) processWorker(ctx context.Context, workerID i
 	}
 }
 
-// processChunk processes a single chunk with intelligence
+// processChunk processes a single chunk with intelligence.
 func (p *IntelligentFileProcessor) processChunk(ctx context.Context, task ChunkTask) (interface{}, error) {
 	// Prepare inputs based on chunk metadata
 	inputs := map[string]interface{}{
@@ -1185,7 +1184,7 @@ func (m *ParallelProcessingMetrics) RecordFailure() {
 	m.TotalTasks++
 }
 
-// Utility functions
+// Utility functions.
 func maxInt(a, b int) int {
 	if a > b {
 		return a

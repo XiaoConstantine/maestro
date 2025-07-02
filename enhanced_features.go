@@ -5,68 +5,68 @@ import (
 	"strings"
 )
 
-// EnhancedFeatures manages feature flags for advanced DSPy-Go capabilities
+// EnhancedFeatures manages feature flags for advanced DSPy-Go capabilities.
 type EnhancedFeatures struct {
 	// Phase 1 Features
-	AdvancedReasoning    bool
-	ConsensusValidation  bool
-	CommentRefinement    bool
-	
+	AdvancedReasoning   bool
+	ConsensusValidation bool
+	CommentRefinement   bool
+
 	// Phase 2 Features
-	DeclarativeWorkflows        bool
+	DeclarativeWorkflows          bool
 	IntelligentParallelProcessing bool // Phase 2.2 Intelligent Parallel Processing
-	AdvancedMemory              bool
-	AdaptiveStrategy            bool
-	ResourceMonitoring          bool
-	AdaptiveResourceManagement  bool // Adaptive resource monitoring
-	LoadBalancing               bool // Intelligent load balancing
-	CircuitBreaking             bool // Circuit breaker patterns
-	
+	AdvancedMemory                bool
+	AdaptiveStrategy              bool
+	ResourceMonitoring            bool
+	AdaptiveResourceManagement    bool // Adaptive resource monitoring
+	LoadBalancing                 bool // Intelligent load balancing
+	CircuitBreaking               bool // Circuit breaker patterns
+
 	// Phase 3 Features (for future use)
-	ReactiveProcessing   bool
-	ConversationalMode   bool
-	LearningAdaptation   bool
-	
+	ReactiveProcessing bool
+	ConversationalMode bool
+	LearningAdaptation bool
+
 	// Fallback settings
-	FallbackToLegacy     bool
-	EnableMetrics        bool
-	EnableDebugLogging   bool
+	FallbackToLegacy   bool
+	EnableMetrics      bool
+	EnableDebugLogging bool
 }
 
-// DefaultEnhancedFeatures returns the default feature configuration
+// DefaultEnhancedFeatures returns the default feature configuration.
 func DefaultEnhancedFeatures() *EnhancedFeatures {
 	return &EnhancedFeatures{
 		// Phase 1 - enabled by default for gradual rollout
-		AdvancedReasoning:    true,
-		ConsensusValidation:  true,
-		CommentRefinement:    true,
-		
+		AdvancedReasoning:   true,
+		ConsensusValidation: true,
+		CommentRefinement:   true,
+
 		// Phase 2 - enabled for advanced users
-		DeclarativeWorkflows:        true,
+		DeclarativeWorkflows:          true,
 		IntelligentParallelProcessing: true,
-		AdvancedMemory:              true,
-		AdaptiveStrategy:            true,
-		ResourceMonitoring:          true,
-		AdaptiveResourceManagement:  true,
-		LoadBalancing:               true,
-		CircuitBreaking:             true,
-		
+		AdvancedMemory:                true,
+		AdaptiveStrategy:              true,
+		ResourceMonitoring:            true,
+		AdaptiveResourceManagement:    true,
+		LoadBalancing:                 true,
+		CircuitBreaking:               true,
+
 		// Phase 3 - disabled until implemented
-		ReactiveProcessing:   false,
-		ConversationalMode:   false,
-		LearningAdaptation:   false,
-		
+		ReactiveProcessing: false,
+		ConversationalMode: false,
+		LearningAdaptation: false,
+
 		// Safety features
-		FallbackToLegacy:     true,
-		EnableMetrics:        true,
-		EnableDebugLogging:   false,
+		FallbackToLegacy:   true,
+		EnableMetrics:      true,
+		EnableDebugLogging: false,
 	}
 }
 
-// LoadEnhancedFeaturesFromEnv loads feature flags from environment variables
+// LoadEnhancedFeaturesFromEnv loads feature flags from environment variables.
 func LoadEnhancedFeaturesFromEnv() *EnhancedFeatures {
 	features := DefaultEnhancedFeatures()
-	
+
 	// Phase 1 Features
 	if val := os.Getenv("MAESTRO_ADVANCED_REASONING"); val != "" {
 		features.AdvancedReasoning = parseBool(val, features.AdvancedReasoning)
@@ -77,7 +77,7 @@ func LoadEnhancedFeaturesFromEnv() *EnhancedFeatures {
 	if val := os.Getenv("MAESTRO_COMMENT_REFINEMENT"); val != "" {
 		features.CommentRefinement = parseBool(val, features.CommentRefinement)
 	}
-	
+
 	// Phase 2 Features
 	if val := os.Getenv("MAESTRO_DECLARATIVE_WORKFLOWS"); val != "" {
 		features.DeclarativeWorkflows = parseBool(val, features.DeclarativeWorkflows)
@@ -103,7 +103,7 @@ func LoadEnhancedFeaturesFromEnv() *EnhancedFeatures {
 	if val := os.Getenv("MAESTRO_CIRCUIT_BREAKING"); val != "" {
 		features.CircuitBreaking = parseBool(val, features.CircuitBreaking)
 	}
-	
+
 	// Phase 3 Features
 	if val := os.Getenv("MAESTRO_REACTIVE_PROCESSING"); val != "" {
 		features.ReactiveProcessing = parseBool(val, features.ReactiveProcessing)
@@ -114,7 +114,7 @@ func LoadEnhancedFeaturesFromEnv() *EnhancedFeatures {
 	if val := os.Getenv("MAESTRO_LEARNING_ADAPTATION"); val != "" {
 		features.LearningAdaptation = parseBool(val, features.LearningAdaptation)
 	}
-	
+
 	// Safety and debugging features
 	if val := os.Getenv("MAESTRO_FALLBACK_LEGACY"); val != "" {
 		features.FallbackToLegacy = parseBool(val, features.FallbackToLegacy)
@@ -125,11 +125,11 @@ func LoadEnhancedFeaturesFromEnv() *EnhancedFeatures {
 	if val := os.Getenv("MAESTRO_DEBUG_LOGGING"); val != "" {
 		features.EnableDebugLogging = parseBool(val, features.EnableDebugLogging)
 	}
-	
+
 	return features
 }
 
-// GetFeatureProfile returns a predefined feature profile
+// GetFeatureProfile returns a predefined feature profile.
 func GetFeatureProfile(profile string) *EnhancedFeatures {
 	switch strings.ToLower(profile) {
 	case "conservative":
@@ -152,7 +152,7 @@ func GetFeatureProfile(profile string) *EnhancedFeatures {
 			EnableMetrics:                 true,
 			EnableDebugLogging:            false,
 		}
-		
+
 	case "experimental":
 		return &EnhancedFeatures{
 			AdvancedReasoning:             true,
@@ -173,7 +173,7 @@ func GetFeatureProfile(profile string) *EnhancedFeatures {
 			EnableMetrics:                 true,
 			EnableDebugLogging:            true,
 		}
-		
+
 	case "phase1":
 		return &EnhancedFeatures{
 			AdvancedReasoning:             true,
@@ -194,7 +194,7 @@ func GetFeatureProfile(profile string) *EnhancedFeatures {
 			EnableMetrics:                 true,
 			EnableDebugLogging:            false,
 		}
-		
+
 	case "phase2":
 		return &EnhancedFeatures{
 			AdvancedReasoning:             true,
@@ -215,7 +215,7 @@ func GetFeatureProfile(profile string) *EnhancedFeatures {
 			EnableMetrics:                 true,
 			EnableDebugLogging:            false,
 		}
-		
+
 	case "all":
 		return &EnhancedFeatures{
 			AdvancedReasoning:             true,
@@ -236,20 +236,20 @@ func GetFeatureProfile(profile string) *EnhancedFeatures {
 			EnableMetrics:                 true,
 			EnableDebugLogging:            true,
 		}
-		
+
 	default:
 		return DefaultEnhancedFeatures()
 	}
 }
 
-// IsEnhancedProcessingEnabled checks if any enhanced features are enabled
+// IsEnhancedProcessingEnabled checks if any enhanced features are enabled.
 func (f *EnhancedFeatures) IsEnhancedProcessingEnabled() bool {
 	return f.AdvancedReasoning || f.ConsensusValidation || f.CommentRefinement ||
-		   f.DeclarativeWorkflows || f.IntelligentParallelProcessing || f.AdvancedMemory ||
-		   f.ReactiveProcessing || f.ConversationalMode || f.LearningAdaptation
+		f.DeclarativeWorkflows || f.IntelligentParallelProcessing || f.AdvancedMemory ||
+		f.ReactiveProcessing || f.ConversationalMode || f.LearningAdaptation
 }
 
-// GetPhaseLevel returns the highest enabled phase level
+// GetPhaseLevel returns the highest enabled phase level.
 func (f *EnhancedFeatures) GetPhaseLevel() int {
 	if f.ReactiveProcessing || f.ConversationalMode || f.LearningAdaptation {
 		return 3
@@ -263,40 +263,40 @@ func (f *EnhancedFeatures) GetPhaseLevel() int {
 	return 0
 }
 
-// ValidateConfiguration checks for valid feature combinations
+// ValidateConfiguration checks for valid feature combinations.
 func (f *EnhancedFeatures) ValidateConfiguration() []string {
 	var warnings []string
-	
+
 	// Check for dependencies
 	if f.ConsensusValidation && !f.AdvancedReasoning {
 		warnings = append(warnings, "Consensus validation works best with advanced reasoning enabled")
 	}
-	
+
 	if f.CommentRefinement && !f.ConsensusValidation {
 		warnings = append(warnings, "Comment refinement works best with consensus validation enabled")
 	}
-	
+
 	if f.ReactiveProcessing && !f.DeclarativeWorkflows {
 		warnings = append(warnings, "Reactive processing requires declarative workflows")
 	}
-	
+
 	if f.ConversationalMode && !f.AdvancedMemory {
 		warnings = append(warnings, "Conversational mode requires advanced memory management")
 	}
-	
+
 	// Check for experimental combinations
 	phaseLevel := f.GetPhaseLevel()
 	if phaseLevel >= 3 && !f.FallbackToLegacy {
 		warnings = append(warnings, "Phase 3 features are experimental - consider enabling fallback to legacy")
 	}
-	
+
 	return warnings
 }
 
-// String returns a human-readable description of enabled features
+// String returns a human-readable description of enabled features.
 func (f *EnhancedFeatures) String() string {
 	var enabled []string
-	
+
 	if f.AdvancedReasoning {
 		enabled = append(enabled, "Advanced Reasoning")
 	}
@@ -330,27 +330,27 @@ func (f *EnhancedFeatures) String() string {
 	if f.LearningAdaptation {
 		enabled = append(enabled, "Learning Adaptation")
 	}
-	
+
 	if len(enabled) == 0 {
 		return "Legacy Mode (No Enhanced Features)"
 	}
-	
+
 	return "Enhanced Features: " + strings.Join(enabled, ", ")
 }
 
-// FeatureUsageMetrics tracks which features are being used
+// FeatureUsageMetrics tracks which features are being used.
 type FeatureUsageMetrics struct {
-	AdvancedReasoningUsage    int64
-	ConsensusValidationUsage  int64
-	CommentRefinementUsage    int64
-	LegacyFallbackUsage       int64
-	TotalProcessingAttempts   int64
+	AdvancedReasoningUsage   int64
+	ConsensusValidationUsage int64
+	CommentRefinementUsage   int64
+	LegacyFallbackUsage      int64
+	TotalProcessingAttempts  int64
 }
 
-// TrackFeatureUsage increments usage counters
+// TrackFeatureUsage increments usage counters.
 func (m *FeatureUsageMetrics) TrackFeatureUsage(features *EnhancedFeatures, usedFeature string) {
 	m.TotalProcessingAttempts++
-	
+
 	switch usedFeature {
 	case "advanced_reasoning":
 		m.AdvancedReasoningUsage++
@@ -363,14 +363,14 @@ func (m *FeatureUsageMetrics) TrackFeatureUsage(features *EnhancedFeatures, used
 	}
 }
 
-// GetUsageReport returns a usage report
+// GetUsageReport returns a usage report.
 func (m *FeatureUsageMetrics) GetUsageReport() map[string]interface{} {
 	if m.TotalProcessingAttempts == 0 {
 		return map[string]interface{}{
 			"message": "No processing attempts recorded",
 		}
 	}
-	
+
 	return map[string]interface{}{
 		"total_attempts":             m.TotalProcessingAttempts,
 		"advanced_reasoning_usage":   float64(m.AdvancedReasoningUsage) / float64(m.TotalProcessingAttempts),
@@ -393,11 +393,11 @@ func parseBool(value string, defaultValue bool) bool {
 	}
 }
 
-// Global feature configuration
+// Global feature configuration.
 var globalFeatures *EnhancedFeatures
 var globalMetrics *FeatureUsageMetrics
 
-// InitializeEnhancedFeatures initializes the global feature configuration
+// InitializeEnhancedFeatures initializes the global feature configuration.
 func InitializeEnhancedFeatures() {
 	// Check for profile environment variable first
 	if profile := os.Getenv("MAESTRO_FEATURE_PROFILE"); profile != "" {
@@ -405,16 +405,16 @@ func InitializeEnhancedFeatures() {
 	} else {
 		globalFeatures = LoadEnhancedFeaturesFromEnv()
 	}
-	
+
 	globalMetrics = &FeatureUsageMetrics{}
-	
+
 	// Initialize Phase 2 integration if any Phase 2 features are enabled
 	if globalFeatures.DeclarativeWorkflows || globalFeatures.IntelligentParallelProcessing || globalFeatures.AdvancedMemory {
 		// Note: RAG system needs to be passed from the main application
 		// This will be handled in the main.go initialization
 		println("INFO: Phase 2 features enabled - will initialize advanced workflows")
 	}
-	
+
 	// Validate configuration and log warnings
 	if warnings := globalFeatures.ValidateConfiguration(); len(warnings) > 0 {
 		for _, warning := range warnings {
@@ -424,7 +424,7 @@ func InitializeEnhancedFeatures() {
 	}
 }
 
-// GetGlobalFeatures returns the global feature configuration
+// GetGlobalFeatures returns the global feature configuration.
 func GetGlobalFeatures() *EnhancedFeatures {
 	if globalFeatures == nil {
 		InitializeEnhancedFeatures()
@@ -432,7 +432,7 @@ func GetGlobalFeatures() *EnhancedFeatures {
 	return globalFeatures
 }
 
-// GetGlobalMetrics returns the global feature usage metrics
+// GetGlobalMetrics returns the global feature usage metrics.
 func GetGlobalMetrics() *FeatureUsageMetrics {
 	if globalMetrics == nil {
 		InitializeEnhancedFeatures()
@@ -443,13 +443,6 @@ func GetGlobalMetrics() *FeatureUsageMetrics {
 // Convenience functions for feature checks (used by processors)
 // Note: Individual processors may have their own versions of these functions
 
-func shouldFallbackToLegacy() bool {
-	return GetGlobalFeatures().FallbackToLegacy
-}
-
-func isMetricsEnabled() bool {
-	return GetGlobalFeatures().EnableMetrics
-}
 
 func isDebugLoggingEnabled() bool {
 	return GetGlobalFeatures().EnableDebugLogging

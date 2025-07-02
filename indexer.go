@@ -43,8 +43,7 @@ func NewRepoIndexer(githubTools GitHubInterface, ragStore RAGStore, workers int)
 	}
 }
 
-// IndexRepository indexes the entire repository content into the RAG store.
-// IndexRepositoryBackground runs indexing silently without console output (for background mode)
+// IndexRepositoryBackground runs indexing silently without console output (for background mode).
 func (ri *RepoIndexer) IndexRepositoryBackground(ctx context.Context, branch, dbPath string) error {
 	logger := ri.logger
 	latestSHA, err := ri.githubTools.GetLatestCommitSHA(ctx, branch)
@@ -91,7 +90,7 @@ func (ri *RepoIndexer) IndexRepositoryBackground(ctx context.Context, branch, db
 	return nil
 }
 
-// performFullIndexSilent runs full indexing without console output
+// performFullIndexSilent runs full indexing without console output.
 func (ri *RepoIndexer) performFullIndexSilent(ctx context.Context, latestSHA string) error {
 	logger := ri.logger
 	language, err := ri.detectRepositoryLanguage(ctx)
@@ -208,7 +207,7 @@ func (ri *RepoIndexer) performFullIndexSilent(ctx context.Context, latestSHA str
 	return nil
 }
 
-// performIncrementalIndexSilent runs incremental indexing without console output
+// performIncrementalIndexSilent runs incremental indexing without console output.
 func (ri *RepoIndexer) performIncrementalIndexSilent(ctx context.Context, lastIndexedSHA, latestSHA string) error {
 	logger := ri.logger
 	changes, err := ri.getCommitDifferences(ctx, lastIndexedSHA, latestSHA)
@@ -243,7 +242,7 @@ func (ri *RepoIndexer) performIncrementalIndexSilent(ctx context.Context, lastIn
 	return nil
 }
 
-// processChangedFileSilent processes a changed file without console output
+// processChangedFileSilent processes a changed file without console output.
 func (ri *RepoIndexer) processChangedFileSilent(ctx context.Context, file *github.CommitFile) error {
 	logger := ri.logger
 	// Get the file content

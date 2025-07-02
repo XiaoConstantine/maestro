@@ -340,7 +340,7 @@ func createInteractiveCommands(cfg *config, console ConsoleInterface, agent Revi
 	return rootCmd
 }
 
-// askQuestionWithAgent uses the pre-initialized agent to ask questions
+// askQuestionWithAgent uses the pre-initialized agent to ask questions.
 func askQuestionWithAgent(ctx context.Context, cfg *config, console ConsoleInterface, agent ReviewAgent, question string) error {
 	qaProcessor, _ := agent.Orchestrator(ctx).GetProcessor("repo_qa")
 
@@ -537,11 +537,12 @@ func runCLIWithoutBanner(cfg *config) error {
 	output := logging.NewConsoleOutput(true, logging.WithColor(true))
 	logLevel := logging.INFO
 
-	fileOutput, err := logging.NewFileOutput(
+	fileOutput, _ := logging.NewFileOutput(
 		filepath.Join(".", "dspy.log"),
 		logging.WithRotation(100*1024*1024, 5), // 10MB max size, keep 5 files
 		logging.WithJSONFormat(true),           // Use JSON format
 	)
+	var err error
 	if cfg.verbose {
 		logLevel = logging.DEBUG
 
@@ -1007,122 +1008,6 @@ Examples:
 	return nil
 }
 
-// Modify initializeAndAskQuestions to accept a direct question.
-func initializeAndAskQuestions(ctx context.Context, cfg *config, console ConsoleInterface, initialQuestion string) error {
-	if cfg.githubToken == "" {
-		return fmt.Errorf("GitHub token is required")
-	}
-	// Initialize GitHub tools and other necessary components
-	githubTools := NewGitHubTools(cfg.githubToken, cfg.owner, cfg.repo)
-	if githubTools == nil || githubTools.Client() == nil {
-		return fmt.Errorf("failed to initialize GitHub client")
-	}
-
-	dbPath, err := CreateStoragePath(ctx, cfg.owner, cfg.repo)
-	if err != nil {
-		return fmt.Errorf("failed to create storage path: %w", err)
-	}
-	agent, err := NewPRReviewAgent(ctx, githubTools, dbPath, &AgentConfig{
-		IndexWorkers:  cfg.indexWorkers,
-		ReviewWorkers: cfg.reviewWorkers,
-	})
-	// Agent initialized
-	if err != nil {
-		return fmt.Errorf("Failed to initiliaze agent due to : %v", err)
-	}
-
-	qaProcessor, _ := agent.Orchestrator(ctx).GetProcessor("repo_qa")
-
-	// If an initial question was provided, process it first
-	if initialQuestion != "" {
-		result, err := qaProcessor.Process(ctx, agents.Task{
-			ID: "qa",
-			Metadata: map[string]interface{}{
-				"question": initialQuestion,
-			},
-		}, nil)
-
-		if err != nil {
-			console.Printf("Error processing question: %v\n", err)
-		} else if response, ok := result.(*QAResponse); ok {
-			// Print a separator line for visual clarity
-			console.Println("\n" + strings.Repeat("─", 80))
-
-			// Format and print the main answer using structured sections
-			formattedAnswer := formatStructuredAnswer(response.Answer)
-			console.Println(formattedAnswer)
-
-			// Print source files in a tree-like structure if available
-			if len(response.SourceFiles) > 0 {
-				if console.Color() {
-					console.Println("\n" + aurora.Blue("Source Files:").String())
-				} else {
-					console.Println("\nSource Files:")
-				}
-
-				// Group files by directory for better organization
-				filesByDir := groupFilesByDirectory(response.SourceFiles)
-				printFileTree(console, filesByDir)
-			}
-
-			// Print final separator
-			console.Println("\n" + strings.Repeat("─", 80) + "\n")
-		}
-		return nil
-	}
-
-	// Interactive question loop
-	for {
-		var question string
-		questionPrompt := &survey.Input{
-			Message: "Ask a question about the repository (or type 'exit' to return to main menu):",
-		}
-		if err := survey.AskOne(questionPrompt, &question); err != nil {
-			return fmt.Errorf("failed to get question: %w", err)
-		}
-
-		if strings.ToLower(question) == "exit" {
-			return nil
-		}
-
-		// Process the question
-		result, err := qaProcessor.Process(ctx, agents.Task{
-			ID: "qa",
-			Metadata: map[string]interface{}{
-				"question": question,
-			},
-		}, nil)
-
-		if err != nil {
-			fmt.Printf("Error processing question: %v\n", err)
-			continue
-		}
-		if response, ok := result.(*QAResponse); ok {
-			// Print a separator line for visual clarity
-			console.Println("\n" + strings.Repeat("─", 80))
-
-			// Format and print the main answer using structured sections
-			formattedAnswer := formatStructuredAnswer(response.Answer)
-			console.Println(formattedAnswer)
-
-			// Print source files in a tree-like structure if available
-			if len(response.SourceFiles) > 0 {
-				if console.Color() {
-					console.Println("\n" + aurora.Blue("Source Files:").String())
-				} else {
-					console.Println("\nSource Files:")
-				}
-
-				// Group files by directory for better organization
-				filesByDir := groupFilesByDirectory(response.SourceFiles)
-				printFileTree(console, filesByDir)
-			}
-
-			// Print final separator
-			console.Println("\n" + strings.Repeat("─", 80) + "\n")
-		}
-	}
-}
 
 func showHelpMessage(c ConsoleInterface) {
 	c.PrintHeader("Available Commands")

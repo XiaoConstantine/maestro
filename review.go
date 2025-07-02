@@ -119,7 +119,7 @@ type AgentConfig struct {
 	ReviewWorkers int
 }
 
-// IndexingStatus tracks the progress of background repository indexing
+// IndexingStatus tracks the progress of background repository indexing.
 type IndexingStatus struct {
 	mu            sync.RWMutex
 	isIndexing    bool
@@ -458,7 +458,7 @@ func NewPRReviewAgent(ctx context.Context, githubTool GitHubInterface, dbPath st
 	return agent, nil
 }
 
-// shouldUseDeclarativeWorkflows determines if declarative workflows should be used
+// shouldUseDeclarativeWorkflows determines if declarative workflows should be used.
 func shouldUseDeclarativeWorkflows() bool {
 	features := GetGlobalFeatures()
 	if features == nil {
@@ -467,7 +467,7 @@ func shouldUseDeclarativeWorkflows() bool {
 	return features.DeclarativeWorkflows
 }
 
-// processChunkWithDeclarativeWorkflow processes a chunk using the declarative workflow system
+// processChunkWithDeclarativeWorkflow processes a chunk using the declarative workflow system.
 func (a *PRReviewAgent) processChunkWithDeclarativeWorkflow(ctx context.Context, chunkContext map[string]interface{}) (*agents.OrchestratorResult, error) {
 	if a.declarativeChain == nil {
 		return nil, fmt.Errorf("declarative workflow not initialized")
@@ -519,7 +519,7 @@ func (a *PRReviewAgent) processChunkWithDeclarativeWorkflow(ctx context.Context,
 	return a.convertDeclarativeToOrchestratorResult(result), nil
 }
 
-// generateResponseWithDeclarativeWorkflow generates a response using declarative workflow
+// generateResponseWithDeclarativeWorkflow generates a response using declarative workflow.
 func (a *PRReviewAgent) generateResponseWithDeclarativeWorkflow(ctx context.Context, responseContext map[string]interface{}) (*agents.OrchestratorResult, error) {
 	if a.declarativeChain == nil {
 		return nil, fmt.Errorf("declarative workflow not initialized")
@@ -593,7 +593,7 @@ func (a *PRReviewAgent) generateResponseWithDeclarativeWorkflow(ctx context.Cont
 	return a.convertDeclarativeToOrchestratorResult(result), nil
 }
 
-// convertDeclarativeToOrchestratorResult converts declarative workflow result to orchestrator format
+// convertDeclarativeToOrchestratorResult converts declarative workflow result to orchestrator format.
 func (a *PRReviewAgent) convertDeclarativeToOrchestratorResult(result interface{}) *agents.OrchestratorResult {
 	if resultMap, ok := result.(map[string]interface{}); ok {
 		return &agents.OrchestratorResult{
@@ -1022,7 +1022,7 @@ func (a *PRReviewAgent) Config() *AgentConfig {
 	return a.workers
 }
 
-// processChunkWithEnhancements processes a chunk with enhanced DSPy-Go features if enabled
+// processChunkWithEnhancements processes a chunk with enhanced DSPy-Go features if enabled.
 func (a *PRReviewAgent) processChunkWithEnhancements(ctx context.Context, workData interface{}, chunkContext map[string]interface{}) (*agents.OrchestratorResult, error) {
 	// Check if enhanced features are enabled
 	if globalFeatures != nil && globalFeatures.IsEnhancedProcessingEnabled() {
@@ -1054,7 +1054,7 @@ func (a *PRReviewAgent) processChunkWithEnhancements(ctx context.Context, workDa
 		chunkContext)
 }
 
-// processChunkEnhanced implements enhanced chunk processing with advanced DSPy-Go capabilities
+// processChunkEnhanced implements enhanced chunk processing with advanced DSPy-Go capabilities.
 func (a *PRReviewAgent) processChunkEnhanced(ctx context.Context, workData interface{}, chunkContext map[string]interface{}) (*agents.OrchestratorResult, error) {
 	logger := logging.GetLogger()
 	enhancedStart := time.Now()
@@ -1120,7 +1120,7 @@ func (a *PRReviewAgent) processChunkEnhanced(ctx context.Context, workData inter
 	return a.convertEnhancedToOrchestrationResult(result), nil
 }
 
-// convertEnhancedToOrchestrationResult converts enhanced processor result to orchestration result
+// convertEnhancedToOrchestrationResult converts enhanced processor result to orchestration result.
 func (a *PRReviewAgent) convertEnhancedToOrchestrationResult(result interface{}) *agents.OrchestratorResult {
 	// Convert enhanced result to the format expected by the existing system
 	resultMap, ok := result.(map[string]interface{})
@@ -1157,7 +1157,7 @@ func (a *PRReviewAgent) processChunksParallel(ctx context.Context, tasks []PRRev
 	return a.processChunksManual(ctx, tasks, repoPatterns, guidelineMatches, console)
 }
 
-// shouldUseIntelligentProcessing determines if intelligent processing should be used
+// shouldUseIntelligentProcessing determines if intelligent processing should be used.
 func (a *PRReviewAgent) shouldUseIntelligentProcessing() bool {
 	features := GetGlobalFeatures()
 	if features == nil {
@@ -1170,7 +1170,7 @@ func (a *PRReviewAgent) shouldUseIntelligentProcessing() bool {
 		features.LoadBalancing
 }
 
-// processChunksIntelligent uses intelligent coordination with existing chunk processing logic
+// processChunksIntelligent uses intelligent coordination with existing chunk processing logic.
 func (a *PRReviewAgent) processChunksIntelligent(ctx context.Context, tasks []PRReviewTask, repoPatterns []*Content, guidelineMatches []*Content, console ConsoleInterface) ([]PRReviewComment, error) {
 	logger := logging.GetLogger()
 	logger.Info(ctx, "🚀 Starting Phase 2.2 Intelligent Parallel Processing for %d files", len(tasks))
@@ -1218,7 +1218,7 @@ func (a *PRReviewAgent) processChunksIntelligent(ctx context.Context, tasks []PR
 	return allComments, nil
 }
 
-// calculateAdaptiveConcurrency determines optimal concurrency based on system resources and workload
+// calculateAdaptiveConcurrency determines optimal concurrency based on system resources and workload.
 func (a *PRReviewAgent) calculateAdaptiveConcurrency(ctx context.Context, totalChunks, baseConcurrency int) int {
 	logger := logging.GetLogger()
 
@@ -1273,7 +1273,7 @@ func (a *PRReviewAgent) calculateAdaptiveConcurrency(ctx context.Context, totalC
 	return adaptiveConcurrency
 }
 
-// createResourceMonitor creates a lightweight resource monitor for intelligent processing
+// createResourceMonitor creates a lightweight resource monitor for intelligent processing.
 func (a *PRReviewAgent) createResourceMonitor(ctx context.Context) *SimpleResourceMonitor {
 	return &SimpleResourceMonitor{
 		ctx:    ctx,
@@ -1282,7 +1282,7 @@ func (a *PRReviewAgent) createResourceMonitor(ctx context.Context) *SimpleResour
 	}
 }
 
-// SimpleResourceMonitor provides basic resource monitoring
+// SimpleResourceMonitor provides basic resource monitoring.
 type SimpleResourceMonitor struct {
 	ctx    context.Context
 	stopCh chan struct{}
@@ -1293,7 +1293,7 @@ func (rm *SimpleResourceMonitor) Stop() {
 	close(rm.stopCh)
 }
 
-// processChunksWithIntelligentCoordination processes chunks using intelligent coordination with existing logic
+// processChunksWithIntelligentCoordination processes chunks using intelligent coordination with existing logic.
 func (a *PRReviewAgent) processChunksWithIntelligentCoordination(ctx context.Context, tasks []PRReviewTask, repoPatterns []*Content, guidelineMatches []*Content, console ConsoleInterface, concurrency int, resourceMonitor *SimpleResourceMonitor) ([]PRReviewComment, error) {
 	logger := logging.GetLogger()
 	logger.Info(ctx, "🎯 Starting intelligent coordination with %d workers", concurrency)
@@ -1532,124 +1532,9 @@ func (a *PRReviewAgent) processChunksWithIntelligentCoordination(ctx context.Con
 	return allComments, nil
 }
 
-// extractCommentsFromIntelligentResults extracts comments from intelligent processing results
-func (a *PRReviewAgent) extractCommentsFromIntelligentResults(ctx context.Context, results map[string]interface{}, console ConsoleInterface) []PRReviewComment {
-	logger := logging.GetLogger()
-	var allComments []PRReviewComment
+// extractCommentsFromIntelligentResults extracts comments from intelligent processing results.
 
-	// Process results from intelligent file processor
-	if embeddings, exists := results["embeddings"]; exists {
-		if embeddingMap, ok := embeddings.(map[string]interface{}); ok {
-			for filePath, embedding := range embeddingMap {
-				if embeddingData, ok := embedding.(map[string]interface{}); ok {
-					// Extract review information from embedding metadata
-					if reviewData, exists := embeddingData["review_data"]; exists {
-						comments := a.convertIntelligentResultToComments(ctx, filePath, reviewData)
-						if len(comments) > 0 {
-							console.ShowComments(comments, a.Metrics(ctx))
-							allComments = append(allComments, comments...)
-						} else {
-							console.NoIssuesFound(filePath, 1, 1)
-						}
-					}
-				}
-			}
-		}
-	}
 
-	// Process patterns results
-	if patterns, exists := results["patterns"]; exists {
-		if patternMap, ok := patterns.(map[string]interface{}); ok {
-			for filePath, pattern := range patternMap {
-				if patternData, ok := pattern.(map[string]interface{}); ok {
-					comments := a.convertPatternResultToComments(ctx, filePath, patternData)
-					if len(comments) > 0 {
-						allComments = append(allComments, comments...)
-					}
-				}
-			}
-		}
-	}
-
-	logger.Debug(ctx, "Extracted %d comments from intelligent processing results", len(allComments))
-	return allComments
-}
-
-// convertIntelligentResultToComments converts intelligent processing results to review comments
-func (a *PRReviewAgent) convertIntelligentResultToComments(ctx context.Context, filePath string, reviewData interface{}) []PRReviewComment {
-	var comments []PRReviewComment
-
-	if reviewMap, ok := reviewData.(map[string]interface{}); ok {
-		if issues, exists := reviewMap["issues"]; exists {
-			if issueList, ok := issues.([]interface{}); ok {
-				for _, issue := range issueList {
-					if issueMap, ok := issue.(map[string]interface{}); ok {
-						comment := PRReviewComment{
-							FilePath:   filePath,
-							Content:    getStringValue(issueMap, "description", "Code issue detected"),
-							Category:   getStringValue(issueMap, "category", "general"),
-							Severity:   getStringValue(issueMap, "severity", "medium"),
-							Suggestion: getStringValue(issueMap, "suggestion", ""),
-							LineNumber: getIntValue(issueMap, "line_number", 1),
-						}
-						comments = append(comments, comment)
-					}
-				}
-			}
-		}
-	}
-
-	return comments
-}
-
-// convertPatternResultToComments converts pattern analysis results to review comments
-func (a *PRReviewAgent) convertPatternResultToComments(ctx context.Context, filePath string, patternData interface{}) []PRReviewComment {
-	var comments []PRReviewComment
-
-	if patternMap, ok := patternData.(map[string]interface{}); ok {
-		if violations, exists := patternMap["violations"]; exists {
-			if violationList, ok := violations.([]interface{}); ok {
-				for _, violation := range violationList {
-					if violationMap, ok := violation.(map[string]interface{}); ok {
-						comment := PRReviewComment{
-							FilePath:   filePath,
-							Content:    getStringValue(violationMap, "message", "Pattern violation detected"),
-							Category:   "pattern",
-							Severity:   getStringValue(violationMap, "severity", "low"),
-							Suggestion: getStringValue(violationMap, "fix", ""),
-							LineNumber: getIntValue(violationMap, "line", 1),
-						}
-						comments = append(comments, comment)
-					}
-				}
-			}
-		}
-	}
-
-	return comments
-}
-
-// Helper functions for safe type conversion
-func getStringValue(m map[string]interface{}, key, defaultValue string) string {
-	if val, exists := m[key]; exists {
-		if str, ok := val.(string); ok {
-			return str
-		}
-	}
-	return defaultValue
-}
-
-func getIntValue(m map[string]interface{}, key string, defaultValue int) int {
-	if val, exists := m[key]; exists {
-		if num, ok := val.(float64); ok {
-			return int(num)
-		}
-		if num, ok := val.(int); ok {
-			return num
-		}
-	}
-	return defaultValue
-}
 
 // processChunksManual handles manual parallel chunk processing (legacy fallback).
 func (a *PRReviewAgent) processChunksManual(ctx context.Context, tasks []PRReviewTask, repoPatterns []*Content, guidelineMatches []*Content, console ConsoleInterface) ([]PRReviewComment, error) {
@@ -2026,7 +1911,7 @@ func (a *PRReviewAgent) monitorAndRespond(ctx context.Context, prNumber int, con
 
 }
 
-// processReview handles the processing of a GitHub review (like from gemini-code-assist)
+// processReview handles the processing of a GitHub review (like from gemini-code-assist).
 func (a *PRReviewAgent) processReview(ctx context.Context, review *github.PullRequestReview, prNumber int, console ConsoleInterface) {
 	logger := logging.GetLogger()
 
@@ -2386,7 +2271,7 @@ func convertGitHubComment(comment *github.PullRequestComment) PRReviewComment {
 	}
 }
 
-// isBotComment checks if a comment is from a known bot
+// isBotComment checks if a comment is from a known bot.
 func isBotComment(comment *github.PullRequestComment) bool {
 	if comment == nil || comment.GetUser() == nil {
 		return false
@@ -2426,7 +2311,7 @@ func isBotComment(comment *github.PullRequestComment) bool {
 	return false
 }
 
-// isBotReview checks if a review is from a known bot (similar to isBotComment)
+// isBotReview checks if a review is from a known bot (similar to isBotComment).
 func isBotReview(review *github.PullRequestReview) bool {
 	if review == nil || review.GetUser() == nil {
 		return false

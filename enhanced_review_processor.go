@@ -18,13 +18,13 @@ import (
 	"github.com/XiaoConstantine/dspy-go/pkg/modules"
 )
 
-// Global module cache to prevent redundant module creation
+// Global module cache to prevent redundant module creation.
 var (
 	moduleCache    = sync.Map{}
 	moduleCacheMux = sync.RWMutex{}
 )
 
-// ModuleCacheEntry holds cached module instances
+// ModuleCacheEntry holds cached module instances.
 type ModuleCacheEntry struct {
 	BasePredict *modules.Predict
 	//	RefinementModule  *modules.Refine
@@ -33,7 +33,7 @@ type ModuleCacheEntry struct {
 	CreatedAt         time.Time
 }
 
-// EnhancedCodeReviewProcessor implements optimized reasoning for code review with consensus and refinement
+// EnhancedCodeReviewProcessor implements optimized reasoning for code review with consensus and refinement.
 type EnhancedCodeReviewProcessor struct {
 	parallelProcessor *modules.Parallel
 	refinementModule  *modules.Refine
@@ -42,7 +42,7 @@ type EnhancedCodeReviewProcessor struct {
 	logger            *logging.Logger
 }
 
-// ReviewIssue represents a code issue identified through reasoning
+// ReviewIssue represents a code issue identified through reasoning.
 type ReviewIssue struct {
 	FilePath    string    `json:"file_path"`
 	LineRange   LineRange `json:"line_range"`
@@ -55,7 +55,7 @@ type ReviewIssue struct {
 	CodeExample string    `json:"code_example,omitempty"`
 }
 
-// EnhancedReviewResult contains the output of enhanced reasoning
+// EnhancedReviewResult contains the output of enhanced reasoning.
 type EnhancedReviewResult struct {
 	Issues         []ReviewIssue `json:"issues"`
 	OverallQuality string        `json:"overall_quality"`
@@ -64,7 +64,7 @@ type EnhancedReviewResult struct {
 	ProcessingTime float64       `json:"processing_time_ms"`
 }
 
-// hashSignature creates a unique hash for a signature based on its structure
+// hashSignature creates a unique hash for a signature based on its structure.
 func hashSignature(sig core.Signature) string {
 	hasher := md5.New()
 
@@ -84,7 +84,7 @@ func hashSignature(sig core.Signature) string {
 	return hex.EncodeToString(hasher.Sum(nil))
 }
 
-// getOrCreateModules retrieves cached modules or creates new ones if not found
+// getOrCreateModules retrieves cached modules or creates new ones if not found.
 func getOrCreateModules(signature core.Signature) *ModuleCacheEntry {
 	signatureHash := hashSignature(signature)
 
@@ -139,7 +139,7 @@ func getOrCreateModules(signature core.Signature) *ModuleCacheEntry {
 	return entry
 }
 
-// NewEnhancedCodeReviewProcessor creates an optimized processor using cached DSPy modules
+// NewEnhancedCodeReviewProcessor creates an optimized processor using cached DSPy modules.
 func NewEnhancedCodeReviewProcessor(metrics MetricsCollector, logger *logging.Logger) *EnhancedCodeReviewProcessor {
 	// Create signature for direct code review (using Predict for fast, deterministic analysis)
 	signature := core.NewSignature(
@@ -236,7 +236,7 @@ IMPORTANT: Better to return NO issues than generic, unhelpful comments. Quality 
 	}
 }
 
-// codeReviewQualityReward evaluates the quality of a code review result with generous scoring
+// codeReviewQualityReward evaluates the quality of a code review result with generous scoring.
 func codeReviewQualityReward(inputs map[string]interface{}, outputs map[string]interface{}) float64 {
 	// Lower base score, more room for rewards
 	qualityScore := 0.3
@@ -301,7 +301,7 @@ func codeReviewQualityReward(inputs map[string]interface{}, outputs map[string]i
 	finalScore := qualityScore
 	if qualityScore > 1.0 {
 		finalScore = 1.0
-		scoreBreakdown = append(scoreBreakdown, "capped to 1.0")
+		_ = append(scoreBreakdown, "capped to 1.0")
 	}
 
 	// Note: Reward calculation complete
@@ -309,7 +309,7 @@ func codeReviewQualityReward(inputs map[string]interface{}, outputs map[string]i
 	return finalScore
 }
 
-// GetModuleCacheStats returns statistics about the module cache
+// GetModuleCacheStats returns statistics about the module cache.
 func GetModuleCacheStats() map[string]interface{} {
 	stats := make(map[string]interface{})
 
@@ -337,7 +337,7 @@ func GetModuleCacheStats() map[string]interface{} {
 	return stats
 }
 
-// ClearModuleCache clears all cached modules (useful for testing or memory management)
+// ClearModuleCache clears all cached modules (useful for testing or memory management).
 func ClearModuleCache() {
 	moduleCache.Range(func(key, value interface{}) bool {
 		moduleCache.Delete(key)
@@ -345,7 +345,7 @@ func ClearModuleCache() {
 	})
 }
 
-// getFileTypeContext analyzes the file path to provide context-specific review guidelines
+// getFileTypeContext analyzes the file path to provide context-specific review guidelines.
 func (p *EnhancedCodeReviewProcessor) getFileTypeContext(filePath string) string {
 	if strings.Contains(filePath, "_test.go") || strings.Contains(filePath, "/test/") {
 		return "TEST_FILE: Focus on test quality, coverage, edge cases, and maintainability. Do NOT suggest performance optimizations like caching in tests unless they're actually needed for test execution."
@@ -365,7 +365,7 @@ func (p *EnhancedCodeReviewProcessor) getFileTypeContext(filePath string) string
 	return "PRODUCTION_FILE: Focus on correctness, security vulnerabilities, error handling, and maintainability."
 }
 
-// Process performs optimized code review using Parallel, Refine, and consensus modules
+// Process performs optimized code review using Parallel, Refine, and consensus modules.
 func (p *EnhancedCodeReviewProcessor) Process(ctx context.Context, task agents.Task, taskContext map[string]interface{}) (interface{}, error) {
 	// Check if enhanced processing is enabled
 	if !isEnhancedProcessingEnabled() {
@@ -434,7 +434,7 @@ func (p *EnhancedCodeReviewProcessor) Process(ctx context.Context, task agents.T
 	return enhancedResult, nil
 }
 
-// ProcessMultipleChunks processes multiple code chunks in parallel with consensus for critical issues
+// ProcessMultipleChunks processes multiple code chunks in parallel with consensus for critical issues.
 func (p *EnhancedCodeReviewProcessor) ProcessMultipleChunks(ctx context.Context, tasks []agents.Task, taskContext map[string]interface{}) ([]interface{}, error) {
 	if !isEnhancedProcessingEnabled() {
 		p.logger.Info(ctx, "Enhanced processing disabled, falling back to legacy processing")
@@ -527,7 +527,7 @@ func (p *EnhancedCodeReviewProcessor) ProcessMultipleChunks(ctx context.Context,
 	return enhancedResults, nil
 }
 
-// parseReasoningResult converts the reasoning module output into structured results
+// parseReasoningResult converts the reasoning module output into structured results.
 func (p *EnhancedCodeReviewProcessor) parseReasoningResult(ctx context.Context, result map[string]interface{}, filePath string, startTime float64) (*EnhancedReviewResult, error) {
 	// Extract reasoning chain
 	reasoningSteps, _ := result["reasoning_steps"].(string)
@@ -563,7 +563,7 @@ func (p *EnhancedCodeReviewProcessor) parseReasoningResult(ctx context.Context, 
 	}, nil
 }
 
-// parseIssuesFromJSON attempts to parse issues from JSON format
+// parseIssuesFromJSON attempts to parse issues from JSON format.
 func (p *EnhancedCodeReviewProcessor) parseIssuesFromJSON(issuesJSON, filePath string) ([]ReviewIssue, error) {
 	if issuesJSON == "" {
 		return []ReviewIssue{}, nil
@@ -587,7 +587,7 @@ func (p *EnhancedCodeReviewProcessor) parseIssuesFromJSON(issuesJSON, filePath s
 	return issues, nil
 }
 
-// isValidIssue checks if an issue provides meaningful, actionable feedback
+// isValidIssue checks if an issue provides meaningful, actionable feedback.
 func (p *EnhancedCodeReviewProcessor) isValidIssue(issue *ReviewIssue) bool {
 	if issue == nil {
 		return false
@@ -640,7 +640,7 @@ func (p *EnhancedCodeReviewProcessor) isValidIssue(issue *ReviewIssue) bool {
 	return true
 }
 
-// convertMapToIssue converts a map to a ReviewIssue struct
+// convertMapToIssue converts a map to a ReviewIssue struct.
 func (p *EnhancedCodeReviewProcessor) convertMapToIssue(rawIssue map[string]interface{}, filePath string) *ReviewIssue {
 	// Extract required fields with defaults
 	category, _ := rawIssue["category"].(string)
@@ -695,7 +695,7 @@ func (p *EnhancedCodeReviewProcessor) convertMapToIssue(rawIssue map[string]inte
 	}
 }
 
-// extractIssuesFromRationale extracts JSON array from rationale text
+// extractIssuesFromRationale extracts JSON array from rationale text.
 func (p *EnhancedCodeReviewProcessor) extractIssuesFromRationale(rationale, filePath string) []ReviewIssue {
 	if rationale == "" {
 		return []ReviewIssue{}
@@ -722,7 +722,7 @@ func (p *EnhancedCodeReviewProcessor) extractIssuesFromRationale(rationale, file
 	return issues
 }
 
-// parseIssuesFromText fallback parsing when JSON parsing fails
+// parseIssuesFromText fallback parsing when JSON parsing fails.
 func (p *EnhancedCodeReviewProcessor) parseIssuesFromText(issuesText, filePath string) []ReviewIssue {
 	issues := []ReviewIssue{}
 
@@ -744,7 +744,7 @@ func (p *EnhancedCodeReviewProcessor) parseIssuesFromText(issuesText, filePath s
 	return issues
 }
 
-// parseIssueFromLine parses a single issue from a text line (fallback method)
+// parseIssueFromLine parses a single issue from a text line (fallback method).
 func (p *EnhancedCodeReviewProcessor) parseIssueFromLine(line, filePath string) *ReviewIssue {
 	// Simplified parsing - extract key information
 	category := extractBetween(line, `"category":`, `"`, `"`)
@@ -775,7 +775,7 @@ func (p *EnhancedCodeReviewProcessor) parseIssueFromLine(line, filePath string) 
 	}
 }
 
-// fallbackToLegacy falls back to the original processor when enhanced processing fails
+// fallbackToLegacy falls back to the original processor when enhanced processing fails.
 func (p *EnhancedCodeReviewProcessor) fallbackToLegacy(ctx context.Context, task agents.Task, taskContext map[string]interface{}) (interface{}, error) {
 	p.logger.Info(ctx, "Falling back to legacy processor")
 
@@ -784,7 +784,7 @@ func (p *EnhancedCodeReviewProcessor) fallbackToLegacy(ctx context.Context, task
 	return legacyProcessor.Process(ctx, task, taskContext)
 }
 
-// trackEnhancedMetrics records metrics for enhanced processing
+// trackEnhancedMetrics records metrics for enhanced processing.
 func (p *EnhancedCodeReviewProcessor) trackEnhancedMetrics(ctx context.Context, result *EnhancedReviewResult, filePath string) {
 	if p.metrics != nil {
 		// Basic metrics tracking - extend MetricsCollector interface as needed

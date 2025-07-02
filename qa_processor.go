@@ -14,10 +14,10 @@ import (
 	"github.com/XiaoConstantine/dspy-go/pkg/modules"
 )
 
-// Simple cache for Predict modules
+// Simple cache for Predict modules.
 var qaModuleCache = sync.Map{}
 
-// getCachedPredictModule returns a cached Predict module or creates a new one
+// getCachedPredictModule returns a cached Predict module or creates a new one.
 func getCachedPredictModule(signature core.Signature) *modules.Predict {
 	// Create signature hash
 	hasher := md5.New()
@@ -29,14 +29,14 @@ func getCachedPredictModule(signature core.Signature) *modules.Predict {
 	}
 	hasher.Write([]byte(signature.Instruction))
 	signatureHash := hex.EncodeToString(hasher.Sum(nil))
-	
+
 	// Try to get from cache
 	if cached, ok := qaModuleCache.Load(signatureHash); ok {
 		if predict, ok := cached.(*modules.Predict); ok {
 			return predict
 		}
 	}
-	
+
 	// Create new and cache
 	predict := modules.NewPredict(signature).WithName("QAAnalyzer")
 	qaModuleCache.Store(signatureHash, predict)
