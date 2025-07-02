@@ -205,7 +205,7 @@ func (p *CommentRefinementProcessor) Process(ctx context.Context, task agents.Ta
 	// Track metrics
 	p.trackRefinementMetrics(ctx, result)
 
-	p.logger.Info(ctx, "Comment refinement completed: %d comments with %.2f average quality",
+	p.logger.Debug(ctx, "Comment refinement completed: %d comments with %.2f average quality",
 		len(refinedComments), averageQuality)
 
 	return result, nil

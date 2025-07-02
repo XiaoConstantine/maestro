@@ -2,8 +2,8 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
-	"strings"
 
 	"github.com/XiaoConstantine/dspy-go/pkg/agents"
 	"github.com/XiaoConstantine/dspy-go/pkg/core"
@@ -176,7 +176,7 @@ func (p *ConsensusValidationProcessor) Process(ctx context.Context, task agents.
 	// Track metrics
 	p.trackValidationMetrics(ctx, result)
 
-	p.logger.Info(ctx, "Consensus validation completed: %d validated, %d rejected, %.2f consensus score",
+	p.logger.Debug(ctx, "Consensus validation completed: %d validated, %d rejected, %.2f consensus score",
 		len(validatedIssues), len(rejectedIssues), consensusScore)
 
 	return result, nil
@@ -243,46 +243,21 @@ func (p *ConsensusValidationProcessor) parseValidationResult(result map[string]i
 
 // parseValidatorPerspectives parses individual validator results from JSON
 func (p *ConsensusValidationProcessor) parseValidatorPerspectives(perspectivesData interface{}) []ValidatorResult {
-	results := []ValidatorResult{}
+	var results []ValidatorResult
 
-	// Try to parse as string (JSON format)
+	// Try to parse as a JSON string first for robustness
 	if perspectivesStr, ok := perspectivesData.(string); ok {
-		// Simple parsing - look for validator patterns
-		validatorTypes := []string{"context", "compliance", "impact"}
-
-		for _, validatorType := range validatorTypes {
-			if strings.Contains(strings.ToLower(perspectivesStr), validatorType) {
-				decision := "accept"
-				confidence := 0.7
-				reasoning := fmt.Sprintf("%s validator result", validatorType)
-
-				if strings.Contains(strings.ToLower(perspectivesStr), "reject") {
-					decision = "reject"
-				} else if strings.Contains(strings.ToLower(perspectivesStr), "uncertain") {
-					decision = "uncertain"
-					confidence = 0.5
-				}
-
-				results = append(results, ValidatorResult{
-					ValidatorType: validatorType,
-					Decision:      decision,
-					Confidence:    confidence,
-					Reasoning:     reasoning,
-				})
-			}
+		if err := json.Unmarshal([]byte(perspectivesStr), &results); err == nil && len(results) > 0 {
+			return results
 		}
 	}
 
-	// If no results parsed, create default results
-	if len(results) == 0 {
-		results = []ValidatorResult{
-			{ValidatorType: "context", Decision: "accept", Confidence: 0.7, Reasoning: "Default context validation"},
-			{ValidatorType: "compliance", Decision: "accept", Confidence: 0.7, Reasoning: "Default compliance validation"},
-			{ValidatorType: "impact", Decision: "accept", Confidence: 0.7, Reasoning: "Default impact validation"},
-		}
+	// Fallback if JSON parsing fails or no results are parsed
+	return []ValidatorResult{
+		{ValidatorType: "context", Decision: "accept", Confidence: 0.7, Reasoning: "Default context validation (fallback)"},
+		{ValidatorType: "compliance", Decision: "accept", Confidence: 0.7, Reasoning: "Default compliance validation (fallback)"},
+		{ValidatorType: "impact", Decision: "accept", Confidence: 0.7, Reasoning: "Default impact validation (fallback)"},
 	}
-
-	return results
 }
 
 // extractValidationInput extracts validation inputs from task and context

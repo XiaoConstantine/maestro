@@ -400,11 +400,11 @@ func (p *EnhancedCodeReviewProcessor) Process(ctx context.Context, task agents.T
 
 	// Prepare inputs for reasoning module
 	inputs := map[string]interface{}{
-		"file_content":     fileContent,
-		"changes":          changes,
-		"guidelines":       guidelines,
-		"repo_context":     repoContext,
-		"file_path":        filePath,
+		"file_content":      fileContent,
+		"changes":           changes,
+		"guidelines":        guidelines,
+		"repo_context":      repoContext,
+		"file_path":         filePath,
 		"file_type_context": fileTypeContext,
 	}
 
@@ -428,7 +428,7 @@ func (p *EnhancedCodeReviewProcessor) Process(ctx context.Context, task agents.T
 	// Track metrics for enhanced processing
 	p.trackEnhancedMetrics(ctx, enhancedResult, filePath)
 
-	p.logger.Info(ctx, "Enhanced code review completed for %s: found %d issues with %.2f confidence",
+	p.logger.Debug(ctx, "Enhanced code review completed for %s: found %d issues with %.2f confidence",
 		filePath, len(enhancedResult.Issues), enhancedResult.Confidence)
 
 	return enhancedResult, nil
@@ -464,11 +464,11 @@ func (p *EnhancedCodeReviewProcessor) ProcessMultipleChunks(ctx context.Context,
 		fileTypeContext := p.getFileTypeContext(filePath)
 
 		inputsBatch[i] = map[string]interface{}{
-			"file_content":     fileContent,
-			"changes":          changes,
-			"guidelines":       guidelines,
-			"repo_context":     repoContext,
-			"file_path":        filePath,
+			"file_content":      fileContent,
+			"changes":           changes,
+			"guidelines":        guidelines,
+			"repo_context":      repoContext,
+			"file_path":         filePath,
 			"file_type_context": fileTypeContext,
 		}
 	}
@@ -734,7 +734,7 @@ func (p *EnhancedCodeReviewProcessor) parseIssuesFromText(issuesText, filePath s
 			if issue != nil && p.isValidIssue(issue) {
 				issues = append(issues, *issue)
 			}
-			}
+		}
 	}
 
 	// REMOVED: Generic fallback comments - they provide no value
