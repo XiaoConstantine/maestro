@@ -8,8 +8,8 @@ import (
 
 	"github.com/XiaoConstantine/dspy-go/pkg/agents"
 	"github.com/XiaoConstantine/dspy-go/pkg/core"
-	"github.com/XiaoConstantine/dspy-go/pkg/modules"
 	"github.com/XiaoConstantine/dspy-go/pkg/logging"
+	"github.com/XiaoConstantine/dspy-go/pkg/modules"
 )
 
 // CommentRefinementProcessor implements iterative comment improvement using Refine module
@@ -43,12 +43,12 @@ type CommentRefinementResult struct {
 
 // CommentQualityMetrics tracks comment quality aspects
 type CommentQualityMetrics struct {
-	Clarity       float64 `json:"clarity"`
-	Actionability float64 `json:"actionability"`
+	Clarity         float64 `json:"clarity"`
+	Actionability   float64 `json:"actionability"`
 	Professionalism float64 `json:"professionalism"`
-	Specificity   float64 `json:"specificity"`
-	Helpfulness   float64 `json:"helpfulness"`
-	Overall       float64 `json:"overall"`
+	Specificity     float64 `json:"specificity"`
+	Helpfulness     float64 `json:"helpfulness"`
+	Overall         float64 `json:"overall"`
 }
 
 // NewCommentRefinementProcessor creates a new comment refinement processor
@@ -65,10 +65,10 @@ func NewCommentRefinementProcessor(metrics MetricsCollector, logger *logging.Log
 			{Field: core.Field{Name: "previous_attempt", Description: "Previous comment attempt (if any)"}},
 		},
 		[]core.OutputField{
-			{Field: core.Field{Name: "comment", Description: "Generated review comment"}},
-			{Field: core.Field{Name: "quality_score", Description: "Quality score (0-1)"}},
-			{Field: core.Field{Name: "quality_metrics", Description: "Detailed quality breakdown"}},
-			{Field: core.Field{Name: "improvement_notes", Description: "Notes on improvements made"}},
+			{Field: core.NewField("comment")},
+			{Field: core.NewField("quality_score")},
+			{Field: core.NewField("quality_metrics")},
+			{Field: core.NewField("improvement_notes")},
 		},
 	).WithInstruction(`
 Generate a high-quality code review comment that follows these principles:
@@ -136,16 +136,16 @@ OUTPUT:
 
 	// Create Refine module with quality-focused configuration
 	refineConfig := modules.RefineConfig{
-		N:         3,          // Up to 3 refinement attempts
-		RewardFn:  rewardFn,   // Quality evaluation function
-		Threshold: 0.8,        // Target quality threshold
+		N:         3,        // Up to 3 refinement attempts
+		RewardFn:  rewardFn, // Quality evaluation function
+		Threshold: 0.8,      // Target quality threshold
 	}
 
 	// Create base prediction module
-	baseModule := modules.NewChainOfThought(commentSig)
+	baseModule := modules.NewChainOfThought(commentSig).WithName("CommentReasoningChain")
 
 	// Create refine module
-	refiner := modules.NewRefine(baseModule, refineConfig)
+	refiner := modules.NewRefine(baseModule, refineConfig).WithName("CommentRefiner")
 
 	return &CommentRefinementProcessor{
 		refiner: refiner,
@@ -205,7 +205,7 @@ func (p *CommentRefinementProcessor) Process(ctx context.Context, task agents.Ta
 	// Track metrics
 	p.trackRefinementMetrics(ctx, result)
 
-	p.logger.Info(ctx, "Comment refinement completed: %d comments with %.2f average quality", 
+	p.logger.Info(ctx, "Comment refinement completed: %d comments with %.2f average quality",
 		len(refinedComments), averageQuality)
 
 	return result, nil
@@ -300,8 +300,8 @@ func (p *CommentRefinementProcessor) parseQualityMetrics(metricsData interface{}
 	}
 
 	// Calculate overall as average
-	metrics.Overall = (metrics.Clarity + metrics.Actionability + 
-		metrics.Professionalism + metrics.Specificity + 
+	metrics.Overall = (metrics.Clarity + metrics.Actionability +
+		metrics.Professionalism + metrics.Specificity +
 		metrics.Helpfulness) / 5.0
 
 	return metrics
@@ -340,7 +340,7 @@ func (p *CommentRefinementProcessor) extractValidatedIssues(task agents.Task, ta
 // generateBasicComment creates a fallback comment for an issue
 func (p *CommentRefinementProcessor) generateBasicComment(issue ReviewIssue) RefinedComment {
 	comment := fmt.Sprintf("%s\n\n%s", issue.Description, issue.Suggestion)
-	
+
 	return RefinedComment{
 		FilePath:        issue.FilePath,
 		LineNumber:      issue.LineRange.Start,
@@ -372,7 +372,7 @@ func (p *CommentRefinementProcessor) calculateAverageQuality(comments []RefinedC
 // fallbackToBasicComments provides fallback when refinement is disabled
 func (p *CommentRefinementProcessor) fallbackToBasicComments(ctx context.Context, task agents.Task, taskContext map[string]interface{}) (interface{}, error) {
 	p.logger.Info(ctx, "Using basic comment generation fallback")
-	
+
 	issues, err := p.extractValidatedIssues(task, taskContext)
 	if err != nil {
 		return nil, err
@@ -405,12 +405,12 @@ func (p *CommentRefinementProcessor) trackRefinementMetrics(ctx context.Context,
 
 func evaluateCommentQuality(comment string) float64 {
 	score := 0.0
-	
+
 	// Check for clarity (reasonable length and structure)
 	if len(comment) > 50 && len(comment) < 500 {
 		score += 0.2
 	}
-	
+
 	// Check for actionable suggestions
 	actionableWords := []string{"suggest", "recommend", "consider", "try", "use", "change"}
 	for _, word := range actionableWords {
@@ -419,12 +419,12 @@ func evaluateCommentQuality(comment string) float64 {
 			break
 		}
 	}
-	
+
 	// Check for code examples
 	if strings.Contains(comment, "```") || strings.Contains(comment, "`") {
 		score += 0.2
 	}
-	
+
 	// Check for professional tone (avoid negative words)
 	negativeWords := []string{"wrong", "bad", "terrible", "awful", "stupid"}
 	hasNegative := false
@@ -437,7 +437,7 @@ func evaluateCommentQuality(comment string) float64 {
 	if !hasNegative {
 		score += 0.2
 	}
-	
+
 	// Check for explanation/reasoning
 	reasoningWords := []string{"because", "since", "due to", "this causes", "this leads"}
 	for _, phrase := range reasoningWords {
@@ -446,7 +446,7 @@ func evaluateCommentQuality(comment string) float64 {
 			break
 		}
 	}
-	
+
 	// Check for specificity (mentions lines, functions, variables)
 	specificityWords := []string{"line", "function", "method", "variable", "on line"}
 	for _, word := range specificityWords {
@@ -455,7 +455,7 @@ func evaluateCommentQuality(comment string) float64 {
 			break
 		}
 	}
-	
+
 	return score
 }
 
@@ -466,20 +466,20 @@ func extractMetricScore(text, metric string) float64 {
 	if index == -1 {
 		return 0.8 // Default score
 	}
-	
+
 	// Extract number after the pattern
 	start := index + len(pattern)
 	end := start
 	for end < len(text) && (text[end] >= '0' && text[end] <= '9' || text[end] == '.') {
 		end++
 	}
-	
+
 	if end > start {
 		if score, err := strconv.ParseFloat(text[start:end], 64); err == nil {
 			return score
 		}
 	}
-	
+
 	return 0.8 // Default if parsing fails
 }
 

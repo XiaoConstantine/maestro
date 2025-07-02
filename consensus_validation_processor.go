@@ -7,25 +7,25 @@ import (
 
 	"github.com/XiaoConstantine/dspy-go/pkg/agents"
 	"github.com/XiaoConstantine/dspy-go/pkg/core"
-	"github.com/XiaoConstantine/dspy-go/pkg/modules"
 	"github.com/XiaoConstantine/dspy-go/pkg/logging"
+	"github.com/XiaoConstantine/dspy-go/pkg/modules"
 )
 
 // ConsensusValidationProcessor implements multi-chain comparison for robust validation
 type ConsensusValidationProcessor struct {
-	validator  *modules.MultiChainComparison
-	metrics    MetricsCollector
-	logger     *logging.Logger
+	validator *modules.MultiChainComparison
+	metrics   MetricsCollector
+	logger    *logging.Logger
 }
 
 // ConsensusValidationResult represents the output of consensus validation
 type ConsensusValidationResult struct {
-	ValidatedIssues    []ReviewIssue      `json:"validated_issues"`
-	RejectedIssues     []ReviewIssue      `json:"rejected_issues"`
-	ConsensusScore     float64            `json:"consensus_score"`
-	ValidationReasons  map[string]string  `json:"validation_reasons"`
-	ProcessingTime     float64            `json:"processing_time_ms"`
-	ValidatorResults   []ValidatorResult  `json:"validator_results"`
+	ValidatedIssues   []ReviewIssue     `json:"validated_issues"`
+	RejectedIssues    []ReviewIssue     `json:"rejected_issues"`
+	ConsensusScore    float64           `json:"consensus_score"`
+	ValidationReasons map[string]string `json:"validation_reasons"`
+	ProcessingTime    float64           `json:"processing_time_ms"`
+	ValidatorResults  []ValidatorResult `json:"validator_results"`
 }
 
 // ValidatorResult represents the result from a single validator
@@ -56,10 +56,10 @@ func NewConsensusValidationProcessor(metrics MetricsCollector, logger *logging.L
 			{Field: core.Field{Name: "repo_patterns", Description: "Repository patterns and context"}},
 		},
 		[]core.OutputField{
-			{Field: core.Field{Name: "consensus_decision", Description: "Final validation decision: accept/reject/uncertain"}},
-			{Field: core.Field{Name: "consensus_confidence", Description: "Confidence in the decision (0-1)"}},
-			{Field: core.Field{Name: "validation_reasoning", Description: "Detailed reasoning for the decision"}},
-			{Field: core.Field{Name: "validator_perspectives", Description: "JSON array of individual validator results"}},
+			{Field: core.NewField("consensus_decision")},
+			{Field: core.NewField("consensus_confidence")},
+			{Field: core.NewField("validation_reasoning")},
+			{Field: core.NewField("validator_perspectives")},
 		},
 	).WithInstruction(`
 You are performing consensus validation of a code review issue using multiple perspectives.
@@ -99,7 +99,7 @@ Be thorough but practical. Focus on filtering out false positives while preservi
 
 	// Create multi-chain comparison with 3 validation perspectives
 	// Temperature 0.2 for consistent validation decisions
-	validator := modules.NewMultiChainComparison(signature, 3, 0.2)
+	validator := modules.NewMultiChainComparison(signature, 3, 0.2).WithName("IssueConsensusValidator")
 
 	return &ConsensusValidationProcessor{
 		validator: validator,
@@ -176,7 +176,7 @@ func (p *ConsensusValidationProcessor) Process(ctx context.Context, task agents.
 	// Track metrics
 	p.trackValidationMetrics(ctx, result)
 
-	p.logger.Info(ctx, "Consensus validation completed: %d validated, %d rejected, %.2f consensus score", 
+	p.logger.Info(ctx, "Consensus validation completed: %d validated, %d rejected, %.2f consensus score",
 		len(validatedIssues), len(rejectedIssues), consensusScore)
 
 	return result, nil
@@ -205,10 +205,10 @@ func (p *ConsensusValidationProcessor) validateSingleIssue(ctx context.Context, 
 
 // SingleValidationResult represents the result of validating one issue
 type SingleValidationResult struct {
-	ConsensusDecision     string            `json:"consensus_decision"`
-	ConsensusConfidence   float64           `json:"consensus_confidence"`
-	ValidationReasoning   string            `json:"validation_reasoning"`
-	ValidatorResults      []ValidatorResult `json:"validator_results"`
+	ConsensusDecision   string            `json:"consensus_decision"`
+	ConsensusConfidence float64           `json:"consensus_confidence"`
+	ValidationReasoning string            `json:"validation_reasoning"`
+	ValidatorResults    []ValidatorResult `json:"validator_results"`
 }
 
 // parseValidationResult parses the output from the multi-chain validator
@@ -249,7 +249,7 @@ func (p *ConsensusValidationProcessor) parseValidatorPerspectives(perspectivesDa
 	if perspectivesStr, ok := perspectivesData.(string); ok {
 		// Simple parsing - look for validator patterns
 		validatorTypes := []string{"context", "compliance", "impact"}
-		
+
 		for _, validatorType := range validatorTypes {
 			if strings.Contains(strings.ToLower(perspectivesStr), validatorType) {
 				decision := "accept"
@@ -346,7 +346,7 @@ func (p *ConsensusValidationProcessor) calculateOverallConsensusScore(results []
 // fallbackToSingleValidation provides fallback when consensus validation is disabled
 func (p *ConsensusValidationProcessor) fallbackToSingleValidation(ctx context.Context, task agents.Task, taskContext map[string]interface{}) (interface{}, error) {
 	p.logger.Info(ctx, "Using single validation fallback")
-	
+
 	// Extract issues and return them as-is with basic validation
 	validationInput, err := p.extractValidationInput(task, taskContext)
 	if err != nil {

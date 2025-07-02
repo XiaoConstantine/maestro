@@ -22,6 +22,7 @@ import (
 	"golang.org/x/text/language"
 
 	sqlite_vec "github.com/asg017/sqlite-vec-go-bindings/cgo"
+	"path/filepath"
 
 	_ "github.com/mattn/go-sqlite3"
 )
@@ -353,7 +354,7 @@ func askQuestionWithAgent(ctx context.Context, cfg *config, console ConsoleInter
 	if err != nil {
 		return fmt.Errorf("error processing question: %w", err)
 	}
-	
+
 	if response, ok := result.(*QAResponse); ok {
 		// Print a separator line for visual clarity
 		console.Println("\n" + strings.Repeat("─", 80))
@@ -378,7 +379,7 @@ func askQuestionWithAgent(ctx context.Context, cfg *config, console ConsoleInter
 		// Print final separator
 		console.Println("\n" + strings.Repeat("─", 80) + "\n")
 	}
-	
+
 	return nil
 }
 
@@ -449,7 +450,7 @@ func printMaestroBanner() {
 func main() {
 	cfg := &config{}
 	sqlite_vec.Auto()
-	
+
 	// Initialize enhanced DSPy-Go features
 	InitializeEnhancedFeatures()
 	// Create root command
@@ -535,18 +536,24 @@ func runCLIWithoutBanner(cfg *config) error {
 	ctx := core.WithExecutionState(context.Background())
 	output := logging.NewConsoleOutput(true, logging.WithColor(true))
 	logLevel := logging.INFO
+
+	fileOutput, err := logging.NewFileOutput(
+		filepath.Join(".", "dspy.log"),
+		logging.WithRotation(100*1024*1024, 5), // 10MB max size, keep 5 files
+		logging.WithJSONFormat(true),           // Use JSON format
+	)
 	if cfg.verbose {
 		logLevel = logging.DEBUG
 
 	}
 	logger := logging.NewLogger(logging.Config{
 		Severity: logLevel,
-		Outputs:  []logging.Output{output},
+		Outputs:  []logging.Output{output, fileOutput},
 	})
 	logging.SetLogger(logger)
 
 	console := NewConsole(os.Stdout, logger, nil)
-	err := validateModelConfig(cfg)
+	err = validateModelConfig(cfg)
 	if err != nil {
 		logger.Error(ctx, "Model config is incorrect: %v", err)
 		os.Exit(1)
@@ -596,7 +603,7 @@ func runCLIWithoutBanner(cfg *config) error {
 		os.Exit(1)
 	}
 
-	logger.Debug(ctx, "Fetching changes for PR #%d", cfg.prNumber)
+	// Fetching PR changes
 	// Before calling changes, err := githubTools.GetPullRequestChanges()
 	if console.Color() {
 		console.Printf("%s %s %s\n",
@@ -632,12 +639,7 @@ func runCLIWithoutBanner(cfg *config) error {
 			console.Printf("\n→ Processing file: %s (+%d/-%d lines)\n",
 				file.FilePath, file.Additions, file.Deletions)
 		}
-		// Log file being processed
-		logger.Debug(ctx, "Processing file: %s (+%d/-%d lines)",
-			file.FilePath,
-			file.Additions,
-			file.Deletions,
-		)
+		// File being processed
 
 		tasks = append(tasks, PRReviewTask{
 			FilePath:    file.FilePath,
@@ -663,7 +665,7 @@ func runCLIWithoutBanner(cfg *config) error {
 			len(tasks),
 			pluralize("file", len(tasks)))
 	}
-	logger.Debug(ctx, "Starting code review for %d files", len(tasks))
+	// Starting code review
 	defer func() {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -878,7 +880,7 @@ Examples:
 		}
 	}
 
-	logger.Debug(ctx, "model config provider: %s, model name: %s, model config: %v", cfg.modelProvider, cfg.modelName, cfg.modelConfig)
+	// Model configuration set
 	modelID := constructModelID(cfg)
 
 	if err := core.ConfigureDefaultLLM(cfg.apiKey, modelID); err != nil {
@@ -895,7 +897,7 @@ Examples:
 	if err != nil {
 		return fmt.Errorf("failed to create storage path: %w", err)
 	}
-	
+
 	// Create agent immediately to start background indexing
 	agent, err := NewPRReviewAgent(ctx, githubTools, dbPath, &AgentConfig{
 		IndexWorkers:  cfg.indexWorkers,
@@ -1024,7 +1026,7 @@ func initializeAndAskQuestions(ctx context.Context, cfg *config, console Console
 		IndexWorkers:  cfg.indexWorkers,
 		ReviewWorkers: cfg.reviewWorkers,
 	})
-	logging.GetLogger().Debug(ctx, "agent: %v", agent)
+	// Agent initialized
 	if err != nil {
 		return fmt.Errorf("Failed to initiliaze agent due to : %v", err)
 	}

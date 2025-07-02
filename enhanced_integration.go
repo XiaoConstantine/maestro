@@ -48,7 +48,7 @@ func (r *EnhancedProcessorRegistry) ProcessCodeReview(ctx context.Context, task 
 	var err error
 
 	if r.features.AdvancedReasoning {
-		r.logger.Debug(ctx, "Using enhanced reasoning processor")
+		// Using enhanced reasoning processor
 		reviewResult, err = r.enhancedReviewProcessor.Process(ctx, task, taskContext)
 		if err != nil {
 			r.logger.Warn(ctx, "Enhanced reasoning failed, falling back: %v", err)
@@ -67,7 +67,7 @@ func (r *EnhancedProcessorRegistry) ProcessCodeReview(ctx context.Context, task 
 
 	// Phase 2: Consensus Validation
 	if r.features.ConsensusValidation {
-		r.logger.Debug(ctx, "Applying consensus validation")
+		// Applying consensus validation
 		
 		// Prepare validation task with review results
 		validationTask := r.createValidationTask(task, reviewResult)
@@ -83,7 +83,7 @@ func (r *EnhancedProcessorRegistry) ProcessCodeReview(ctx context.Context, task 
 
 	// Phase 3: Comment Refinement
 	if r.features.CommentRefinement {
-		r.logger.Debug(ctx, "Applying comment refinement")
+		// Applying comment refinement
 		
 		// Prepare refinement task
 		refinementTask := r.createRefinementTask(task, reviewResult)
@@ -235,7 +235,7 @@ func (r *EnhancedProcessorRegistry) convertToFinalResult(result interface{}) int
 
 // fallbackToLegacyReview falls back to the original review processor
 func (r *EnhancedProcessorRegistry) fallbackToLegacyReview(ctx context.Context, task agents.Task, taskContext map[string]interface{}) (interface{}, error) {
-	r.logger.Debug(ctx, "Using legacy review processor")
+	// Using legacy review processor
 	
 	// Use the original CodeReviewProcessor
 	legacyProcessor := &CodeReviewProcessor{metrics: r.metrics}
@@ -281,7 +281,7 @@ func (p *EnhancedTaskProcessor) Process(ctx context.Context, task agents.Task, t
 
 	// Log feature status
 	if isDebugLoggingEnabled() {
-		p.logger.Debug(ctx, "Processing task %s with features: %s", task.ID, GetGlobalFeatures().String())
+		// Processing task with enhanced features
 	}
 
 	// Try Phase 2 processing first if available
@@ -292,7 +292,7 @@ func (p *EnhancedTaskProcessor) Process(ctx context.Context, task agents.Task, t
 			
 			// Use Phase 2 declarative workflows for code review
 			if task.Type == "code_review" && capabilities.DeclarativeWorkflows {
-				p.logger.Debug(ctx, "🚀 Using Phase 2 declarative workflow processing")
+				// Using Phase 2 declarative workflow processing
 				result, err := phase2.ProcessWithPhase2Features(ctx, task, taskContext)
 				if err == nil {
 					return result, nil
@@ -345,7 +345,7 @@ func (p *EnhancedTaskProcessor) Process(ctx context.Context, task agents.Task, t
 
 // fallbackToLegacy provides fallback to original processors
 func (p *EnhancedTaskProcessor) fallbackToLegacy(ctx context.Context, task agents.Task, taskContext map[string]interface{}, reason string) (interface{}, error) {
-	p.logger.Debug(ctx, "Falling back to legacy processor for task type %s (reason: %s)", task.Type, reason)
+	// Falling back to legacy processor
 	
 	// Use the original task processors based on type
 	switch task.Type {
