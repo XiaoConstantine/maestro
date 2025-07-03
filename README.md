@@ -1,6 +1,6 @@
 # Maestro - Advanced AI-Powered Code Review Assistant
 
-Maestro is an intelligent code review assistant built with DSPy-Go that provides comprehensive, file-level code analysis for GitHub pull requests. It combines advanced AST parsing, semantic analysis, and LLM-powered reasoning to deliver high-quality, actionable code review feedback.
+Maestro is an intelligent code review assistant built with DSPy-Go that provides comprehensive, file-level code analysis for GitHub pull requests. It combines advanced AST parsing, semantic analysis, and LLM-powered reasoning to deliver high-quality, actionable code review feedback. Additionally, Maestro features seamless integration with Claude Code and Gemini CLI tools for enhanced AI-powered development workflows.
 
 
 ## 🏗️ Architecture Overview
@@ -11,6 +11,9 @@ graph TB
         CLI[Command Line Interface]
         Interactive[Interactive Mode] 
         GitHub[GitHub Integration]
+        ClaudeCLI[Claude Code CLI]
+        GeminiCLI[Gemini CLI]
+        Sessions[AI Session Management]
     end
 
     subgraph "Core Analysis Engine"
@@ -37,6 +40,9 @@ graph TB
     CLI --> Agent
     Interactive --> Agent
     GitHub --> Agent
+    ClaudeCLI --> Agent
+    GeminiCLI --> Agent
+    Sessions --> Agent
     
     Agent --> Context
     Agent --> Processor
@@ -72,6 +78,13 @@ graph TB
 - **Bulk Processing**: Efficient handling of large PRs with parallel processing
 - **Interactive Mode**: Guided setup and configuration
 - **Real-time Feedback**: Live processing status and progress indicators
+
+### **AI CLI Tool Integration**
+- **Claude Code CLI**: Direct integration with Anthropic's official Claude Code CLI
+- **Gemini CLI**: Integration with Google's Gemini CLI for web search and general queries
+- **Session Management**: Create and manage multiple isolated AI sessions
+- **Smart Routing**: Automatic delegation of tasks to the most appropriate AI tool
+- **Tool Auto-Setup**: Automatic installation and configuration of CLI tools
 
 ### **Flexible Model Support**
 - **Multiple Backends**: Anthropic Claude, Google Gemini, Local models (Ollama, LLaMA.cpp)
@@ -121,11 +134,22 @@ export MAESTRO_GITHUB_TOKEN=your_github_token
 ### **Quick Start**
 
 ```bash
-# Interactive mode with guided setup
+# Interactive mode with guided setup and AI tool integration
 ./maestro -i
 
-# Direct CLI usage for a specific PR
+# Direct CLI usage for a specific PR  
 ./maestro --owner=username --repo=repository --pr=123
+
+# Use integrated Claude Code CLI
+maestro> /claude help
+maestro> /claude create a react component
+
+# Use integrated Gemini CLI for web search
+maestro> /gemini search for latest Go best practices
+
+# Create and manage AI sessions
+maestro> /sessions create frontend "react development"
+maestro> /enter frontend
 
 # With enhanced debugging
 export MAESTRO_LOG_LEVEL=debug
@@ -177,7 +201,17 @@ MAESTRO_CONSENSUS_VALIDATION=true        # Consensus validation
 - `--index-workers`: Concurrent indexing workers
 - `--review-workers`: Concurrent review workers
 - `--verbose`: Enable detailed logging
-- `-i`: Interactive mode
+- `-i`: Interactive mode with AI CLI integration
+
+### **Interactive Mode Commands**
+- `/help`: Show available commands
+- `/claude [args]`: Access Claude Code CLI directly
+- `/gemini [args]`: Access Gemini CLI for web search
+- `/sessions create <name> <purpose>`: Create new AI session
+- `/enter <session>`: Enter interactive Claude session
+- `/list`: List all available sessions
+- `/tools setup`: Install and configure CLI tools
+- `/ask <question>`: Ask questions about the repository
 
 ### **Model Selection**
 
@@ -199,11 +233,14 @@ MAESTRO_CONSENSUS_VALIDATION=true        # Consensus validation
 
 ### **Current Scale**
 - **Codebase**: 19,552+ lines across 27 Go modules
-- **Dependencies**: DSPy-Go v0.36.0, SQLite-vec, GitHub API v68
+- **Dependencies**: DSPy-Go v0.36.0, SQLite-vec, GitHub API v68, Claude Code CLI, Gemini CLI
 - **Processing**: Handles 300+ chunks per PR with file-level aggregation
 - **Performance**: ~500ms average per chunk with parallel processing
+- **AI Integration**: Seamless switching between multiple AI tools and sessions
 
 ### **Recent Improvements**
+- **AI CLI Integration**: Direct Claude Code and Gemini CLI integration
+- **Session Management**: Multi-session AI workflow support
 - **File Aggregation**: 371 chunks → 21 files (proper grouping)
 - **Context Enhancement**: 5 → 15+ lines of chunk context
 - **Debug Visibility**: Comprehensive RAG and processing metrics
@@ -233,6 +270,24 @@ export MAESTRO_DEDUPLICATION_THRESHOLD=0.9
 export MAESTRO_CHUNK_CONTEXT_LINES=20
 export MAESTRO_DEDUPLICATION_THRESHOLD=0.7
 export MAESTRO_ENABLE_DEPENDENCY_ANALYSIS=true
+```
+
+### **AI Workflow Examples**
+```bash
+# Multi-session development workflow
+./maestro -i
+maestro> /sessions create backend "API development"
+maestro> /sessions create frontend "React components"
+maestro> /enter backend
+# Work in Claude Code for backend
+maestro> /exit
+maestro> /enter frontend  
+# Work in Claude Code for frontend
+
+# Mixed AI tool usage
+maestro> /gemini search for Go error handling best practices
+maestro> /claude implement error handling based on search results
+maestro> /ask how does this compare to our current codebase?
 ```
 
 ## 📄 License
