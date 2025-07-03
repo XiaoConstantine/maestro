@@ -235,25 +235,8 @@ export MAESTRO_DEDUPLICATION_THRESHOLD=0.7
 export MAESTRO_ENABLE_DEPENDENCY_ANALYSIS=true
 ```
 
-## 🤝 Contributing
-
-Maestro is built on DSPy-Go and welcomes contributions. Key areas for contribution:
-- Additional language support beyond Go
-- Enhanced AST parsing for other languages
-- New LLM backend integrations
-- Performance optimizations
-- Additional code analysis dimensions
-
-## 📚 Documentation
-
-- **Implementation Details**: See `IMPLEMENTATION_SUMMARY.md`
-- **Architecture Deep Dive**: See `improve_review.md`
-- **Recent Changes**: See `EMBEDDING_UNIFICATION_IMPLEMENTATION.md`
-
 ## 📄 License
 
 Maestro is released under the MIT License. See the [LICENSE](LICENSE) file for details.
 
 ---
-
-**Built with ❤️ using DSPy-Go** | **Enhanced Context Extraction & File-Level Aggregation** | **Production Ready**
