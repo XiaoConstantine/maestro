@@ -1139,9 +1139,7 @@ type TechnicalDebtItem struct {
 	// Technical debt information
 }
 
-type QualityMetrics struct {
-	// Code quality metrics
-}
+// Note: QualityMetrics is defined in rag.go to avoid duplication
 
 type CodingStandard struct {
 	// Coding standard information

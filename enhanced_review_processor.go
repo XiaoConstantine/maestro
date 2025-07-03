@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -62,6 +63,7 @@ type EnhancedReviewResult struct {
 	ReasoningChain string        `json:"reasoning_chain"`
 	Confidence     float64       `json:"confidence"`
 	ProcessingTime float64       `json:"processing_time_ms"`
+	FilePath       string        `json:"file_path"`
 }
 
 // hashSignature creates a unique hash for a signature based on its structure.
@@ -150,6 +152,18 @@ func NewEnhancedCodeReviewProcessor(metrics MetricsCollector, logger *logging.Lo
 			{Field: core.Field{Name: "repo_context", Description: "Repository context and patterns"}},
 			{Field: core.Field{Name: "file_path", Description: "Path of the file being reviewed"}},
 			{Field: core.Field{Name: "file_type_context", Description: "File type specific review context and focus areas"}},
+			// Enhanced context fields for better LLM understanding
+			{Field: core.Field{Name: "package_name", Description: "Go package declaration for this file"}},
+			{Field: core.Field{Name: "imports", Description: "Import statements showing external dependencies"}},
+			{Field: core.Field{Name: "type_definitions", Description: "Struct, interface and custom type definitions from the file"}},
+			{Field: core.Field{Name: "interfaces", Description: "Interface definitions showing contracts and expected behavior"}},
+			{Field: core.Field{Name: "function_signatures", Description: "Function signatures showing available functions and their parameters"}},
+			{Field: core.Field{Name: "method_signatures", Description: "Method signatures showing receiver methods"}},
+			{Field: core.Field{Name: "leading_context", Description: "Code lines before the chunk for context (15+ lines)"}},
+			{Field: core.Field{Name: "trailing_context", Description: "Code lines after the chunk for context (15+ lines)"}},
+			{Field: core.Field{Name: "called_functions", Description: "Functions called within this code chunk"}},
+			{Field: core.Field{Name: "used_types", Description: "Types and structs referenced in this chunk"}},
+			{Field: core.Field{Name: "semantic_purpose", Description: "High-level description of what this code chunk does"}},
 		},
 		[]core.OutputField{
 			{Field: core.NewField("rationale")},
@@ -157,21 +171,36 @@ func NewEnhancedCodeReviewProcessor(metrics MetricsCollector, logger *logging.Lo
 			{Field: core.NewField("confidence_score")},
 		},
 	).WithInstruction(`
-You are an expert code reviewer. Your goal is to provide HIGH-VALUE, ACTIONABLE feedback that developers will find genuinely useful. AVOID generic comments that waste time.
+You are an expert code reviewer with comprehensive context about the codebase. Your goal is to provide HIGH-VALUE, ACTIONABLE feedback that developers will find genuinely useful. AVOID generic comments that waste time.
+
+ENHANCED CONTEXT AVAILABLE:
+- package_name: The Go package this code belongs to
+- imports: All import dependencies showing what external packages are used
+- type_definitions: Custom types, structs, and interfaces defined in this file
+- function_signatures: Available functions with their parameters and return types
+- leading_context: 15+ lines of code before this chunk for full context
+- trailing_context: 15+ lines of code after this chunk for continuity
+- called_functions: Functions called within this specific chunk
+- used_types: Types and data structures referenced in this chunk
+- semantic_purpose: High-level description of what this code accomplishes
 
 CRITICAL INSTRUCTIONS:
-1. ONLY flag issues you can identify with SPECIFIC evidence in the code
-2. PROVIDE EXACT LINE NUMBERS and CODE EXAMPLES for every issue
-3. For test files: Focus on test quality, not production performance optimizations
-4. For production code: Focus on real bugs, security vulnerabilities, and maintainability
-5. If you cannot find specific, actionable issues, return an empty array []
+1. LEVERAGE THE ENHANCED CONTEXT: Use package, imports, types, and function signatures to understand the full picture
+2. ANALYZE DEPENDENCIES: Consider how called_functions and used_types interact with the broader codebase
+3. EXAMINE SEMANTIC PURPOSE: Ensure the code implementation matches its intended purpose
+4. PROVIDE EXACT LINE NUMBERS and CODE EXAMPLES for every issue
+5. For test files: Focus on test quality, coverage completeness, and edge case handling
+6. For production code: Focus on real bugs, security vulnerabilities, performance issues, and maintainability
+7. If you cannot find specific, actionable issues with the enhanced context, return an empty array []
 
-ANALYSIS FRAMEWORK:
-1. UNDERSTANDING: Analyze what this code does and its context
-2. CHANGE ANALYSIS: Examine specific changes and their impact
-3. EVIDENCE-BASED ISSUE IDENTIFICATION: Only flag issues with concrete evidence
-4. SEVERITY ASSESSMENT: Evaluate actual impact (not theoretical)
-5. SPECIFIC SOLUTIONS: Provide exact code changes or clear action items
+ENHANCED ANALYSIS FRAMEWORK:
+1. CONTEXT UNDERSTANDING: Use package_name, imports, and type_definitions to understand the code's role
+2. DEPENDENCY ANALYSIS: Examine called_functions and used_types for proper usage and potential issues
+3. CHANGE IMPACT ANALYSIS: Use leading_context and trailing_context to understand change implications
+4. SEMANTIC CONSISTENCY: Verify implementation matches semantic_purpose
+5. EVIDENCE-BASED ISSUE IDENTIFICATION: Only flag issues with concrete evidence in the enhanced context
+6. SEVERITY ASSESSMENT: Evaluate actual impact considering the full context
+7. SPECIFIC SOLUTIONS: Provide exact code changes leveraging the available type and function information
 
 REVIEW RULES (with EVIDENCE requirements):
 
@@ -398,7 +427,9 @@ func (p *EnhancedCodeReviewProcessor) Process(ctx context.Context, task agents.T
 
 	// Starting optimized code review
 
-	// Prepare inputs for reasoning module
+	p.logger.Debug(ctx, "🔍 Enhanced context extraction enabled for %s", filePath)
+
+	// Prepare inputs for reasoning module with enhanced context
 	inputs := map[string]interface{}{
 		"file_content":      fileContent,
 		"changes":           changes,
@@ -408,21 +439,85 @@ func (p *EnhancedCodeReviewProcessor) Process(ctx context.Context, task agents.T
 		"file_type_context": fileTypeContext,
 	}
 
+	// Add enhanced context fields if available in task metadata
+	if packageName, ok := task.Metadata["package_name"].(string); ok {
+		inputs["package_name"] = packageName
+	}
+	if imports, ok := task.Metadata["imports"].(string); ok {
+		inputs["imports"] = imports
+	}
+	if typeDefs, ok := task.Metadata["type_definitions"].(string); ok {
+		inputs["type_definitions"] = typeDefs
+	}
+	if interfaces, ok := task.Metadata["interfaces"].(string); ok {
+		inputs["interfaces"] = interfaces
+	}
+	if funcSigs, ok := task.Metadata["function_signatures"].(string); ok {
+		inputs["function_signatures"] = funcSigs
+	}
+	if methodSigs, ok := task.Metadata["method_signatures"].(string); ok {
+		inputs["method_signatures"] = methodSigs
+	}
+	if leadingContext, ok := task.Metadata["leading_context"].(string); ok {
+		inputs["leading_context"] = leadingContext
+	}
+	if trailingContext, ok := task.Metadata["trailing_context"].(string); ok {
+		inputs["trailing_context"] = trailingContext
+	}
+	if calledFuncs, ok := task.Metadata["called_functions"].(string); ok {
+		inputs["called_functions"] = calledFuncs
+	}
+	if usedTypes, ok := task.Metadata["used_types"].(string); ok {
+		inputs["used_types"] = usedTypes
+	}
+	if semanticPurpose, ok := task.Metadata["semantic_purpose"].(string); ok {
+		inputs["semantic_purpose"] = semanticPurpose
+	}
+
+	// Log enhanced context fields for debugging
+	contextFields := []string{}
+	for key := range inputs {
+		if key != "file_content" && key != "changes" { // Skip large content fields
+			contextFields = append(contextFields, key)
+		}
+	}
+	p.logger.Debug(ctx, "📊 Enhanced context fields for %s: %v", filePath, contextFields)
+
 	// Use optimized parallel processing with refinement
+	llmProcessingStart := time.Now()
 	result, err := p.refinementModule.Process(ctx, inputs)
+	llmProcessingTime := time.Since(llmProcessingStart)
 	if err != nil {
 		p.logger.Error(ctx, "Optimized reasoning with refinement failed for %s: %v", filePath, err)
 		// Fallback to legacy processing
 		return p.fallbackToLegacy(ctx, task, taskContext)
 	}
 
-	// Raw LLM response received
+	// Log raw LLM response for debugging if enabled
+	if isLLMResponseDebugEnabled() {
+		p.logLLMResponseDebug(ctx, result, filePath, "single_chunk")
+	}
 
 	// Parse and format results
 	enhancedResult, err := p.parseReasoningResult(ctx, result, filePath, startTime)
 	if err != nil {
 		p.logger.Error(ctx, "Failed to parse reasoning result for %s: %v", filePath, err)
 		return p.fallbackToLegacy(ctx, task, taskContext)
+	}
+
+	// Log performance metrics if debugging enabled
+	if isLLMResponseDebugEnabled() {
+		metrics := ProcessingMetrics{
+			EmbeddingTime:       0, // Will be populated if embedding timing is tracked separately
+			RetrievalTime:       0, // Will be populated if RAG retrieval timing is tracked
+			LLMProcessingTime:   llmProcessingTime,
+			TotalProcessingTime: time.Since(time.Unix(0, int64(startTime*1e6))),
+			MemoryUsage:         getCurrentMemoryUsage(),
+			GuidelineCount:      0, // Will be populated if guideline count is tracked
+			IssueCount:          len(enhancedResult.Issues),
+			ChunkSize:           len(fileContent),
+		}
+		p.logLLMPerformanceMetrics(ctx, metrics, filePath)
 	}
 
 	// Track metrics for enhanced processing
@@ -452,7 +547,7 @@ func (p *EnhancedCodeReviewProcessor) ProcessMultipleChunks(ctx context.Context,
 
 	// Processing chunks in parallel
 
-	// Prepare inputs for all tasks
+	// Prepare inputs for all tasks with enhanced context
 	inputsBatch := make([]map[string]interface{}, len(tasks))
 	for i, task := range tasks {
 		fileContent, _ := task.Metadata["file_content"].(string)
@@ -463,7 +558,8 @@ func (p *EnhancedCodeReviewProcessor) ProcessMultipleChunks(ctx context.Context,
 		repoContext := getStringFromContext(taskContext, "repository_context", "No specific repository context available")
 		fileTypeContext := p.getFileTypeContext(filePath)
 
-		inputsBatch[i] = map[string]interface{}{
+		// Build base inputs
+		inputs := map[string]interface{}{
 			"file_content":      fileContent,
 			"changes":           changes,
 			"guidelines":        guidelines,
@@ -471,6 +567,43 @@ func (p *EnhancedCodeReviewProcessor) ProcessMultipleChunks(ctx context.Context,
 			"file_path":         filePath,
 			"file_type_context": fileTypeContext,
 		}
+
+		// Add enhanced context fields if available
+		if packageName, ok := task.Metadata["package_name"].(string); ok {
+			inputs["package_name"] = packageName
+		}
+		if imports, ok := task.Metadata["imports"].(string); ok {
+			inputs["imports"] = imports
+		}
+		if typeDefs, ok := task.Metadata["type_definitions"].(string); ok {
+			inputs["type_definitions"] = typeDefs
+		}
+		if interfaces, ok := task.Metadata["interfaces"].(string); ok {
+			inputs["interfaces"] = interfaces
+		}
+		if funcSigs, ok := task.Metadata["function_signatures"].(string); ok {
+			inputs["function_signatures"] = funcSigs
+		}
+		if methodSigs, ok := task.Metadata["method_signatures"].(string); ok {
+			inputs["method_signatures"] = methodSigs
+		}
+		if leadingContext, ok := task.Metadata["leading_context"].(string); ok {
+			inputs["leading_context"] = leadingContext
+		}
+		if trailingContext, ok := task.Metadata["trailing_context"].(string); ok {
+			inputs["trailing_context"] = trailingContext
+		}
+		if calledFuncs, ok := task.Metadata["called_functions"].(string); ok {
+			inputs["called_functions"] = calledFuncs
+		}
+		if usedTypes, ok := task.Metadata["used_types"].(string); ok {
+			inputs["used_types"] = usedTypes
+		}
+		if semanticPurpose, ok := task.Metadata["semantic_purpose"].(string); ok {
+			inputs["semantic_purpose"] = semanticPurpose
+		}
+
+		inputsBatch[i] = inputs
 	}
 
 	startTime := getCurrentTimeMs()
@@ -502,12 +635,19 @@ func (p *EnhancedCodeReviewProcessor) ProcessMultipleChunks(ctx context.Context,
 		}
 	}
 
-	// Convert raw results to EnhancedReviewResult format
+	// Convert raw results to EnhancedReviewResult format with chunk processing debug
 	enhancedResults := make([]interface{}, len(results))
+	issueGenerationStats := make(map[string]int) // Track which chunks generate issues
+
 	for i, resultMap := range results {
 		filePath := ""
 		if i < len(tasks) {
 			filePath, _ = tasks[i].Metadata["file_path"].(string)
+		}
+
+		// Log raw LLM response for each chunk if debugging enabled
+		if isLLMResponseDebugEnabled() {
+			p.logLLMResponseDebug(ctx, resultMap, filePath, fmt.Sprintf("chunk_%d", i+1))
 		}
 
 		enhancedResult, err := p.parseReasoningResult(ctx, resultMap, filePath, startTime)
@@ -515,14 +655,50 @@ func (p *EnhancedCodeReviewProcessor) ProcessMultipleChunks(ctx context.Context,
 			p.logger.Error(ctx, "Failed to parse result for chunk %d: %v", i, err)
 			continue
 		}
+		// Ensure the enhanced result has the correct file path from task metadata
+		enhancedResult.FilePath = filePath
 		enhancedResults[i] = enhancedResult
+
+		// Track chunk processing results for debugging
+		p.logChunkProcessingDebug(ctx, enhancedResult, filePath, i+1)
+
+		// Update issue generation statistics
+		if len(enhancedResult.Issues) > 0 {
+			issueGenerationStats["chunks_with_issues"]++
+		} else {
+			issueGenerationStats["chunks_without_issues"]++
+		}
 
 		// Track metrics
 		p.trackEnhancedMetrics(ctx, enhancedResult, filePath)
 	}
 
+	// Log overall chunk processing statistics
+	if isLLMResponseDebugEnabled() {
+		p.logChunkProcessingStats(ctx, issueGenerationStats, len(tasks))
+	}
+
 	processingTime := getCurrentTimeMs() - startTime
 	p.logger.Info(ctx, "Parallel processing completed for %d chunks in %.2f ms", len(tasks), processingTime)
+
+	// Check if file-level aggregation is enabled
+	if isFileAggregationEnabled() {
+		// Apply file-level aggregation
+		deduplicationThreshold := getDeduplicationThreshold()
+		aggregator := NewResultAggregator(deduplicationThreshold, p.logger)
+
+		fileResults, err := aggregator.AggregateByFile(ctx, enhancedResults)
+		if err != nil {
+			p.logger.Error(ctx, "File-level aggregation failed, returning chunk results: %v", err)
+			return enhancedResults, nil
+		}
+
+		// Convert file results back to interface{} for backward compatibility
+		aggregatedResults := ConvertFileResultsToInterface(fileResults)
+
+		p.logger.Info(ctx, "File-level aggregation completed: %d files from %d chunks", len(fileResults), len(tasks))
+		return aggregatedResults, nil
+	}
 
 	return enhancedResults, nil
 }
@@ -545,12 +721,22 @@ func (p *EnhancedCodeReviewProcessor) parseReasoningResult(ctx context.Context, 
 
 	// Extract rationale which contains reasoning + JSON array
 	rationale, _ := result["rationale"].(string)
-	// Rationale extracted
+
+	// Log rationale extraction for debugging
+	if isLLMResponseDebugEnabled() {
+		p.logger.Debug(ctx, "🔍 Extracting issues from rationale for %s (length: %d)", filePath, len(rationale))
+	}
 
 	// Extract JSON array from the end of rationale
 	issues := p.extractIssuesFromRationale(rationale, filePath)
 
-	// Issues parsed from response
+	// Log issue extraction results
+	if isLLMResponseDebugEnabled() {
+		p.logger.Debug(ctx, "📝 Issue extraction completed for %s: found %d issues", filePath, len(issues))
+		if len(issues) == 0 && len(rationale) > 50 {
+			p.logger.Warn(ctx, "⚠️  Substantial rationale (%d chars) but no issues extracted - possible parsing issue", len(rationale))
+		}
+	}
 
 	processingTime := getCurrentTimeMs() - startTime
 
@@ -837,6 +1023,142 @@ func getEnvBool(key string, defaultValue bool) bool {
 	return defaultValue
 }
 
+// logLLMResponseDebug logs raw LLM responses for debugging.
+func (p *EnhancedCodeReviewProcessor) logLLMResponseDebug(ctx context.Context, result map[string]interface{}, filePath, chunkType string) {
+	p.logger.Debug(ctx, "🤖 === LLM RESPONSE DEBUG START [%s: %s] ===", chunkType, filePath)
+
+	// Log all response fields for comprehensive debugging
+	for key, value := range result {
+		if valueStr, ok := value.(string); ok {
+			if key == "rationale" {
+				p.logger.Debug(ctx, "📝 Raw Rationale (length: %d):", len(valueStr))
+				// Log rationale in chunks to avoid overwhelming logs
+				if len(valueStr) <= 500 {
+					p.logger.Debug(ctx, "%s", valueStr)
+				} else {
+					p.logger.Debug(ctx, "%s... [TRUNCATED]", valueStr[:500])
+					p.logger.Debug(ctx, "Full rationale ends with: ...%s", valueStr[len(valueStr)-100:])
+				}
+
+				// Analyze rationale structure
+				p.analyzeRationaleStructure(ctx, valueStr)
+			} else {
+				p.logger.Debug(ctx, "📋 %s: %s", key, truncateString(valueStr, 200))
+			}
+		} else {
+			p.logger.Debug(ctx, "📋 %s: %v", key, value)
+		}
+	}
+
+	p.logger.Debug(ctx, "🤖 === LLM RESPONSE DEBUG END [%s: %s] ===", chunkType, filePath)
+}
+
+// analyzeRationaleStructure analyzes the structure of LLM rationale for debugging.
+func (p *EnhancedCodeReviewProcessor) analyzeRationaleStructure(ctx context.Context, rationale string) {
+	p.logger.Debug(ctx, "🔍 Rationale Structure Analysis:")
+
+	// Check for JSON array presence
+	hasOpenBracket := strings.Contains(rationale, "[")
+	hasCloseBracket := strings.Contains(rationale, "]")
+	p.logger.Debug(ctx, "  • JSON Array Markers: Open=[%t] Close=[%t]", hasOpenBracket, hasCloseBracket)
+
+	// Count JSON-like structures
+	curlyBraceCount := strings.Count(rationale, "{")
+	p.logger.Debug(ctx, "  • JSON Object Count: %d", curlyBraceCount)
+
+	// Look for issue indicators
+	issueKeywords := []string{"category", "severity", "description", "suggestion", "line_start", "line_end"}
+	foundKeywords := []string{}
+	for _, keyword := range issueKeywords {
+		if strings.Contains(rationale, keyword) {
+			foundKeywords = append(foundKeywords, keyword)
+		}
+	}
+	p.logger.Debug(ctx, "  • Issue Keywords Found: %v", foundKeywords)
+
+	// Check for empty result indicators
+	emptyIndicators := []string{"[]", "no issues", "no specific issues", "cannot identify"}
+	foundEmptyIndicators := []string{}
+	rationaleLower := strings.ToLower(rationale)
+	for _, indicator := range emptyIndicators {
+		if strings.Contains(rationaleLower, indicator) {
+			foundEmptyIndicators = append(foundEmptyIndicators, indicator)
+		}
+	}
+	p.logger.Debug(ctx, "  • Empty Result Indicators: %v", foundEmptyIndicators)
+
+	// Estimate reasoning quality
+	reasoningLength := len(rationale)
+	structuredContent := len(foundKeywords) >= 3
+	p.logger.Debug(ctx, "  • Reasoning Length: %d chars", reasoningLength)
+	p.logger.Debug(ctx, "  • Appears Structured: %t", structuredContent)
+
+	if reasoningLength < 50 {
+		p.logger.Warn(ctx, "  ⚠️  Short rationale may indicate insufficient analysis")
+	}
+	if !hasOpenBracket || !hasCloseBracket {
+		p.logger.Warn(ctx, "  ⚠️  Missing JSON array structure may cause parsing issues")
+	}
+}
+
+// logChunkProcessingDebug logs detailed information about chunk processing results.
+func (p *EnhancedCodeReviewProcessor) logChunkProcessingDebug(ctx context.Context, result *EnhancedReviewResult, filePath string, chunkNum int) {
+	if !isLLMResponseDebugEnabled() {
+		return
+	}
+
+	p.logger.Debug(ctx, "🧩 Chunk #%d Processing Results [%s]:", chunkNum, filePath)
+	p.logger.Debug(ctx, "  • Issues Found: %d", len(result.Issues))
+	p.logger.Debug(ctx, "  • Overall Quality: %s", result.OverallQuality)
+	p.logger.Debug(ctx, "  • Confidence: %.2f", result.Confidence)
+	p.logger.Debug(ctx, "  • Processing Time: %.2f ms", result.ProcessingTime)
+
+	if len(result.Issues) > 0 {
+		p.logger.Debug(ctx, "  📝 Issues Details:")
+		for i, issue := range result.Issues {
+			p.logger.Debug(ctx, "    %d. [%s] %s (Line %d-%d)",
+				i+1, issue.Category, truncateString(issue.Description, 60),
+				issue.LineRange.Start, issue.LineRange.End)
+		}
+	} else {
+		p.logger.Debug(ctx, "  ℹ️ No issues identified for this chunk")
+	}
+}
+
+// logChunkProcessingStats logs overall statistics about chunk processing.
+func (p *EnhancedCodeReviewProcessor) logChunkProcessingStats(ctx context.Context, stats map[string]int, totalChunks int) {
+	p.logger.Debug(ctx, "📈 === CHUNK PROCESSING STATISTICS ===")
+	p.logger.Debug(ctx, "🧩 Total Chunks Processed: %d", totalChunks)
+	p.logger.Debug(ctx, "✅ Chunks with Issues: %d", stats["chunks_with_issues"])
+	p.logger.Debug(ctx, "❌ Chunks without Issues: %d", stats["chunks_without_issues"])
+
+	issueGenRate := 0.0
+	if totalChunks > 0 {
+		issueGenRate = float64(stats["chunks_with_issues"]) / float64(totalChunks) * 100
+	}
+	p.logger.Debug(ctx, "📉 Issue Generation Rate: %.1f%%", issueGenRate)
+
+	if issueGenRate < 20 {
+		p.logger.Warn(ctx, "⚠️  Low issue generation rate may indicate:")
+		p.logger.Warn(ctx, "  1. Code quality is genuinely high (good)")
+		p.logger.Warn(ctx, "  2. Guidelines not matching code patterns (investigate)")
+		p.logger.Warn(ctx, "  3. LLM instruction too strict (consider adjusting)")
+		p.logger.Warn(ctx, "  4. Insufficient context for meaningful analysis (enhance context)")
+	} else if issueGenRate > 80 {
+		p.logger.Warn(ctx, "⚠️  High issue generation rate may indicate:")
+		p.logger.Warn(ctx, "  1. Genuine code quality issues (investigate)")
+		p.logger.Warn(ctx, "  2. Guidelines too strict or generic (review guidelines)")
+		p.logger.Warn(ctx, "  3. False positives due to insufficient context (enhance context)")
+	}
+
+	p.logger.Debug(ctx, "📈 === CHUNK PROCESSING STATISTICS END ===")
+}
+
+// isLLMResponseDebugEnabled checks if LLM response debugging is enabled.
+func isLLMResponseDebugEnabled() bool {
+	return getEnvBool("MAESTRO_LLM_RESPONSE_DEBUG", false)
+}
+
 func getCurrentTimeMs() float64 {
 	return float64(time.Now().UnixNano()) / 1e6
 }
@@ -868,4 +1190,78 @@ func extractBetween(text, start, end1, end2 string) string {
 	}
 
 	return strings.TrimSpace(text[startIdx : startIdx+endIdx])
+}
+
+// isFileAggregationEnabled checks if file-level result aggregation is enabled.
+func isFileAggregationEnabled() bool {
+	return getEnvBool("MAESTRO_FILE_AGGREGATION_ENABLED", true) // Default to enabled
+}
+
+// getDeduplicationThreshold returns the deduplication threshold from environment or default.
+func getDeduplicationThreshold() float64 {
+	if value := os.Getenv("MAESTRO_DEDUPLICATION_THRESHOLD"); value != "" {
+		if threshold, err := strconv.ParseFloat(value, 64); err == nil {
+			if threshold >= 0.0 && threshold <= 1.0 {
+				return threshold
+			}
+		}
+	}
+	return 0.8 // Default threshold
+}
+
+// Performance metrics for enhanced debugging.
+type ProcessingMetrics struct {
+	EmbeddingTime       time.Duration `json:"embedding_time"`
+	RetrievalTime       time.Duration `json:"retrieval_time"`
+	LLMProcessingTime   time.Duration `json:"llm_processing_time"`
+	TotalProcessingTime time.Duration `json:"total_processing_time"`
+	MemoryUsage         int64         `json:"memory_usage_bytes"`
+	GuidelineCount      int           `json:"guideline_count"`
+	IssueCount          int           `json:"issue_count"`
+	ChunkSize           int           `json:"chunk_size_chars"`
+}
+
+// logLLMPerformanceMetrics logs comprehensive performance metrics for LLM processing.
+func (p *EnhancedCodeReviewProcessor) logLLMPerformanceMetrics(ctx context.Context, metrics ProcessingMetrics, filePath string) {
+	if !isLLMResponseDebugEnabled() {
+		return
+	}
+
+	p.logger.Debug(ctx, "⚡ === LLM PERFORMANCE METRICS [%s] ===", filePath)
+	p.logger.Debug(ctx, "📊 Timing Breakdown:")
+	p.logger.Debug(ctx, "  • Embedding Generation: %v", metrics.EmbeddingTime)
+	p.logger.Debug(ctx, "  • Guideline Retrieval: %v", metrics.RetrievalTime)
+	p.logger.Debug(ctx, "  • LLM Processing: %v", metrics.LLMProcessingTime)
+	p.logger.Debug(ctx, "  • Total Processing: %v", metrics.TotalProcessingTime)
+
+	p.logger.Debug(ctx, "💾 Resource Usage:")
+	p.logger.Debug(ctx, "  • Memory Usage: %.2f MB", float64(metrics.MemoryUsage)/(1024*1024))
+	p.logger.Debug(ctx, "  • Input Chunk Size: %d chars", metrics.ChunkSize)
+
+	p.logger.Debug(ctx, "📈 Processing Results:")
+	p.logger.Debug(ctx, "  • Guidelines Retrieved: %d", metrics.GuidelineCount)
+	p.logger.Debug(ctx, "  • Issues Generated: %d", metrics.IssueCount)
+
+	// Performance alerts
+	if metrics.TotalProcessingTime > 30*time.Second {
+		p.logger.Warn(ctx, "⚠️  PERFORMANCE WARNING: Processing took over 30 seconds")
+	}
+	if metrics.EmbeddingTime > 10*time.Second {
+		p.logger.Warn(ctx, "⚠️  EMBEDDING WARNING: Embedding generation took over 10 seconds")
+	}
+	if metrics.MemoryUsage > 100*1024*1024 { // 100MB
+		p.logger.Warn(ctx, "⚠️  MEMORY WARNING: High memory usage detected (%.2f MB)", float64(metrics.MemoryUsage)/(1024*1024))
+	}
+
+	p.logger.Debug(ctx, "⚡ === LLM PERFORMANCE METRICS END ===")
+}
+
+
+// Note: truncateString function is defined in rag.go to avoid duplication
+
+// getCurrentMemoryUsage returns current memory usage in bytes for performance monitoring.
+func getCurrentMemoryUsage() int64 {
+	var m runtime.MemStats
+	runtime.ReadMemStats(&m)
+	return int64(m.Alloc) // Current allocated heap memory
 }

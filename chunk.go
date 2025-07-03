@@ -6,7 +6,9 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/XiaoConstantine/dspy-go/pkg/core"
@@ -71,7 +73,7 @@ func NewChunkConfig(options ...ChunkConfigOption) (*ChunkConfig, error) {
 		Strategy:             ChunkByFunction,
 		MaxTokens:            4000,
 		MaxBytes:             nil,
-		ContextLines:         5,
+		ContextLines:         getChunkContextLines(),
 		OverlapLines:         2,
 		MinChunkSize:         10,
 		LanguageSpecific:     make(map[string]interface{}),
@@ -629,4 +631,14 @@ Description:`, chunk)
 	}
 
 	return strings.TrimSpace(resp.Content), nil
+}
+
+// getChunkContextLines returns the number of context lines from environment variable or default.
+func getChunkContextLines() int {
+	if value := os.Getenv("MAESTRO_CHUNK_CONTEXT_LINES"); value != "" {
+		if lines, err := strconv.Atoi(value); err == nil && lines > 0 {
+			return lines
+		}
+	}
+	return 15 // Default increased from 5 to 15 lines
 }

@@ -927,31 +927,77 @@ func (a *PRReviewAgent) analyzePatterns(ctx context.Context, tasks []PRReviewTas
 				console.Spinner().Suffix = fmt.Sprintf(" (chunk %d/%d) of %s", i+1, len(chunks), task.FilePath)
 				//fileEmbedding, err := llm.CreateEmbedding(ctx, chunk)
 
-				// Use configurable embedding model
-				embeddingModel := os.Getenv("MAESTRO_EMBEDDING_MODEL")
+				// Use unified embedding model consistent with guidelines and code indexing
+				embeddingModel := os.Getenv("MAESTRO_UNIFIED_EMBEDDING_MODEL")
 				if embeddingModel == "" {
-					embeddingModel = "text-embedding-004" // Default to Gemini
+					embeddingModel = "jinaai/jina-embeddings-v4" // Default unified model
 				}
+				
+				// Track embedding generation performance if debugging enabled
+				embeddingStartTime := time.Now()
 				fileEmbedding, err := llm.CreateEmbedding(ctx, chunk, core.WithModel(embeddingModel))
+				embeddingTime := time.Since(embeddingStartTime)
 
 				if err != nil {
 					return fmt.Errorf("failed to create file embedding: %w", err)
 				}
-				// Find similar patterns in the repository
-				patterns, err := a.rag.FindSimilar(ctx, fileEmbedding.Vector, 5, "repository")
-				if err != nil {
-					console.FileError(task.FilePath, fmt.Errorf("failed to find similar patterns: %w", err))
-					continue
+				
+				// Log embedding generation debug info if enabled
+				if getEnvBool("MAESTRO_LLM_RESPONSE_DEBUG", false) {
+					// Debug: Log embedding generation time and dimensions
+					fmt.Printf("Embedding generated for chunk in %v, dimensions: %d\n", embeddingTime, len(fileEmbedding.Vector))
 				}
-				repoPatterns = append(repoPatterns, patterns...)
+				// Find similar patterns in the repository with debug logging if enabled
+				if getEnvBool("MAESTRO_RAG_DEBUG_ENABLED", false) {
+					patterns, debugInfo, err := a.rag.FindSimilarWithDebug(ctx, fileEmbedding.Vector, 5, "repository")
+					if err != nil {
+						console.FileError(task.FilePath, fmt.Errorf("failed to find similar patterns: %w", err))
+						continue
+					}
+					repoPatterns = append(repoPatterns, patterns...)
+					fmt.Printf("Repository pattern retrieval: found %d matches in %v\n", debugInfo.ResultCount, debugInfo.RetrievalTime)
+				} else {
+					patterns, err := a.rag.FindSimilar(ctx, fileEmbedding.Vector, 5, "repository")
+					if err != nil {
+						console.FileError(task.FilePath, fmt.Errorf("failed to find similar patterns: %w", err))
+						continue
+					}
+					repoPatterns = append(repoPatterns, patterns...)
+				}
 
-				totalRepoMatches += len(patterns)
-				guidelineMatch, err := a.rag.FindSimilar(ctx, fileEmbedding.Vector, 20, "guideline")
-				if err != nil {
-					console.FileError(task.FilePath, fmt.Errorf("failed to find guideline matches: %w", err))
-					continue
+				totalRepoMatches += len(repoPatterns)
+				
+				// Find guideline matches with debug logging if enabled
+				var guidelineMatch []*Content
+				if getEnvBool("MAESTRO_RAG_DEBUG_ENABLED", false) {
+					var debugInfo DebugInfo
+					var err error
+					guidelineMatch, debugInfo, err = a.rag.FindSimilarWithDebug(ctx, fileEmbedding.Vector, 20, "guideline")
+					if err != nil {
+						console.FileError(task.FilePath, fmt.Errorf("failed to find guideline matches: %w", err))
+						continue
+					}
+					guidelineMatches = append(guidelineMatches, guidelineMatch...)
+					fmt.Printf("Guideline retrieval: found %d matches in %v\n", debugInfo.ResultCount, debugInfo.RetrievalTime)
+					
+					// Add comprehensive guideline match analysis for debugging
+					if ragStore, ok := a.rag.(*sqliteRAGStore); ok {
+						ragStore.logGuidelineMatchAnalysis(ctx, task.FilePath, guidelineMatch, debugInfo)
+					}
+					
+					// Add similarity analysis debugging for enhanced processing
+					if getEnvBool("MAESTRO_SIMILARITY_LOGGING", false) {
+						fmt.Printf("Similarity scores: %v\n", debugInfo.SimilarityScores)
+					}
+				} else {
+					var err error
+					guidelineMatch, err = a.rag.FindSimilar(ctx, fileEmbedding.Vector, 20, "guideline")
+					if err != nil {
+						console.FileError(task.FilePath, fmt.Errorf("failed to find guideline matches: %w", err))
+						continue
+					}
+					guidelineMatches = append(guidelineMatches, guidelineMatch...)
 				}
-				guidelineMatches = append(guidelineMatches, guidelineMatch...)
 
 				totalGuidelineMatches += len(guidelineMatch)
 
@@ -1021,6 +1067,78 @@ func (a *PRReviewAgent) prepareChunks(ctx context.Context, tasks []PRReviewTask,
 func (a *PRReviewAgent) Config() *AgentConfig {
 	return a.workers
 }
+
+// Helper functions for formatting context information.
+func formatTypeDefinitions(types []TypeDefinition) string {
+	if len(types) == 0 {
+		return ""
+	}
+
+	var formatted strings.Builder
+	for i, typeDef := range types {
+		if i > 0 {
+			formatted.WriteString("\n")
+		}
+		formatted.WriteString(fmt.Sprintf("type %s %s", typeDef.Name, typeDef.Type))
+		if typeDef.DocComment != "" {
+			formatted.WriteString(fmt.Sprintf(" // %s", strings.TrimSpace(typeDef.DocComment)))
+		}
+	}
+	return formatted.String()
+}
+
+func formatInterfaces(interfaces []InterfaceDefinition) string {
+	if len(interfaces) == 0 {
+		return ""
+	}
+
+	var formatted strings.Builder
+	for i, iface := range interfaces {
+		if i > 0 {
+			formatted.WriteString("\n")
+		}
+		formatted.WriteString(fmt.Sprintf("interface %s", iface.Name))
+		if len(iface.Methods) > 0 {
+			formatted.WriteString(" {")
+			for _, method := range iface.Methods {
+				formatted.WriteString(fmt.Sprintf(" %s", method.Name))
+			}
+			formatted.WriteString(" }")
+		}
+	}
+	return formatted.String()
+}
+
+func formatFunctionSignatures(functions []FunctionSignature) string {
+	if len(functions) == 0 {
+		return ""
+	}
+
+	var formatted strings.Builder
+	for i, fn := range functions {
+		if i > 0 {
+			formatted.WriteString("\n")
+		}
+		formatted.WriteString(fn.Name)
+	}
+	return formatted.String()
+}
+
+func formatMethodSignatures(methods []MethodSignature) string {
+	if len(methods) == 0 {
+		return ""
+	}
+
+	var formatted strings.Builder
+	for i, method := range methods {
+		if i > 0 {
+			formatted.WriteString("\n")
+		}
+		formatted.WriteString(method.Name)
+	}
+	return formatted.String()
+}
+
 
 // processChunkWithEnhancements processes a chunk with enhanced DSPy-Go features if enabled.
 func (a *PRReviewAgent) processChunkWithEnhancements(ctx context.Context, workData interface{}, chunkContext map[string]interface{}) (*agents.OrchestratorResult, error) {
@@ -1170,10 +1288,108 @@ func (a *PRReviewAgent) shouldUseIntelligentProcessing() bool {
 		features.LoadBalancing
 }
 
+// processWithEnhancedAggregation uses enhanced file-level aggregation processing.
+func (a *PRReviewAgent) processWithEnhancedAggregation(ctx context.Context, tasks []PRReviewTask, repoPatterns []*Content, guidelineMatches []*Content, console ConsoleInterface) ([]PRReviewComment, error) {
+	logger := logging.GetLogger()
+	logger.Info(ctx, "🔄 Starting enhanced file-level aggregation processing for %d files", len(tasks))
+
+	// Create enhanced processor
+	enhancedProcessor := NewEnhancedCodeReviewProcessor(a.metrics, logger)
+
+	// Convert tasks to agent tasks for processing with enhanced context
+	var agentTasks []agents.Task
+
+	for i, task := range tasks {
+		// Extract file-level context once per file for efficiency
+		var fileContext *FileContext
+		var err error
+		if strings.HasSuffix(task.FilePath, ".go") {
+			fileContext, err = ExtractFileContext(ctx, task.FilePath, task.FileContent)
+			if err != nil {
+				logger.Warn(ctx, "Failed to extract context for %s: %v, using minimal context", task.FilePath, err)
+				fileContext = &FileContext{
+					PackageDeclaration: "main",
+					Imports:            []string{},
+					TypeDefinitions:    []TypeDefinition{},
+					Interfaces:         []InterfaceDefinition{},
+				}
+			}
+		}
+
+		for j, chunk := range task.Chunks {
+			// Build base metadata
+			metadata := map[string]interface{}{
+				"file_content":     chunk.content,
+				"changes":          chunk.changes,
+				"file_path":        task.FilePath,
+				"chunk_start":      chunk.startline,
+				"chunk_end":        chunk.endline,
+				"leading_context":  chunk.leadingcontext,
+				"trailing_context": chunk.trailingcontext,
+			}
+
+			// Add enhanced context for Go files
+			if fileContext != nil {
+				// Add file-level context
+				metadata["package_name"] = fileContext.PackageDeclaration
+				metadata["imports"] = strings.Join(fileContext.Imports, "\n")
+				metadata["type_definitions"] = formatTypeDefinitions(fileContext.TypeDefinitions)
+				metadata["interfaces"] = formatInterfaces(fileContext.Interfaces)
+				metadata["function_signatures"] = formatFunctionSignatures(fileContext.Functions)
+				metadata["method_signatures"] = formatMethodSignatures(fileContext.Methods)
+
+				// Extract chunk-specific dependencies
+				if chunkDeps, err := ExtractChunkDependencies(ctx, chunk.content, fileContext); err == nil {
+					metadata["called_functions"] = formatFunctionSignatures(chunkDeps.CalledFunctions)
+					metadata["used_types"] = formatTypeReferences(chunkDeps.UsedTypes)
+					metadata["imported_packages"] = strings.Join(chunkDeps.ImportedPackages, ", ")
+					metadata["semantic_purpose"] = chunkDeps.SemanticPurpose
+				}
+			}
+
+			agentTask := agents.Task{
+				ID:       fmt.Sprintf("chunk_%d_%d", i, j),
+				Type:     "code_review",
+				Metadata: metadata,
+			}
+			agentTasks = append(agentTasks, agentTask)
+		}
+	}
+
+	// Create enhanced context with patterns and guidelines
+	taskContext := map[string]interface{}{
+		"guidelines":         "Follow Go best practices and code review standards",
+		"repository_context": "Repository-specific patterns and practices",
+		"review_patterns":    repoPatterns,
+		"guideline_matches":  guidelineMatches,
+	}
+
+	logger.Info(ctx, "🚀 Processing %d chunks with enhanced aggregation", len(agentTasks))
+
+	// Process with file-level aggregation
+	aggregatedResults, err := enhancedProcessor.ProcessMultipleChunks(ctx, agentTasks, taskContext)
+	if err != nil {
+		logger.Error(ctx, "Enhanced processing failed: %v", err)
+		return nil, err
+	}
+
+	// Convert aggregated results to comments
+	enhancedComments := a.extractCommentsFromEnhancedResults(ctx, aggregatedResults, console)
+	logger.Info(ctx, "✅ Enhanced processing produced %d file-level comments from %d chunks", len(enhancedComments), len(agentTasks))
+
+	return enhancedComments, nil
+}
+
 // processChunksIntelligent uses intelligent coordination with existing chunk processing logic.
 func (a *PRReviewAgent) processChunksIntelligent(ctx context.Context, tasks []PRReviewTask, repoPatterns []*Content, guidelineMatches []*Content, console ConsoleInterface) ([]PRReviewComment, error) {
 	logger := logging.GetLogger()
 	logger.Info(ctx, "🚀 Starting Phase 2.2 Intelligent Parallel Processing for %d files", len(tasks))
+
+	// Check if enhanced file-level aggregation is enabled
+	if isFileAggregationEnabled() {
+		logger.Info(ctx, "🔄 Enhanced file-level aggregation is enabled, using ProcessMultipleChunks")
+		return a.processWithEnhancedAggregation(ctx, tasks, repoPatterns, guidelineMatches, console)
+	}
 
 	phase2Start := time.Now()
 
@@ -1532,9 +1748,47 @@ func (a *PRReviewAgent) processChunksWithIntelligentCoordination(ctx context.Con
 	return allComments, nil
 }
 
+// extractCommentsFromEnhancedResults extracts comments from enhanced aggregated results.
+func (a *PRReviewAgent) extractCommentsFromEnhancedResults(ctx context.Context, results []interface{}, console ConsoleInterface) []PRReviewComment {
+	logger := logging.GetLogger()
+	var allComments []PRReviewComment
+
+	for i, result := range results {
+		enhancedResult, ok := result.(*EnhancedReviewResult)
+		if !ok {
+			logger.Warn(ctx, "Invalid enhanced result type at index %d, skipping", i)
+			continue
+		}
+
+		// Convert enhanced issues to PR review comments
+		for _, issue := range enhancedResult.Issues {
+			comment := PRReviewComment{
+				FilePath:   issue.FilePath,
+				LineNumber: issue.LineRange.Start,
+				Content:    issue.Description,
+				Category:   issue.Category,
+				Severity:   issue.Severity,
+				Suggestion: issue.Suggestion,
+			}
+			allComments = append(allComments, comment)
+		}
+
+		// Log file-level results
+		if len(enhancedResult.Issues) > 0 {
+			filePath := enhancedResult.Issues[0].FilePath
+			logger.Debug(ctx, "Enhanced results for %s: %d issues, confidence: %.2f",
+				filePath, len(enhancedResult.Issues), enhancedResult.Confidence)
+		}
+	}
+
+	if len(allComments) > 0 {
+		console.ShowComments(allComments, a.Metrics(ctx))
+	}
+
+	return allComments
+}
+
 // extractCommentsFromIntelligentResults extracts comments from intelligent processing results.
-
-
 
 // processChunksManual handles manual parallel chunk processing (legacy fallback).
 func (a *PRReviewAgent) processChunksManual(ctx context.Context, tasks []PRReviewTask, repoPatterns []*Content, guidelineMatches []*Content, console ConsoleInterface) ([]PRReviewComment, error) {
@@ -2373,3 +2627,4 @@ func defaultAgentConfig() *AgentConfig {
 		ReviewWorkers: runtime.NumCPU(), // Default to CPU count for review
 	}
 }
+

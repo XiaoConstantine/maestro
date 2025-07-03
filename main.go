@@ -578,9 +578,10 @@ func runCLIWithoutBanner(cfg *config) error {
 	if err != nil {
 		logger.Error(ctx, "Failed to configure LLM: %v", err)
 	}
-	// Use local model for embedding
-	if err := core.ConfigureTeacherLLM(cfg.apiKey, core.ModelGoogleGeminiFlash); err != nil {
-		return fmt.Errorf("failed to configure embedding LLM: %w", err)
+	// Use unified embedding model for both code and guidelines
+	// Configure teacher LLM with a Gemini generation model that supports embeddings
+	if err := core.ConfigureTeacherLLM(cfg.apiKey, core.ModelGoogleGeminiPro); err != nil {
+		return fmt.Errorf("failed to configure teacher LLM: %w", err)
 	}
 	githubTools := NewGitHubTools(cfg.githubToken, cfg.owner, cfg.repo)
 
@@ -698,6 +699,16 @@ func runCLIWithoutBanner(cfg *config) error {
 	}
 	console.ReviewComplete()
 	return nil
+}
+
+// getVectorDimensions returns the configured vector dimensions.
+func getVectorDimensions() int {
+	if dimensions := os.Getenv("MAESTRO_VECTOR_DIMENSIONS"); dimensions != "" {
+		if dims, err := strconv.Atoi(dimensions); err == nil && dims > 0 && dims <= 2048 {
+			return dims
+		}
+	}
+	return 768 // Default for text-embedding-004
 }
 
 func runInteractiveMode(cfg *config) error {
@@ -887,9 +898,10 @@ Examples:
 	if err := core.ConfigureDefaultLLM(cfg.apiKey, modelID); err != nil {
 		return fmt.Errorf("failed to configure LLM: %w", err)
 	}
-	// Use local model for embedding
-	if err := core.ConfigureTeacherLLM(cfg.apiKey, core.ModelGoogleGeminiFlash); err != nil {
-		return fmt.Errorf("failed to configure embedding LLM: %w", err)
+	// Use unified embedding model for both code and guidelines
+	// Configure teacher LLM with a Gemini generation model that supports embeddings
+	if err := core.ConfigureTeacherLLM(cfg.apiKey, core.ModelGoogleGeminiPro); err != nil {
+		return fmt.Errorf("failed to configure teacher LLM: %w", err)
 	}
 
 	// Initialize GitHub tools and agent immediately for background indexing
