@@ -64,6 +64,15 @@ func commandCompleter(d prompt.Document) []prompt.Suggest {
 		{Text: "/quit", Description: "Exit the application"},
 		{Text: "/review", Description: "Review a specific pull request"},
 		{Text: "/ask", Description: "Ask a specific question about the repository"},
+		{Text: "/claude", Description: "Interact with Claude Code CLI"},
+		{Text: "/gemini", Description: "Interact with Gemini CLI"},
+		{Text: "/tools", Description: "Manage CLI tools (setup, status)"},
+		{Text: "/sessions", Description: "Manage Claude sessions"},
+		{Text: "/dashboard", Description: "Show Claude sessions dashboard"},
+		{Text: "/coordinate", Description: "Coordinate multi-session tasks"},
+		{Text: "/switch", Description: "Switch between Claude sessions"},
+		{Text: "/enter", Description: "Enter interactive mode with current session"},
+		{Text: "/list", Description: "List all available sessions"},
 	}
 
 	text := d.TextBeforeCursor()
@@ -256,6 +265,15 @@ You can also set this via environment variables:
 // Create an interactive command system using Cobra.
 func createInteractiveCommands(cfg *config, console ConsoleInterface, agent ReviewAgent) *cobra.Command {
 	ctx := context.Background()
+	
+	// Initialize CLI tool manager
+	cliManager := NewCLIToolManager(logging.GetLogger(), console)
+	
+	// Initialize Claude session management
+	claudeSessionManager := NewClaudeSessionManager(logging.GetLogger(), console)
+	claudeCoordinator := NewClaudeCoordinator(claudeSessionManager, logging.GetLogger(), console)
+	claudeDashboard := NewClaudeDashboard(claudeSessionManager, claudeCoordinator, console)
+	claudeSessionSwitcher := NewSessionSwitcher(claudeSessionManager, claudeDashboard, console)
 
 	// Create a root command for interactive mode
 	rootCmd := &cobra.Command{
@@ -264,9 +282,9 @@ func createInteractiveCommands(cfg *config, console ConsoleInterface, agent Revi
 		Run: func(cmd *cobra.Command, args []string) {
 			// Default behavior when no subcommand is specified
 			if len(args) > 0 {
-				// Treat as a question if not a command
-				question := strings.Join(args, " ")
-				if err := askQuestionWithAgent(ctx, cfg, console, agent, question); err != nil {
+				// Ask the agent directly for general input
+				input := strings.Join(args, " ")
+				if err := askQuestionWithAgent(ctx, cfg, console, agent, input); err != nil {
 					console.Printf("Error: %v\n", err)
 				}
 			}
@@ -336,6 +354,155 @@ func createInteractiveCommands(cfg *config, console ConsoleInterface, agent Revi
 		},
 	}
 	rootCmd.AddCommand(askCmd)
+
+	// Claude CLI command
+	claudeCmd := &cobra.Command{
+		Use:   "claude [ARGS...]",
+		Short: "Interact with Claude Code CLI",
+		Run: func(cmd *cobra.Command, args []string) {
+			if err := cliManager.ExecuteTool(ctx, ClaudeCode, args); err != nil {
+				console.Printf("Error: %v\n", err)
+			}
+		},
+	}
+	rootCmd.AddCommand(claudeCmd)
+
+	// Gemini CLI command
+	geminiCmd := &cobra.Command{
+		Use:   "gemini [ARGS...]",
+		Short: "Interact with Gemini CLI",
+		Run: func(cmd *cobra.Command, args []string) {
+			if err := cliManager.ExecuteTool(ctx, GeminiCLI, args); err != nil {
+				console.Printf("Error: %v\n", err)
+			}
+		},
+	}
+	rootCmd.AddCommand(geminiCmd)
+
+	// Tools management command
+	toolsCmd := &cobra.Command{
+		Use:   "tools [setup|status]",
+		Short: "Manage CLI tools (setup, status)",
+		Run: func(cmd *cobra.Command, args []string) {
+			if len(args) == 0 {
+				// Default to showing status
+				if err := cliManager.CheckToolStatus(ctx); err != nil {
+					console.Printf("Error: %v\n", err)
+				}
+				return
+			}
+
+			switch args[0] {
+			case "setup":
+				if err := cliManager.InteractiveSetup(ctx); err != nil {
+					console.Printf("Error: %v\n", err)
+				}
+			case "status":
+				if err := cliManager.CheckToolStatus(ctx); err != nil {
+					console.Printf("Error: %v\n", err)
+				}
+			default:
+				console.Printf("Unknown tools command: %s. Use 'setup' or 'status'\n", args[0])
+			}
+		},
+	}
+	rootCmd.AddCommand(toolsCmd)
+
+
+	// Claude session management commands
+	sessionsCmd := &cobra.Command{
+		Use:   "sessions [action] [args...]",
+		Short: "Manage Claude sessions",
+		Run: func(cmd *cobra.Command, args []string) {
+			if len(args) == 0 {
+				// Default to showing overview
+				claudeDashboard.ShowOverview()
+				return
+			}
+
+			command := strings.Join(args, " ")
+			if err := claudeDashboard.HandleCommand(ctx, command); err != nil {
+				console.Printf("Error: %v\n", err)
+			}
+		},
+	}
+	rootCmd.AddCommand(sessionsCmd)
+
+	// Dashboard command
+	dashboardCmd := &cobra.Command{
+		Use:   "dashboard",
+		Short: "Show Claude sessions dashboard",
+		Run: func(cmd *cobra.Command, args []string) {
+			claudeDashboard.ShowOverview()
+		},
+	}
+	rootCmd.AddCommand(dashboardCmd)
+
+	// Coordinate command
+	coordinateCmd := &cobra.Command{
+		Use:   "coordinate [TASK_DESCRIPTION...]",
+		Short: "Coordinate multi-session tasks",
+		Run: func(cmd *cobra.Command, args []string) {
+			if len(args) == 0 {
+				console.Printf("Please provide a task description to coordinate\n")
+				return
+			}
+
+			description := strings.Join(args, " ")
+			if err := claudeCoordinator.CoordinateMultiSessionTask(ctx, description); err != nil {
+				console.Printf("Error: %v\n", err)
+			}
+		},
+	}
+	rootCmd.AddCommand(coordinateCmd)
+
+	// Session switching commands
+	switchCmd := &cobra.Command{
+		Use:   "switch [SESSION_NAME_OR_ID]",
+		Short: "Switch between Claude sessions",
+		Run: func(cmd *cobra.Command, args []string) {
+			if len(args) == 0 {
+				claudeSessionSwitcher.ListAvailableSessions()
+				return
+			}
+
+			identifier := args[0]
+			if err := claudeSessionSwitcher.SwitchToSession(identifier); err != nil {
+				console.Printf("Error: %v\n", err)
+			}
+		},
+	}
+	rootCmd.AddCommand(switchCmd)
+
+	// Enter interactive session mode
+	enterCmd := &cobra.Command{
+		Use:   "enter [SESSION_NAME_OR_ID]",
+		Short: "Enter interactive mode with a Claude session",
+		Run: func(cmd *cobra.Command, args []string) {
+			if len(args) > 0 {
+				// Switch to session first, then enter
+				if err := claudeSessionSwitcher.QuickSwitch(ctx, args[0]); err != nil {
+					console.Printf("Error: %v\n", err)
+				}
+			} else {
+				// Enter with current session
+				if err := claudeSessionSwitcher.EnterInteractiveMode(ctx); err != nil {
+					console.Printf("Error: %v\n", err)
+				}
+			}
+		},
+	}
+	rootCmd.AddCommand(enterCmd)
+
+	// List sessions command
+	listCmd := &cobra.Command{
+		Use:   "list",
+		Short: "List all available Claude sessions",
+		Run: func(cmd *cobra.Command, args []string) {
+			claudeSessionSwitcher.ListAvailableSessions()
+		},
+	}
+	rootCmd.AddCommand(listCmd)
 
 	return rootCmd
 }
@@ -920,9 +1087,10 @@ Examples:
 		return fmt.Errorf("failed to initialize agent: %w", err)
 	}
 
-	console.Println("Type /help to see available commands, or ask a question directly.")
+	console.Println("Type /help to see available commands, or describe any task directly.")
 	console.Printf("🔄 Repository indexing started in the background for enhanced code analysis.\n")
 
+	
 	// Create interactive commands with the pre-initialized agent
 	interactiveCmd := createInteractiveCommands(cfg, console, agent)
 	ctrlCPressed := false
@@ -977,7 +1145,7 @@ Examples:
 		),
 	}
 
-	console.Println("\nType / to see available commands, or ask a question directly.")
+	console.Println("\nType / to see available commands, or ask questions naturally.")
 	// Start the interactive prompt with auto-completion
 	p := prompt.New(
 		// Executor function runs when the user presses Enter
@@ -1007,7 +1175,7 @@ Examples:
 					console.Printf("Error: %v\n", err)
 				}
 			} else if input != "" {
-				// Treat as a question if not empty
+				// Fallback to asking the agent for natural input
 				if err := askQuestionWithAgent(ctx, cfg, console, agent, input); err != nil {
 					console.Printf("Error: %v\n", err)
 				}
@@ -1033,6 +1201,15 @@ func showHelpMessage(c ConsoleInterface) {
 		{"/quit", "Exit the application"},
 		{"/review <PR-NUMBER>", "Review a specific pull request"},
 		{"/ask <QUESTION>", "Ask a specific question about the repository"},
+		{"/claude [ARGS...]", "Interact with Claude Code CLI"},
+		{"/gemini [ARGS...]", "Interact with Gemini CLI"},
+		{"/tools [setup|status]", "Manage CLI tools (setup, status)"},
+		{"/sessions [action]", "Manage Claude sessions"},
+		{"/dashboard", "Show Claude sessions dashboard"},
+		{"/coordinate <TASK>", "Coordinate multi-session tasks"},
+		{"/switch [SESSION]", "Switch between Claude sessions"},
+		{"/enter [SESSION]", "Enter interactive mode with session"},
+		{"/list", "List all available sessions"},
 	}
 
 	for _, cmd := range commands {
@@ -1046,4 +1223,15 @@ func showHelpMessage(c ConsoleInterface) {
 	}
 
 	c.Println("\nYou can also type a question directly to ask about the repository.")
+	c.Println("\nClaude Session Management:")
+	c.Println("  Use /sessions create <name> <purpose> to start new Claude sessions")
+	c.Println("  Use /switch <session> to switch between sessions")
+	c.Println("  Use /enter <session> to start interactive mode with a session")
+	c.Println("  Use /list to see all available sessions")
+	c.Println("  Use /dashboard to see all active sessions and their status")
+	c.Println("  Use /coordinate <task> to distribute work across multiple sessions")
+	c.Println("\nCLI Tools Integration:")
+	c.Println("  Use /claude or /gemini to access external AI CLI tools directly")
+	c.Println("  Run /tools setup to install and configure CLI tools")
+	c.Println("  Run /tools status to check CLI tools installation")
 }
