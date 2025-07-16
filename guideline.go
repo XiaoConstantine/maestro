@@ -205,6 +205,12 @@ func parseMarkdownGuidelines(content []byte) ([]GuidelineContent, error) {
 		sectionTitle := string(bytes.TrimSpace(lines[0]))
 		logger.Debug(context.Background(), "Processing section: %s", sectionTitle)
 
+		// Enhanced validation: skip sections that don't contain actionable content
+		if !isValidGuidelineSection(sectionTitle) {
+			logger.Debug(context.Background(), "Skipping non-actionable section: %s", sectionTitle)
+			continue
+		}
+
 		var examples []CodeExample
 		var currentExample CodeExample
 		var parsingState string // Tracks what we're currently parsing: "bad", "good", or ""
@@ -214,24 +220,27 @@ func parseMarkdownGuidelines(content []byte) ([]GuidelineContent, error) {
 			line := string(bytes.TrimSpace(lines[i]))
 
 			switch {
-			case strings.HasPrefix(line, "Bad:"):
-				// Start a new example when we see "Bad:"
+			case strings.HasPrefix(line, "Bad:") || strings.Contains(line, "```go") && strings.Contains(strings.ToLower(explanation.String()), "bad"):
+				// Enhanced bad example detection
 				parsingState = "bad"
 				currentExample = CodeExample{} // Reset the current example
 				var badCode strings.Builder
 				i++ // Skip the "Bad:" line
 				for ; i < len(lines); i++ {
 					line = string(lines[i])
-					if strings.HasPrefix(line, "Good:") {
+					if strings.HasPrefix(line, "Good:") || strings.Contains(line, "```go") && strings.Contains(strings.ToLower(line), "good") {
 						i-- // Back up so we catch "Good:" in next iteration
+						break
+					}
+					if strings.HasPrefix(line, "```") && badCode.Len() > 0 {
 						break
 					}
 					badCode.WriteString(line + "\n")
 				}
 				currentExample.Bad = strings.TrimSpace(badCode.String())
 
-			case strings.HasPrefix(line, "Good:"):
-				// Only process "Good:" if we were previously parsing a bad example
+			case strings.HasPrefix(line, "Good:") || (strings.Contains(line, "```go") && parsingState == "bad"):
+				// Enhanced good example detection
 				if parsingState == "bad" {
 					var goodCode strings.Builder
 					i++ // Skip the "Good:" line
@@ -240,41 +249,236 @@ func parseMarkdownGuidelines(content []byte) ([]GuidelineContent, error) {
 						if strings.HasPrefix(line, "```") && goodCode.Len() > 0 {
 							break
 						}
+						if strings.HasPrefix(line, "## ") {
+							i-- // Back up for next section
+							break
+						}
 						goodCode.WriteString(line + "\n")
 					}
 					currentExample.Good = strings.TrimSpace(goodCode.String())
 
-					// If we have both bad and good examples, add to our collection
-					if currentExample.Bad != "" && currentExample.Good != "" {
+					// Enhanced validation: ensure examples are meaningful
+					if isValidCodeExample(currentExample) {
 						examples = append(examples, currentExample)
-						logger.Debug(context.Background(), "Added example pair to section %s", sectionTitle)
+						logger.Debug(context.Background(), "Added validated example pair to section %s", sectionTitle)
+					} else {
+						logger.Debug(context.Background(), "Rejected invalid example pair in section %s", sectionTitle)
 					}
 				}
 				parsingState = "" // Reset state after processing a complete example
 
 			default:
-				// If we're not parsing an example, collect explanation text
-				if parsingState == "" && len(line) > 0 {
+				// Enhanced explanation collection with better filtering
+				if parsingState == "" && len(line) > 0 && !isIgnorableLine(line) {
 					explanation.WriteString(line + "\n")
 				}
 			}
 		}
 
-		// Create a guideline if we have either examples or explanation text
-		if len(examples) > 0 || explanation.Len() > 0 {
+		// Enhanced guideline creation with validation
+		explanationText := strings.TrimSpace(explanation.String())
+		if len(examples) > 0 || (len(explanationText) > 50 && isActionableContent(explanationText)) {
 			guideline := GuidelineContent{
 				ID:       generateID(sectionTitle),
-				Text:     explanation.String(),
-				Category: sectionTitle,
+				Text:     explanationText,
+				Category: normalizeCategoryName(sectionTitle),
 				Examples: examples,
 				Language: "Go",
+				Metadata: map[string]string{
+					"source":        "uber-go-guide",
+					"quality_score": fmt.Sprintf("%.2f", calculateContentQuality(explanationText, examples)),
+					"actionable":    fmt.Sprintf("%t", len(examples) > 0 || isActionableContent(explanationText)),
+				},
 			}
 			guidelines = append(guidelines, guideline)
-			logger.Debug(context.Background(), "Added guideline: %s with %d examples",
-				guideline.ID, len(guideline.Examples))
+			logger.Debug(context.Background(), "Added validated guideline: %s with %d examples (quality: %s)",
+				guideline.ID, len(guideline.Examples), guideline.Metadata["quality_score"])
+		} else {
+			logger.Debug(context.Background(), "Rejected low-quality section: %s (explanation length: %d)",
+				sectionTitle, len(explanationText))
 		}
 	}
+
+	logger.Debug(context.Background(), "Parsed %d validated guidelines from markdown content", len(guidelines))
 	return guidelines, nil
+}
+
+// isValidGuidelineSection checks if a section contains actionable guidance.
+func isValidGuidelineSection(title string) bool {
+	lowerTitle := strings.ToLower(title)
+
+	// Skip table of contents, introduction, and other non-actionable sections
+	skipPatterns := []string{
+		"table of contents", "toc", "introduction", "overview", "license",
+		"contributing", "acknowledgments", "references", "changelog",
+	}
+
+	for _, pattern := range skipPatterns {
+		if strings.Contains(lowerTitle, pattern) {
+			return false
+		}
+	}
+
+	// Prefer sections that contain actionable guidance keywords
+	actionablePatterns := []string{
+		"error", "pointer", "interface", "struct", "function", "method",
+		"variable", "constant", "package", "import", "test", "benchmark",
+		"mutex", "channel", "goroutine", "context", "defer", "panic",
+		"performance", "memory", "concurrency", "security",
+	}
+
+	for _, pattern := range actionablePatterns {
+		if strings.Contains(lowerTitle, pattern) {
+			return true
+		}
+	}
+
+	// Accept if it's a reasonable length and not obviously meta-content
+	return len(title) > 3 && len(title) < 100
+}
+
+// isValidCodeExample validates that a code example pair is meaningful.
+func isValidCodeExample(example CodeExample) bool {
+	// Check that both examples exist and have reasonable length
+	if len(example.Bad) < 10 || len(example.Good) < 10 {
+		return false
+	}
+
+	// Check that examples are different (avoid duplicates)
+	if strings.TrimSpace(example.Bad) == strings.TrimSpace(example.Good) {
+		return false
+	}
+
+	// Check for Go code patterns
+	hasGoPattern := func(code string) bool {
+		goPatterns := []string{"func ", "var ", "const ", "type ", "package ", "import ", "if ", "for ", "range "}
+		for _, pattern := range goPatterns {
+			if strings.Contains(code, pattern) {
+				return true
+			}
+		}
+		return false
+	}
+
+	return hasGoPattern(example.Bad) && hasGoPattern(example.Good)
+}
+
+// isIgnorableLine checks if a line should be ignored during explanation collection.
+func isIgnorableLine(line string) bool {
+	ignorablePatterns := []string{
+		"<a href=", "http://", "https://", "![", "](", "[TOC]", "---",
+		"```", "Table of Contents", "Generated by",
+	}
+
+	for _, pattern := range ignorablePatterns {
+		if strings.Contains(line, pattern) {
+			return true
+		}
+	}
+
+	// Ignore very short lines that are likely formatting artifacts
+	return len(strings.TrimSpace(line)) < 3
+}
+
+// isActionableContent determines if content provides actionable guidance.
+func isActionableContent(content string) bool {
+	lowerContent := strings.ToLower(content)
+
+	// Look for actionable verbs and guidance keywords
+	actionableKeywords := []string{
+		"should", "must", "avoid", "prefer", "use", "don't", "do not",
+		"always", "never", "ensure", "make sure", "check", "validate",
+		"instead", "better", "recommended", "best practice", "guideline",
+		"rule", "convention", "standard", "requirement",
+	}
+
+	actionableCount := 0
+	for _, keyword := range actionableKeywords {
+		if strings.Contains(lowerContent, keyword) {
+			actionableCount++
+		}
+	}
+
+	// Content is actionable if it has multiple guidance keywords and reasonable length
+	return actionableCount >= 2 && len(content) > 100
+}
+
+// normalizeCategoryName standardizes category names for better matching.
+func normalizeCategoryName(category string) string {
+	// Remove common prefixes and suffixes
+	category = strings.TrimSpace(category)
+	category = strings.TrimPrefix(category, "Go ")
+	category = strings.TrimSuffix(category, " in Go")
+
+	// Normalize common categories to standard names
+	categoryMap := map[string]string{
+		"error handling":    "Error Handling",
+		"errors":            "Error Handling",
+		"pointers":          "Pointers and References",
+		"interfaces":        "Interface Design",
+		"structs":           "Struct Design",
+		"functions":         "Function Design",
+		"methods":           "Method Design",
+		"variables":         "Variable Declaration",
+		"constants":         "Constants",
+		"packages":          "Package Organization",
+		"imports":           "Import Management",
+		"testing":           "Testing Practices",
+		"benchmarks":        "Performance Testing",
+		"concurrency":       "Concurrency Patterns",
+		"channels":          "Channel Usage",
+		"goroutines":        "Goroutine Management",
+		"context":           "Context Handling",
+		"defer":             "Resource Management",
+		"panic and recover": "Panic and Recovery",
+		"performance":       "Performance Optimization",
+		"memory":            "Memory Management",
+		"security":          "Security Practices",
+	}
+
+	lowerCategory := strings.ToLower(category)
+	if normalized, exists := categoryMap[lowerCategory]; exists {
+		return normalized
+	}
+
+	// Title case for unknown categories
+	return strings.ToUpper(string(category[0])) + strings.ToLower(category[1:])
+}
+
+// calculateContentQuality assigns a quality score to guideline content.
+func calculateContentQuality(explanation string, examples []CodeExample) float64 {
+	score := 0.0
+
+	// Base score for having content
+	if len(explanation) > 50 {
+		score += 0.3
+	}
+
+	// Bonus for examples
+	score += float64(len(examples)) * 0.2
+	if len(examples) > 0 {
+		score += 0.2 // Additional bonus for having any examples
+	}
+
+	// Bonus for actionable content
+	if isActionableContent(explanation) {
+		score += 0.3
+	}
+
+	// Bonus for length (more comprehensive guidelines)
+	if len(explanation) > 200 {
+		score += 0.1
+	}
+	if len(explanation) > 500 {
+		score += 0.1
+	}
+
+	// Cap at 1.0
+	if score > 1.0 {
+		score = 1.0
+	}
+
+	return score
 }
 
 // generateID creates a unique identifier for a guideline.

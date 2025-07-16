@@ -63,6 +63,12 @@ type RAGStore interface {
 	// FindSimilarWithDebug finds similar content with detailed debugging information
 	FindSimilarWithDebug(ctx context.Context, embedding []float32, limit int, contentTypes ...string) ([]*Content, DebugInfo, error)
 
+	// FindSimilarSubmodular uses submodular optimization for better guideline selection
+	FindSimilarSubmodular(ctx context.Context, embedding []float32, limit int, codeContext string, contentTypes ...string) ([]*Content, error)
+
+	// FindSimilarWithLateInteraction combines submodular optimization with late interaction refinement
+	FindSimilarWithLateInteraction(ctx context.Context, embedding []float32, limit int, codeContext, queryContext string, contentTypes ...string) ([]*Content, *RefinementResult, error)
+
 	// UpdateContent updates an existing content piece
 	UpdateContent(ctx context.Context, content *Content) error
 
@@ -369,6 +375,83 @@ func (s *sqliteRAGStore) PopulateGuidelines(ctx context.Context, language string
 func (s *sqliteRAGStore) FindSimilar(ctx context.Context, embedding []float32, limit int, contentTypes ...string) ([]*Content, error) {
 	results, _, err := s.FindSimilarWithDebug(ctx, embedding, limit, contentTypes...)
 	return results, err
+}
+
+// FindSimilarSubmodular implements submodular optimization for guideline selection.
+func (s *sqliteRAGStore) FindSimilarSubmodular(ctx context.Context, embedding []float32, limit int, codeContext string, contentTypes ...string) ([]*Content, error) {
+	// First, get a larger set of candidates using traditional similarity search
+	candidateLimit := min(limit*3, 50) // Get more candidates for optimization
+	candidates, _, err := s.FindSimilarWithDebug(ctx, embedding, candidateLimit, contentTypes...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get candidates: %w", err)
+	}
+
+	s.log.Debug(ctx, "Retrieved %d candidates for submodular optimization", len(candidates))
+
+	if len(candidates) == 0 {
+		return candidates, nil
+	}
+
+	// Skip submodular optimization if we have fewer candidates than requested
+	if len(candidates) <= limit {
+		s.log.Debug(ctx, "Candidate count (%d) <= limit (%d), skipping submodular optimization", len(candidates), limit)
+		return candidates, nil
+	}
+
+	// Create submodular optimizer
+	optimizer := NewSubmodularOptimizer(s.log)
+
+	// Use facility location formulation for guidelines (better for relevance + diversity)
+	selected, err := optimizer.SelectGuidelinesSubmodular(ctx, embedding, candidates, limit, true)
+	if err != nil {
+		s.log.Warn(ctx, "Submodular optimization failed, falling back to traditional selection: %v", err)
+		// Fallback to traditional selection
+		if len(candidates) > limit {
+			return candidates[:limit], nil
+		}
+		return candidates, nil
+	}
+
+	s.log.Debug(ctx, "Submodular optimization selected %d guidelines from %d candidates", len(selected), len(candidates))
+	return selected, nil
+}
+
+// FindSimilarWithLateInteraction implements combined submodular + late interaction.
+func (s *sqliteRAGStore) FindSimilarWithLateInteraction(ctx context.Context, embedding []float32, limit int, codeContext, queryContext string, contentTypes ...string) ([]*Content, *RefinementResult, error) {
+	// Get candidates using larger search
+	candidateLimit := min(limit*4, 100) // Get even more candidates for late interaction
+	candidates, _, err := s.FindSimilarWithDebug(ctx, embedding, candidateLimit, contentTypes...)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to get candidates: %w", err)
+	}
+
+	s.log.Debug(ctx, "Retrieved %d candidates for submodular + late interaction processing", len(candidates))
+
+	if len(candidates) == 0 {
+		return candidates, nil, nil
+	}
+
+	// Skip optimization if we have fewer candidates than requested
+	if len(candidates) <= limit {
+		s.log.Debug(ctx, "Candidate count (%d) <= limit (%d), returning candidates without optimization", len(candidates), limit)
+		return candidates, nil, nil
+	}
+
+	// Create submodular optimizer and run combined processing
+	optimizer := NewSubmodularOptimizer(s.log)
+	selected, refinementResult, err := optimizer.ProcessGuidelinesWithLateInteraction(
+		ctx, embedding, candidates, codeContext, queryContext, limit)
+	if err != nil {
+		s.log.Warn(ctx, "Combined optimization failed, falling back to traditional selection: %v", err)
+		// Fallback to traditional selection
+		if len(candidates) > limit {
+			return candidates[:limit], nil, nil
+		}
+		return candidates, nil, nil
+	}
+
+	s.log.Debug(ctx, "Combined optimization completed: %d final guidelines selected", len(selected))
+	return selected, refinementResult, nil
 }
 
 // FindSimilarWithDebug implements RAGStore interface with comprehensive debugging.
@@ -943,7 +1026,6 @@ func (s *sqliteRAGStore) logDetailedRAGDebug(ctx context.Context, queryEmbedding
 func isRAGDebugEnabled() bool {
 	return getEnvBool("MAESTRO_RAG_DEBUG_ENABLED", false)
 }
-
 
 // handleDimensionMigration checks if the vector table needs to be recreated due to dimension changes.
 func (s *sqliteRAGStore) handleDimensionMigration(newDims int) error {
