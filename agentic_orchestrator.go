@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -459,12 +460,12 @@ Generate a summary that:
 
 Summary:`, query, strings.Join(findings, "\n---\n"))
 	
-	summary, err := rs.llm.Generate(ctx, prompt, core.WithMaxTokens(300))
+	response, err := rs.llm.Generate(ctx, prompt, core.WithMaxTokens(300))
 	if err != nil {
 		return "", err
 	}
 	
-	return summary, nil
+	return response.Content, nil
 }
 
 func (rs *ResultSynthesizer) fallbackSummary(responses []*SearchResponse) string {

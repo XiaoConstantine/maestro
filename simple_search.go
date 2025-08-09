@@ -247,8 +247,8 @@ func (s *SimpleSearchTool) searchInFile(ctx context.Context, filePath string, re
 	for i, line := range lines {
 		if re.MatchString(line) {
 			// Get context lines
-			startCtx := max(0, i-contextLines)
-			endCtx := min(len(lines), i+contextLines+1)
+			startCtx := maxSearch(0, i-contextLines)
+			endCtx := minSearch(len(lines), i+contextLines+1)
 			
 			result := &SearchResult{
 				FilePath:   filePath,
@@ -340,7 +340,10 @@ func (s *SimpleSearchTool) calculateContextScore(result *SearchResult, contextCl
 		}
 	}
 	
-	return min(score, 1.0)
+	if score > 1.0 {
+		return 1.0
+	}
+	return score
 }
 
 // Utility functions
@@ -360,14 +363,14 @@ func tokenize(text string) []string {
 	return filtered
 }
 
-func min(a, b int) int {
+func minSearch(a, b int) int {
 	if a < b {
 		return a
 	}
 	return b
 }
 
-func max(a, b int) int {
+func maxSearch(a, b int) int {
 	if a > b {
 		return a
 	}

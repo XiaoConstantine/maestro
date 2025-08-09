@@ -160,7 +160,7 @@ func (ap *AgentPool) ReleaseAgent(ctx context.Context, agentID string) error {
 	tokensUsed, _ := agent.ContextWindow.GetTokenUsage()
 	
 	// Update lifecycle
-	ap.lifecycle.OnComplete(agentID, tokensUsed, len(agent.Status.ResultCount))
+	ap.lifecycle.OnComplete(agentID, tokensUsed, agent.Status.ResultCount)
 	
 	// Clean up
 	delete(ap.agents, agentID)

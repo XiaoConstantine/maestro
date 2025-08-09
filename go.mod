@@ -9,6 +9,7 @@ require (
 	github.com/briandowns/spinner v1.23.2
 	github.com/c-bata/go-prompt v0.2.6
 	github.com/google/go-github/v68 v68.0.0
+	github.com/google/uuid v1.6.0
 	github.com/logrusorgru/aurora v2.0.3+incompatible
 	github.com/mattn/go-isatty v0.0.20
 	github.com/mattn/go-sqlite3 v1.14.28

@@ -410,12 +410,12 @@ Create a concise summary that highlights:
 
 Summary:`, request.Query, strings.Join(findings, "\n"))
 	
-	synthesis, err := sa.LLM.Generate(ctx, prompt, core.WithMaxTokens(500))
+	response, err := sa.LLM.Generate(ctx, prompt, core.WithMaxTokens(500))
 	if err != nil {
 		return "", err
 	}
 	
-	return synthesis, nil
+	return response.Content, nil
 }
 
 func (sa *SearchAgent) fallbackSynthesis(results []*EnhancedSearchResult) string {
@@ -477,8 +477,11 @@ func (sa *SearchAgent) summarizeFileContext(ctx context.Context, file string, li
 func (sa *SearchAgent) understandQueryIntent(ctx context.Context, query string) string {
 	// Use LLM to understand intent
 	prompt := fmt.Sprintf("What is the intent of this search query: %s\n\nIntent:", query)
-	intent, _ := sa.LLM.Generate(ctx, prompt, core.WithMaxTokens(50))
-	return intent
+	response, err := sa.LLM.Generate(ctx, prompt, core.WithMaxTokens(50))
+	if err != nil {
+		return query // Fallback to original query
+	}
+	return response.Content
 }
 
 func (sa *SearchAgent) generateSearchVariations(ctx context.Context, intent string) []string {
@@ -497,7 +500,10 @@ func (sa *SearchAgent) calculateRelevance(result *SearchResult, request *SearchR
 		}
 	}
 	
-	return min(relevance, 1.0)
+	if relevance > 1.0 {
+		return 1.0
+	}
+	return relevance
 }
 
 func (sa *SearchAgent) calculateSemanticRelevance(result *SearchResult, intent string) float64 {

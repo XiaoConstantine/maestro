@@ -138,15 +138,15 @@ Complexity: [1-5]
 Scope: [narrow/medium/broad]
 Keywords: [comma-separated list]
 Files: [patterns or "none"]
-Exclude: [patterns or "none"]`, query, truncateString(codeContext, 500))
+Exclude: [patterns or "none"]`, query, truncateText(codeContext, 500))
 
-	response, err := sp.llm.Generate(ctx, prompt, core.WithMaxTokens(300))
+	llmResponse, err := sp.llm.Generate(ctx, prompt, core.WithMaxTokens(300))
 	if err != nil {
 		return nil, err
 	}
 	
 	// Parse the LLM response
-	intent := sp.parseIntentResponse(response)
+	intent := sp.parseIntentResponse(llmResponse.Content)
 	
 	// Add query-specific analysis
 	intent.Keywords = append(intent.Keywords, sp.extractKeywords(query)...)
@@ -517,7 +517,7 @@ func extractNumber(line string) int {
 	return 0
 }
 
-func truncateString(s string, maxLen int) string {
+func truncateText(s string, maxLen int) string {
 	if len(s) <= maxLen {
 		return s
 	}
