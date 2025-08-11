@@ -4,7 +4,7 @@ go 1.24.1
 
 require (
 	github.com/AlecAivazis/survey/v2 v2.3.7
-	github.com/XiaoConstantine/dspy-go v0.42.0
+	github.com/XiaoConstantine/dspy-go v0.52.0
 	github.com/asg017/sqlite-vec-go-bindings v0.1.6
 	github.com/briandowns/spinner v1.23.2
 	github.com/c-bata/go-prompt v0.2.6
@@ -12,14 +12,14 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/logrusorgru/aurora v2.0.3+incompatible
 	github.com/mattn/go-isatty v0.0.20
-	github.com/mattn/go-sqlite3 v1.14.28
+	github.com/mattn/go-sqlite3 v1.14.30
 	golang.org/x/exp v0.0.0-20231110203233-9a3e6036ecaa
 	golang.org/x/oauth2 v0.30.0
 	golang.org/x/text v0.23.0
 )
 
 require (
-	github.com/XiaoConstantine/mcp-go v0.2.1 // indirect
+	github.com/XiaoConstantine/mcp-go v0.3.1 // indirect
 	github.com/gabriel-vasile/mimetype v1.4.8 // indirect
 	github.com/go-playground/locales v0.14.1 // indirect
 	github.com/go-playground/universal-translator v0.18.1 // indirect

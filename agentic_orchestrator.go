@@ -44,7 +44,7 @@ type SearchExecution struct {
 	ID            string
 	Query         string
 	Plan          *SearchPlan
-	Agents        []*SearchAgent
+	Agents        []*UnifiedReActAgent
 	Responses     []*SearchResponse
 	FinalResult   *SynthesizedResult
 	Status        ExecutionStatus
@@ -231,11 +231,11 @@ func (aso *AgenticSearchOrchestrator) executeMultiAgentSearch(ctx context.Contex
 	
 	for i, agent := range agents {
 		wg.Add(1)
-		go func(idx int, a *SearchAgent) {
+		go func(idx int, a *UnifiedReActAgent) {
 			defer wg.Done()
 			
-			// Create request for this agent
-			request := aso.createAgentRequest(plan, a.Type)
+			// Create request for this agent (simplified for unified agents)
+			request := aso.createAgentRequest(plan, SearchAgentType("unified"))
 			
 			// Execute search
 			response, err := a.ExecuteSearch(searchCtx, request)

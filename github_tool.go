@@ -670,6 +670,7 @@ func newFileFilterRules() *fileFilterRules {
 		".min.css", // Minified CSS
 		".gif",
 		".png",
+		".jpeg",
 		".nix",
 		".bat",
 		".npmrc",

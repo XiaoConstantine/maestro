@@ -10,9 +10,9 @@ import (
 	"github.com/google/uuid"
 )
 
-// AgentPool manages a pool of search agents
+// AgentPool manages a pool of unified ReAct search agents
 type AgentPool struct {
-	agents      map[string]*SearchAgent
+	agents      map[string]*UnifiedReActAgent
 	maxAgents   int
 	activeCount int
 	searchTool  *SimpleSearchTool
@@ -60,7 +60,7 @@ type SpawnStrategy struct {
 // NewAgentPool creates a new agent pool
 func NewAgentPool(maxAgents int, maxTotalTokens int, searchTool *SimpleSearchTool, logger *logging.Logger) *AgentPool {
 	return &AgentPool{
-		agents:         make(map[string]*SearchAgent),
+		agents:         make(map[string]*UnifiedReActAgent),
 		maxAgents:      maxAgents,
 		maxTotalTokens: maxTotalTokens,
 		searchTool:     searchTool,
@@ -79,8 +79,8 @@ func NewAgentLifecycleManager(logger *logging.Logger) *AgentLifecycleManager {
 	}
 }
 
-// SpawnAgent creates a new search agent
-func (ap *AgentPool) SpawnAgent(ctx context.Context, agentType SearchAgentType, parentQuery string) (*SearchAgent, error) {
+// SpawnUnifiedAgent creates a new unified ReAct search agent
+func (ap *AgentPool) SpawnUnifiedAgent(ctx context.Context, parentQuery string) (*UnifiedReActAgent, error) {
 	ap.mu.Lock()
 	defer ap.mu.Unlock()
 	
@@ -96,53 +96,63 @@ func (ap *AgentPool) SpawnAgent(ctx context.Context, agentType SearchAgentType, 
 	}
 	
 	// Create agent ID
-	agentID := fmt.Sprintf("%s-%s", agentType, uuid.New().String()[:8])
+	agentID := fmt.Sprintf("unified-%s", uuid.New().String()[:8])
 	
-	// Create the agent
-	agent := NewSearchAgent(agentID, agentType, tokensPerAgent, ap.searchTool, ap.logger)
-	agent.ParentQuery = parentQuery
+	// Create the unified ReAct agent
+	agent, err := NewUnifiedReActAgent(agentID, ap.searchTool, ap.logger)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create unified ReAct agent: %w", err)
+	}
 	
 	// Register with pool
 	ap.agents[agentID] = agent
 	ap.activeCount++
 	ap.totalTokensUsed += tokensPerAgent
 	
-	// Register lifecycle event
-	ap.lifecycle.OnSpawn(agentID, agentType)
+	// Register lifecycle event (using MixedQuery as a general type)
+	ap.lifecycle.OnSpawn(agentID, SearchAgentType("unified"))
 	
-	ap.logger.Info(ctx, "Spawned agent %s (type: %s) - Pool: %d/%d agents, %d/%d tokens",
-		agentID, agentType, ap.activeCount, ap.maxAgents, ap.totalTokensUsed, ap.maxTotalTokens)
+	ap.logger.Info(ctx, "Spawned unified ReAct agent %s - Pool: %d/%d agents, %d/%d tokens",
+		agentID, ap.activeCount, ap.maxAgents, ap.totalTokensUsed, ap.maxTotalTokens)
 	
 	return agent, nil
 }
 
-// SpawnAgentGroup spawns multiple agents based on strategy
-func (ap *AgentPool) SpawnAgentGroup(ctx context.Context, strategy *SpawnStrategy, parentQuery string) ([]*SearchAgent, error) {
-	ap.logger.Info(ctx, "Spawning agent group with strategy: %+v", strategy)
+// SpawnAgent creates a new search agent (backward compatibility)
+func (ap *AgentPool) SpawnAgent(ctx context.Context, agentType SearchAgentType, parentQuery string) (*UnifiedReActAgent, error) {
+	// For now, all agent types use the unified ReAct agent
+	return ap.SpawnUnifiedAgent(ctx, parentQuery)
+}
+
+// SpawnAgentGroup spawns multiple unified ReAct agents based on strategy
+func (ap *AgentPool) SpawnAgentGroup(ctx context.Context, strategy *SpawnStrategy, parentQuery string) ([]*UnifiedReActAgent, error) {
+	ap.logger.Info(ctx, "Spawning unified ReAct agent group - target count: %d", strategy.MaxParallel)
 	
-	var agents []*SearchAgent
+	var agents []*UnifiedReActAgent
 	var errors []error
 	
-	// Calculate how many agents of each type to spawn
-	agentCounts := ap.calculateAgentDistribution(strategy)
-	
-	// Spawn agents of each type
-	for agentType, count := range agentCounts {
-		for i := 0; i < count; i++ {
-			agent, err := ap.SpawnAgent(ctx, agentType, parentQuery)
-			if err != nil {
-				errors = append(errors, fmt.Errorf("failed to spawn %s agent: %w", agentType, err))
-				continue
-			}
-			agents = append(agents, agent)
+	// For unified agents, we spawn the requested number of agents
+	// The agents will dynamically specialize based on query analysis
+	for i := 0; i < strategy.MaxParallel; i++ {
+		agent, err := ap.SpawnUnifiedAgent(ctx, parentQuery)
+		if err != nil {
+			errors = append(errors, fmt.Errorf("failed to spawn unified agent %d: %w", i+1, err))
+			// Continue trying to spawn remaining agents
+			continue
 		}
+		agents = append(agents, agent)
 	}
 	
 	if len(errors) > 0 && len(agents) == 0 {
 		return nil, fmt.Errorf("failed to spawn any agents: %v", errors)
 	}
 	
-	ap.logger.Info(ctx, "Successfully spawned %d agents", len(agents))
+	if len(errors) > 0 {
+		ap.logger.Warn(ctx, "Spawned %d/%d agents with %d errors", len(agents), strategy.MaxParallel, len(errors))
+	} else {
+		ap.logger.Info(ctx, "Successfully spawned %d unified ReAct agents", len(agents))
+	}
+	
 	return agents, nil
 }
 
@@ -156,11 +166,12 @@ func (ap *AgentPool) ReleaseAgent(ctx context.Context, agentID string) error {
 		return fmt.Errorf("agent %s not found in pool", agentID)
 	}
 	
-	// Get token usage before releasing
-	tokensUsed, _ := agent.ContextWindow.GetTokenUsage()
+	// Get token usage before releasing (simplified for UnifiedReActAgent)
+	tokensUsed := 100000 // Estimate for now
 	
 	// Update lifecycle
-	ap.lifecycle.OnComplete(agentID, tokensUsed, agent.Status.ResultCount)
+	status := agent.GetStatus()
+	ap.lifecycle.OnComplete(agentID, tokensUsed, status.ResultCount)
 	
 	// Clean up
 	delete(ap.agents, agentID)
@@ -173,11 +184,11 @@ func (ap *AgentPool) ReleaseAgent(ctx context.Context, agentID string) error {
 }
 
 // GetActiveAgents returns all active agents
-func (ap *AgentPool) GetActiveAgents() []*SearchAgent {
+func (ap *AgentPool) GetActiveAgents() []*UnifiedReActAgent {
 	ap.mu.RLock()
 	defer ap.mu.RUnlock()
 	
-	agents := make([]*SearchAgent, 0, len(ap.agents))
+	agents := make([]*UnifiedReActAgent, 0, len(ap.agents))
 	for _, agent := range ap.agents {
 		agents = append(agents, agent)
 	}
@@ -211,7 +222,7 @@ func (ap *AgentPool) WaitForCompletion(ctx context.Context, timeout time.Duratio
 }
 
 // AdaptiveSpawn spawns agents based on current results
-func (ap *AgentPool) AdaptiveSpawn(ctx context.Context, currentResults []*SearchResponse) ([]*SearchAgent, error) {
+func (ap *AgentPool) AdaptiveSpawn(ctx context.Context, currentResults []*SearchResponse) ([]*UnifiedReActAgent, error) {
 	ap.logger.Info(ctx, "Adaptive spawning based on %d current results", len(currentResults))
 	
 	// Analyze current results to determine what's needed
@@ -371,7 +382,9 @@ func (ap *AgentPool) GetPoolStats() map[string]interface{} {
 	
 	agentTypes := make(map[SearchAgentType]int)
 	for _, agent := range ap.agents {
-		agentTypes[agent.Type]++
+		// For unified agents, we track them as "unified" type
+		agentTypes[SearchAgentType("unified")]++
+		_ = agent // Suppress unused variable warning
 	}
 	
 	return map[string]interface{}{

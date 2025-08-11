@@ -7,11 +7,9 @@ import (
 	"time"
 )
 
-// OptimizationConfig contains configuration for submodular optimization and late interaction.
+// OptimizationConfig contains configuration for late interaction and search optimization.
 type OptimizationConfig struct {
-	// Submodular Optimization Settings
-	EnableSubmodular    bool    `json:"enable_submodular"`    // Enable submodular optimization
-	SubmodularMethod    string  `json:"submodular_method"`    // "facility_location" or "saturated_coverage"
+	// Search Optimization Settings
 	CandidateMultiplier int     `json:"candidate_multiplier"` // How many more candidates to fetch than needed
 	SaturationThreshold float64 `json:"saturation_threshold"` // Threshold for stopping optimization
 
@@ -46,8 +44,6 @@ type OptimizationConfig struct {
 func GetOptimizationConfig() *OptimizationConfig {
 	config := &OptimizationConfig{
 		// Default values
-		EnableSubmodular:      true,
-		SubmodularMethod:      "facility_location",
 		CandidateMultiplier:   3,
 		SaturationThreshold:   0.001,
 		EnableLateInteraction: true,
@@ -70,14 +66,10 @@ func GetOptimizationConfig() *OptimizationConfig {
 
 	// Override with environment variables if present
 	if val := os.Getenv("MAESTRO_ENABLE_SUBMODULAR"); val != "" {
-		config.EnableSubmodular = parseConfigBool(val, config.EnableSubmodular)
+		// Removed submodular config
 	}
 
-	if val := os.Getenv("MAESTRO_SUBMODULAR_METHOD"); val != "" {
-		if val == "facility_location" || val == "saturated_coverage" {
-			config.SubmodularMethod = val
-		}
-	}
+	// Removed submodular method config
 
 	if val := os.Getenv("MAESTRO_CANDIDATE_MULTIPLIER"); val != "" {
 		if parsed, err := strconv.Atoi(val); err == nil && parsed >= 2 && parsed <= 10 {
@@ -187,10 +179,6 @@ func parseConfigBool(val string, defaultValue bool) bool {
 	}
 }
 
-// IsSubmodularEnabled returns whether submodular optimization is enabled.
-func (c *OptimizationConfig) IsSubmodularEnabled() bool {
-	return c.EnableSubmodular
-}
 
 // IsLateInteractionEnabled returns whether late interaction is enabled.
 func (c *OptimizationConfig) IsLateInteractionEnabled() bool {
@@ -204,7 +192,7 @@ func (c *OptimizationConfig) IsMultiVectorEnabled() bool {
 
 // ShouldUseFacilityLocation returns whether to use facility location formulation.
 func (c *OptimizationConfig) ShouldUseFacilityLocation() bool {
-	return strings.ToLower(c.SubmodularMethod) == "facility_location"
+	return false // Submodular optimization removed
 }
 
 // GetCandidateLimit calculates the candidate limit for the given target selection size.
@@ -235,9 +223,7 @@ func (c *OptimizationConfig) GetConfigSummary() string {
 	summary.WriteString("Optimization Configuration:\n")
 	summary.WriteString("==========================\n")
 
-	summary.WriteString("Submodular Optimization:\n")
-	summary.WriteString(sprintf("  Enabled: %t\n", c.EnableSubmodular))
-	summary.WriteString(sprintf("  Method: %s\n", c.SubmodularMethod))
+	// Submodular optimization removed
 	summary.WriteString(sprintf("  Candidate Multiplier: %dx\n", c.CandidateMultiplier))
 	summary.WriteString(sprintf("  Saturation Threshold: %.3f\n", c.SaturationThreshold))
 
@@ -300,7 +286,6 @@ func sprintf(format string, args ...interface{}) string {
 
 // Configuration constants for easy reference.
 const (
-	DefaultSubmodularMethod      = "facility_location"
 	DefaultCandidateMultiplier   = 3
 	DefaultSaturationThreshold   = 0.001
 	DefaultQwenModel             = "qwen2.5:0.5b"
@@ -316,8 +301,7 @@ const (
 
 // Environment variable names for documentation.
 const (
-	EnvEnableSubmodular      = "MAESTRO_ENABLE_SUBMODULAR"
-	EnvSubmodularMethod      = "MAESTRO_SUBMODULAR_METHOD"
+	// Removed submodular environment variables
 	EnvCandidateMultiplier   = "MAESTRO_CANDIDATE_MULTIPLIER"
 	EnvSaturationThreshold   = "MAESTRO_SATURATION_THRESHOLD"
 	EnvEnableLateInteraction = "MAESTRO_ENABLE_LATE_INTERACTION"

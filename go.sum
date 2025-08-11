@@ -6,10 +6,10 @@ github.com/Netflix/go-expect v0.0.0-20220104043353-73e0943537d2 h1:+vx7roKuyA63n
 github.com/Netflix/go-expect v0.0.0-20220104043353-73e0943537d2/go.mod h1:HBCaDeC1lPdgDeDbhX8XFpy1jqjK0IBG8W5K+xYqA0w=
 github.com/XiaoConstantine/anthropic-go v0.0.8 h1:10Z87ZuFhIdyHMsXu0B+7L+Ha7vwCQXYRgZ2fDVVQGk=
 github.com/XiaoConstantine/anthropic-go v0.0.8/go.mod h1:ARxRchhwI8HCfEFJtFCIRET3K2QqoyGyuvMra/6nfoI=
-github.com/XiaoConstantine/dspy-go v0.42.0 h1:rtU3iVpCDUIHRkQfx+2pdWqJKJeWCS9j4PEmpVPlNKQ=
-github.com/XiaoConstantine/dspy-go v0.42.0/go.mod h1:B6O49uJivaZQjwPSzbXdb90vT9gEWtNBChnK8jdfaVE=
-github.com/XiaoConstantine/mcp-go v0.2.1 h1:X5QbQLb5BKLHZo2a71e5IuDQNaSRrzulhResR5LgCUE=
-github.com/XiaoConstantine/mcp-go v0.2.1/go.mod h1:qsY3Gm4CYMREmoLXEMwtf0Hdb5F957kgcpF6huoNHcY=
+github.com/XiaoConstantine/dspy-go v0.52.0 h1:sxAVLT2ukjdBDCH22rVJaG0IxWMO5gBZnVJJV29t6DY=
+github.com/XiaoConstantine/dspy-go v0.52.0/go.mod h1:RGlrMgO7PWkZg7ch/DrI86vK9L5IqDD9Sxmp+NDpd80=
+github.com/XiaoConstantine/mcp-go v0.3.1 h1:5aSrqvvulbKI1hxN7Aj3iSotX0VRSpDShXIDls4ZC+U=
+github.com/XiaoConstantine/mcp-go v0.3.1/go.mod h1:qsY3Gm4CYMREmoLXEMwtf0Hdb5F957kgcpF6huoNHcY=
 github.com/andybalholm/brotli v1.0.4 h1:V7DdXeJtZscaqfNuAdSRuRFzuiKlHSC/Zh3zl9qY3JY=
 github.com/andybalholm/brotli v1.0.4/go.mod h1:fO7iG3H7G2nSZ7m0zPUDn85XEX2GTukHGRSepvi9Eig=
 github.com/apache/arrow/go/v13 v13.0.0 h1:kELrvDQuKZo8csdWYqBQfyi431x6Zs/YJTEgUuSVcWk=
@@ -88,8 +88,8 @@ github.com/mattn/go-isatty v0.0.20/go.mod h1:W+V8PltTTMOvKvAeJH7IuucS94S2C6jfK/D
 github.com/mattn/go-runewidth v0.0.6/go.mod h1:H031xJmbD/WCDINGzjvQ9THkh0rPKHF+m2gUSrubnMI=
 github.com/mattn/go-runewidth v0.0.9 h1:Lm995f3rfxdpd6TSmuVCHVb/QhupuXlYr8sCI/QdE+0=
 github.com/mattn/go-runewidth v0.0.9/go.mod h1:H031xJmbD/WCDINGzjvQ9THkh0rPKHF+m2gUSrubnMI=
-github.com/mattn/go-sqlite3 v1.14.28 h1:ThEiQrnbtumT+QMknw63Befp/ce/nUPgBPMlRFEum7A=
-github.com/mattn/go-sqlite3 v1.14.28/go.mod h1:Uh1q+B4BYcTPb+yiD3kU8Ct7aC0hY9fxUwlHK0RXw+Y=
+github.com/mattn/go-sqlite3 v1.14.30 h1:bVreufq3EAIG1Quvws73du3/QgdeZ3myglJlrzSYYCY=
+github.com/mattn/go-sqlite3 v1.14.30/go.mod h1:Uh1q+B4BYcTPb+yiD3kU8Ct7aC0hY9fxUwlHK0RXw+Y=
 github.com/mattn/go-tty v0.0.3 h1:5OfyWorkyO7xP52Mq7tB36ajHDG5OHrmBGIS/DtakQI=
 github.com/mattn/go-tty v0.0.3/go.mod h1:ihxohKRERHTVzN+aSVRwACLCeqIoZAWpoICkkvrWyR0=
 github.com/mgutz/ansi v0.0.0-20170206155736-9520e82c474b h1:j7+1HpAFS1zy5+Q4qx1fWh90gTKwiN4QCGoY9TWyyO4=

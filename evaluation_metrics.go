@@ -47,7 +47,6 @@ type SelectionQualityMetrics struct {
 
 	// Comparison Metrics
 	BaselineImprovement float64 `json:"baseline_improvement"`  // % improvement over random selection
-	SubmodularGain      float64 `json:"submodular_gain"`       // Gain from submodular optimization
 	LateInteractionGain float64 `json:"late_interaction_gain"` // Gain from late interaction
 
 	// Metadata

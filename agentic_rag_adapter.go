@@ -70,18 +70,6 @@ func (ara *AgenticRAGAdapter) FindSimilarWithDebug(ctx context.Context, embeddin
 	return contents, debugInfo, nil
 }
 
-// FindSimilarSubmodular uses agentic search with adaptive spawning
-func (ara *AgenticRAGAdapter) FindSimilarSubmodular(ctx context.Context, embedding []float32, limit int, codeContext string, contentTypes ...string) ([]*Content, error) {
-	// Create a more sophisticated query using code context
-	query := ara.createContextualQuery(codeContext, contentTypes)
-	
-	result, err := ara.orchestrator.ExecuteSearch(ctx, query, codeContext)
-	if err != nil {
-		return nil, fmt.Errorf("contextual agentic search failed: %w", err)
-	}
-	
-	return ara.convertToContent(result, limit), nil
-}
 
 // FindSimilarWithLateInteraction performs iterative search refinement
 func (ara *AgenticRAGAdapter) FindSimilarWithLateInteraction(ctx context.Context, embedding []float32, limit int, codeContext, queryContext string, contentTypes ...string) ([]*Content, *RefinementResult, error) {
