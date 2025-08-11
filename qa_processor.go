@@ -88,7 +88,7 @@ func (p *RepoQAProcessor) Process(ctx context.Context, task agents.Task, context
 		if err != nil {
 			return nil, fmt.Errorf("failed to perform agentic search: %w", err)
 		}
-		
+
 		// Convert agentic results to traditional format for compatibility
 		similar := convertAgenticResultToContent(result)
 		return p.processResults(ctx, signature, metadata, similar)
@@ -109,7 +109,7 @@ func (p *RepoQAProcessor) Process(ctx context.Context, task agents.Task, context
 	return p.processResults(ctx, signature, metadata, similar)
 }
 
-// processResults handles the common result processing for both agentic and traditional RAG
+// processResults handles the common result processing for both agentic and traditional RAG.
 func (p *RepoQAProcessor) processResults(ctx context.Context, signature core.Signature, metadata *QAMetadata, similar []*Content) (*QAResponse, error) {
 	// Handle case where no results were found
 	if len(similar) == 0 {
@@ -203,7 +203,7 @@ func extractQAResult(result interface{}, response *QAResponse) error {
 		// Try to parse confidence as string
 		if conf, err := fmt.Sscanf(confidenceStr, "%f", new(float64)); err == nil && conf == 1 {
 			var parsedConf float64
-			fmt.Sscanf(confidenceStr, "%f", &parsedConf)
+			_, _ = fmt.Sscanf(confidenceStr, "%f", &parsedConf)
 			response.Confidence = parsedConf
 		} else {
 			response.Confidence = 0.5
@@ -220,10 +220,10 @@ func extractQAResult(result interface{}, response *QAResponse) error {
 	return nil
 }
 
-// convertAgenticResultToContent converts agentic search results to traditional Content format
+// convertAgenticResultToContent converts agentic search results to traditional Content format.
 func convertAgenticResultToContent(result *SynthesizedResult) []*Content {
 	var contents []*Content
-	
+
 	// Convert code samples to Content
 	for i, sample := range result.CodeSamples {
 		content := &Content{
@@ -240,7 +240,7 @@ func convertAgenticResultToContent(result *SynthesizedResult) []*Content {
 		}
 		contents = append(contents, content)
 	}
-	
+
 	// Convert guidelines to Content
 	for i, guideline := range result.Guidelines {
 		content := &Content{
@@ -257,6 +257,6 @@ func convertAgenticResultToContent(result *SynthesizedResult) []*Content {
 		}
 		contents = append(contents, content)
 	}
-	
+
 	return contents
 }

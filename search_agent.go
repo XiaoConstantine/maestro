@@ -11,7 +11,7 @@ import (
 	"github.com/XiaoConstantine/dspy-go/pkg/logging"
 )
 
-// SearchAgentType defines the type of search agent
+// SearchAgentType defines the type of search agent.
 type SearchAgentType string
 
 const (
@@ -21,7 +21,7 @@ const (
 	SemanticSearchAgent  SearchAgentType = "semantic"
 )
 
-// SearchAgent represents a sub-agent with its own context window
+// SearchAgent represents a sub-agent with its own context window.
 type SearchAgent struct {
 	ID            string
 	Type          SearchAgentType
@@ -34,16 +34,16 @@ type SearchAgent struct {
 	mu            sync.RWMutex
 }
 
-// AgentStatus tracks the agent's current state
+// AgentStatus tracks the agent's current state.
 type AgentStatus struct {
-	State       string    // "idle", "searching", "synthesizing", "complete"
-	Progress    float64   // 0.0 to 1.0
+	State       string  // "idle", "searching", "synthesizing", "complete"
+	Progress    float64 // 0.0 to 1.0
 	LastUpdate  time.Time
 	ResultCount int
 	Error       error
 }
 
-// SearchRequest represents a search request for an agent
+// SearchRequest represents a search request for an agent.
 type SearchRequest struct {
 	Query           string
 	Context         string
@@ -54,7 +54,7 @@ type SearchRequest struct {
 	TimeLimit       time.Duration
 }
 
-// SearchResponse represents the agent's search results
+// SearchResponse represents the agent's search results.
 type SearchResponse struct {
 	AgentID          string
 	Results          []*EnhancedSearchResult
@@ -65,7 +65,7 @@ type SearchResponse struct {
 	Confidence       float64
 }
 
-// EnhancedSearchResult extends basic search result with agent insights
+// EnhancedSearchResult extends basic search result with agent insights.
 type EnhancedSearchResult struct {
 	*SearchResult
 	Relevance   float64 // Agent-determined relevance
@@ -73,7 +73,7 @@ type EnhancedSearchResult struct {
 	Category    string  // Categorization by agent
 }
 
-// NewSearchAgent creates a new search agent
+// NewSearchAgent creates a new search agent.
 func NewSearchAgent(id string, agentType SearchAgentType, maxTokens int, searchTool *SimpleSearchTool, logger *logging.Logger) *SearchAgent {
 	return &SearchAgent{
 		ID:            id,
@@ -89,19 +89,19 @@ func NewSearchAgent(id string, agentType SearchAgentType, maxTokens int, searchT
 	}
 }
 
-// ExecuteSearch performs an iterative, intelligent search
+// ExecuteSearch performs an iterative, intelligent search.
 func (sa *SearchAgent) ExecuteSearch(ctx context.Context, request *SearchRequest) (*SearchResponse, error) {
 	startTime := time.Now()
 	sa.updateStatus("searching", 0.0, nil)
-	
+
 	sa.Logger.Info(ctx, "Agent %s starting search: %s", sa.ID, request.Query)
-	
+
 	// Initialize response
 	response := &SearchResponse{
 		AgentID: sa.ID,
 		Results: make([]*EnhancedSearchResult, 0),
 	}
-	
+
 	// Perform iterative search based on agent type
 	switch sa.Type {
 	case CodeSearchAgent:
@@ -110,32 +110,32 @@ func (sa *SearchAgent) ExecuteSearch(ctx context.Context, request *SearchRequest
 			sa.updateStatus("error", 0.0, err)
 			return nil, err
 		}
-		
+
 	case GuidelineSearchAgent:
 		err := sa.performGuidelineSearch(ctx, request, response)
 		if err != nil {
 			sa.updateStatus("error", 0.0, err)
 			return nil, err
 		}
-		
+
 	case ContextSearchAgent:
 		err := sa.performContextSearch(ctx, request, response)
 		if err != nil {
 			sa.updateStatus("error", 0.0, err)
 			return nil, err
 		}
-		
+
 	case SemanticSearchAgent:
 		err := sa.performSemanticSearch(ctx, request, response)
 		if err != nil {
 			sa.updateStatus("error", 0.0, err)
 			return nil, err
 		}
-		
+
 	default:
 		return nil, fmt.Errorf("unsupported agent type: %s", sa.Type)
 	}
-	
+
 	// Synthesize findings
 	sa.updateStatus("synthesizing", 0.8, nil)
 	synthesis, err := sa.synthesizeFindings(ctx, request, response.Results)
@@ -144,40 +144,40 @@ func (sa *SearchAgent) ExecuteSearch(ctx context.Context, request *SearchRequest
 		synthesis = sa.fallbackSynthesis(response.Results)
 	}
 	response.Synthesis = synthesis
-	
+
 	// Calculate final metrics
 	current, max := sa.ContextWindow.GetTokenUsage()
 	response.TokensUsed = current
 	response.Duration = time.Since(startTime)
 	response.Confidence = sa.calculateConfidence(response.Results)
-	
+
 	sa.updateStatus("complete", 1.0, nil)
 	sa.Logger.Info(ctx, "Agent %s completed search in %v: %d results, %d/%d tokens used",
 		sa.ID, response.Duration, len(response.Results), current, max)
-	
+
 	return response, nil
 }
 
-// performCodeSearch executes code-focused search
+// performCodeSearch executes code-focused search.
 func (sa *SearchAgent) performCodeSearch(ctx context.Context, request *SearchRequest, response *SearchResponse) error {
 	sa.Logger.Debug(ctx, "Performing code search for: %s", request.Query)
-	
+
 	// Step 1: Find relevant functions and types
 	sa.updateStatus("searching", 0.2, nil)
 	structuralResults := sa.findCodeStructures(ctx, request.Query)
-	
+
 	// Step 2: Search for usage patterns
 	sa.updateStatus("searching", 0.4, nil)
 	usageResults := sa.findUsagePatterns(ctx, request.Query, structuralResults)
-	
+
 	// Step 3: Find related code
 	sa.updateStatus("searching", 0.6, nil)
 	relatedResults := sa.findRelatedCode(ctx, structuralResults, usageResults)
-	
+
 	// Add all results to context window
 	allResults := append(structuralResults, usageResults...)
 	allResults = append(allResults, relatedResults...)
-	
+
 	for _, result := range allResults {
 		err := sa.ContextWindow.Add(ctx, &ContextItem{
 			ID:       fmt.Sprintf("result-%d", len(response.Results)),
@@ -192,28 +192,28 @@ func (sa *SearchAgent) performCodeSearch(ctx context.Context, request *SearchReq
 		}
 		response.Results = append(response.Results, result)
 	}
-	
+
 	response.SearchIterations = 3
 	return nil
 }
 
-// performGuidelineSearch executes guideline-focused search
+// performGuidelineSearch executes guideline-focused search.
 func (sa *SearchAgent) performGuidelineSearch(ctx context.Context, request *SearchRequest, response *SearchResponse) error {
 	sa.Logger.Debug(ctx, "Performing guideline search for: %s", request.Query)
-	
+
 	// Extract key concepts from query
 	concepts := sa.extractConcepts(ctx, request.Query)
-	
+
 	// Search for guidelines matching concepts
 	var allResults []*EnhancedSearchResult
 	for i, concept := range concepts {
 		sa.updateStatus("searching", float64(i)/float64(len(concepts)), nil)
-		
+
 		results, err := sa.SearchTool.FuzzySearch(ctx, concept, "**/*.md", 0.6)
 		if err != nil {
 			continue
 		}
-		
+
 		for _, r := range results {
 			enhanced := &EnhancedSearchResult{
 				SearchResult: r,
@@ -224,7 +224,7 @@ func (sa *SearchAgent) performGuidelineSearch(ctx context.Context, request *Sear
 			allResults = append(allResults, enhanced)
 		}
 	}
-	
+
 	// Add to context and response
 	for _, result := range allResults {
 		err := sa.ContextWindow.Add(ctx, &ContextItem{
@@ -239,30 +239,30 @@ func (sa *SearchAgent) performGuidelineSearch(ctx context.Context, request *Sear
 		}
 		response.Results = append(response.Results, result)
 	}
-	
+
 	response.SearchIterations = len(concepts)
 	return nil
 }
 
-// performContextSearch gathers surrounding context
+// performContextSearch gathers surrounding context.
 func (sa *SearchAgent) performContextSearch(ctx context.Context, request *SearchRequest, response *SearchResponse) error {
 	sa.Logger.Debug(ctx, "Gathering context for: %s", request.Query)
-	
+
 	// Find files mentioned in the query
 	files := sa.extractFileReferences(request.Query)
-	
+
 	// Gather context from each file
 	for i, file := range files {
 		sa.updateStatus("searching", float64(i)/float64(len(files)), nil)
-		
+
 		lines, err := sa.SearchTool.ReadFile(ctx, file, 0, 0)
 		if err != nil {
 			continue
 		}
-		
+
 		// Create context summary
 		summary := sa.summarizeFileContext(ctx, file, lines, request.Query)
-		
+
 		enhanced := &EnhancedSearchResult{
 			SearchResult: &SearchResult{
 				FilePath:  file,
@@ -273,40 +273,40 @@ func (sa *SearchAgent) performContextSearch(ctx context.Context, request *Search
 			Category:    "context",
 			Explanation: "File context",
 		}
-		
-		sa.ContextWindow.Add(ctx, &ContextItem{
+
+		_ = sa.ContextWindow.Add(ctx, &ContextItem{
 			ID:       fmt.Sprintf("context-%s", file),
 			Content:  summary,
 			Priority: 0.8,
 			ItemType: "context",
 			Source:   sa.ID,
 		})
-		
+
 		response.Results = append(response.Results, enhanced)
 	}
-	
+
 	return nil
 }
 
-// performSemanticSearch performs meaning-based search
+// performSemanticSearch performs meaning-based search.
 func (sa *SearchAgent) performSemanticSearch(ctx context.Context, request *SearchRequest, response *SearchResponse) error {
 	sa.Logger.Debug(ctx, "Performing semantic search for: %s", request.Query)
-	
+
 	// Use LLM to understand query intent
 	intent := sa.understandQueryIntent(ctx, request.Query)
-	
+
 	// Generate search variations
 	variations := sa.generateSearchVariations(ctx, intent)
-	
+
 	// Search with each variation
 	for i, variation := range variations {
 		sa.updateStatus("searching", float64(i)/float64(len(variations)), nil)
-		
+
 		results, err := sa.SearchTool.GrepSearch(ctx, variation, "**/*.go", 3)
 		if err != nil {
 			continue
 		}
-		
+
 		for _, r := range results {
 			enhanced := &EnhancedSearchResult{
 				SearchResult: r,
@@ -317,7 +317,7 @@ func (sa *SearchAgent) performSemanticSearch(ctx context.Context, request *Searc
 			response.Results = append(response.Results, enhanced)
 		}
 	}
-	
+
 	response.SearchIterations = len(variations)
 	return nil
 }
@@ -326,7 +326,7 @@ func (sa *SearchAgent) performSemanticSearch(ctx context.Context, request *Searc
 
 func (sa *SearchAgent) findCodeStructures(ctx context.Context, query string) []*EnhancedSearchResult {
 	var results []*EnhancedSearchResult
-	
+
 	// Search for functions
 	funcResults, _ := sa.SearchTool.StructuralSearch(ctx, "function", query)
 	for _, r := range funcResults {
@@ -337,7 +337,7 @@ func (sa *SearchAgent) findCodeStructures(ctx context.Context, query string) []*
 			Explanation:  "Function definition",
 		})
 	}
-	
+
 	// Search for types
 	typeResults, _ := sa.SearchTool.StructuralSearch(ctx, "type", query)
 	for _, r := range typeResults {
@@ -348,13 +348,13 @@ func (sa *SearchAgent) findCodeStructures(ctx context.Context, query string) []*
 			Explanation:  "Type definition",
 		})
 	}
-	
+
 	return results
 }
 
 func (sa *SearchAgent) findUsagePatterns(ctx context.Context, query string, structures []*EnhancedSearchResult) []*EnhancedSearchResult {
 	var results []*EnhancedSearchResult
-	
+
 	// Find where structures are used
 	for _, structure := range structures {
 		// Extract name from structure
@@ -362,7 +362,7 @@ func (sa *SearchAgent) findUsagePatterns(ctx context.Context, query string, stru
 		if name == "" {
 			continue
 		}
-		
+
 		usages, _ := sa.SearchTool.GrepSearch(ctx, name, "**/*.go", 2)
 		for _, u := range usages {
 			results = append(results, &EnhancedSearchResult{
@@ -373,7 +373,7 @@ func (sa *SearchAgent) findUsagePatterns(ctx context.Context, query string, stru
 			})
 		}
 	}
-	
+
 	return results
 }
 
@@ -387,7 +387,7 @@ func (sa *SearchAgent) synthesizeFindings(ctx context.Context, request *SearchRe
 	if len(results) == 0 {
 		return "No relevant results found.", nil
 	}
-	
+
 	// Prepare context for LLM
 	var findings []string
 	for i, result := range results {
@@ -397,7 +397,7 @@ func (sa *SearchAgent) synthesizeFindings(ctx context.Context, request *SearchRe
 		findings = append(findings, fmt.Sprintf("%d. [%s] %s\n   %s",
 			i+1, result.Category, result.FilePath, result.Line))
 	}
-	
+
 	prompt := fmt.Sprintf(`Synthesize these search results for the query: "%s"
 
 Findings:
@@ -409,12 +409,12 @@ Create a concise summary that highlights:
 3. Relevant insights
 
 Summary:`, request.Query, strings.Join(findings, "\n"))
-	
+
 	response, err := sa.LLM.Generate(ctx, prompt, core.WithMaxTokens(500))
 	if err != nil {
 		return "", err
 	}
-	
+
 	return response.Content, nil
 }
 
@@ -422,7 +422,7 @@ func (sa *SearchAgent) fallbackSynthesis(results []*EnhancedSearchResult) string
 	if len(results) == 0 {
 		return "No results found."
 	}
-	
+
 	return fmt.Sprintf("Found %d results across %d categories.",
 		len(results), sa.countCategories(results))
 }
@@ -431,12 +431,12 @@ func (sa *SearchAgent) calculateConfidence(results []*EnhancedSearchResult) floa
 	if len(results) == 0 {
 		return 0.0
 	}
-	
+
 	total := 0.0
 	for _, r := range results {
 		total += r.Relevance
 	}
-	
+
 	return total / float64(len(results))
 }
 
@@ -444,13 +444,13 @@ func (sa *SearchAgent) extractConcepts(ctx context.Context, query string) []stri
 	// Simple extraction - in production, use NLP
 	words := strings.Fields(query)
 	var concepts []string
-	
+
 	for _, word := range words {
 		if len(word) > 3 { // Skip short words
 			concepts = append(concepts, word)
 		}
 	}
-	
+
 	return concepts
 }
 
@@ -458,13 +458,13 @@ func (sa *SearchAgent) extractFileReferences(query string) []string {
 	// Extract file paths from query
 	var files []string
 	words := strings.Fields(query)
-	
+
 	for _, word := range words {
 		if strings.Contains(word, ".go") || strings.Contains(word, "/") {
 			files = append(files, word)
 		}
 	}
-	
+
 	return files
 }
 
@@ -492,14 +492,14 @@ func (sa *SearchAgent) generateSearchVariations(ctx context.Context, intent stri
 func (sa *SearchAgent) calculateRelevance(result *SearchResult, request *SearchRequest) float64 {
 	// Simple relevance calculation
 	relevance := result.Score
-	
+
 	// Boost if file path contains focus areas
 	for _, focus := range request.FocusAreas {
 		if strings.Contains(result.FilePath, focus) {
 			relevance += 0.1
 		}
 	}
-	
+
 	if relevance > 1.0 {
 		return 1.0
 	}
@@ -538,7 +538,7 @@ func (sa *SearchAgent) countCategories(results []*EnhancedSearchResult) int {
 func (sa *SearchAgent) updateStatus(state string, progress float64, err error) {
 	sa.mu.Lock()
 	defer sa.mu.Unlock()
-	
+
 	sa.Status.State = state
 	sa.Status.Progress = progress
 	sa.Status.LastUpdate = time.Now()

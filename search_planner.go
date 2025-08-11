@@ -10,13 +10,13 @@ import (
 	"github.com/XiaoConstantine/dspy-go/pkg/logging"
 )
 
-// SearchPlanner analyzes queries and creates search strategies
+// SearchPlanner analyzes queries and creates search strategies.
 type SearchPlanner struct {
 	llm    core.LLM
 	logger *logging.Logger
 }
 
-// SearchPlan represents a comprehensive search strategy
+// SearchPlan represents a comprehensive search strategy.
 type SearchPlan struct {
 	Query            string
 	Intent           SearchIntent
@@ -26,45 +26,45 @@ type SearchPlan struct {
 	SuccessMetrics   *SuccessMetrics
 }
 
-// SearchIntent categorizes the type of search needed
+// SearchIntent categorizes the type of search needed.
 type SearchIntent struct {
-	Primary     string   // "code_analysis", "guideline_check", "context_gathering", "debugging"
-	Secondary   []string // Additional intents
-	Complexity  int      // 1-5 scale
-	Scope       string   // "narrow", "medium", "broad"
-	Keywords    []string // Key terms extracted from query
-	FileHints   []string // File patterns to focus on
-	Exclusions  []string // Patterns to exclude
+	Primary    string   // "code_analysis", "guideline_check", "context_gathering", "debugging"
+	Secondary  []string // Additional intents
+	Complexity int      // 1-5 scale
+	Scope      string   // "narrow", "medium", "broad"
+	Keywords   []string // Key terms extracted from query
+	FileHints  []string // File patterns to focus on
+	Exclusions []string // Patterns to exclude
 }
 
-// SearchStep represents a single step in the search plan
+// SearchStep represents a single step in the search plan.
 type SearchStep struct {
-	ID          string
-	Description string
-	AgentType   SearchAgentType
+	ID           string
+	Description  string
+	AgentType    SearchAgentType
 	Dependencies []string // IDs of steps that must complete first
-	Request     *SearchRequest
-	Priority    float64
-	Estimated   time.Duration
+	Request      *SearchRequest
+	Priority     float64
+	Estimated    time.Duration
 }
 
-// SuccessMetrics defines what constitutes a successful search
+// SuccessMetrics defines what constitutes a successful search.
 type SuccessMetrics struct {
-	MinResults      int
-	MinConfidence   float64
-	RequiredTypes   []string
-	MaxDuration     time.Duration
+	MinResults       int
+	MinConfidence    float64
+	RequiredTypes    []string
+	MaxDuration      time.Duration
 	QualityThreshold float64
 }
 
-// SearchRouter routes queries to appropriate search strategies
+// SearchRouter routes queries to appropriate search strategies.
 type SearchRouter struct {
 	planner *SearchPlanner
 	rules   []*RoutingRule
 	logger  *logging.Logger
 }
 
-// RoutingRule defines conditions for routing decisions
+// RoutingRule defines conditions for routing decisions.
 type RoutingRule struct {
 	ID          string
 	Condition   func(query string) bool
@@ -73,7 +73,7 @@ type RoutingRule struct {
 	Description string
 }
 
-// NewSearchPlanner creates a new search planner
+// NewSearchPlanner creates a new search planner.
 func NewSearchPlanner(logger *logging.Logger) *SearchPlanner {
 	return &SearchPlanner{
 		llm:    core.GetDefaultLLM(),
@@ -81,26 +81,26 @@ func NewSearchPlanner(logger *logging.Logger) *SearchPlanner {
 	}
 }
 
-// CreateSearchPlan analyzes a query and creates a comprehensive search plan
+// CreateSearchPlan analyzes a query and creates a comprehensive search plan.
 func (sp *SearchPlanner) CreateSearchPlan(ctx context.Context, query string, codeContext string) (*SearchPlan, error) {
 	sp.logger.Info(ctx, "Creating search plan for query: %s", query)
-	
+
 	// Step 1: Analyze the query to understand intent
 	intent, err := sp.analyzeIntent(ctx, query, codeContext)
 	if err != nil {
 		return nil, fmt.Errorf("failed to analyze intent: %w", err)
 	}
-	
+
 	// Step 2: Create spawn strategy based on intent
 	strategy := sp.createSpawnStrategy(intent)
-	
+
 	// Step 3: Generate search steps
 	steps := sp.generateSearchSteps(intent, strategy)
-	
+
 	// Step 4: Estimate duration and success metrics
 	duration := sp.estimateDuration(steps)
 	metrics := sp.defineSuccessMetrics(intent)
-	
+
 	plan := &SearchPlan{
 		Query:            query,
 		Intent:           *intent,
@@ -109,14 +109,14 @@ func (sp *SearchPlanner) CreateSearchPlan(ctx context.Context, query string, cod
 		ExpectedDuration: duration,
 		SuccessMetrics:   metrics,
 	}
-	
-	sp.logger.Info(ctx, "Created search plan with %d steps, estimated duration: %v", 
+
+	sp.logger.Info(ctx, "Created search plan with %d steps, estimated duration: %v",
 		len(steps), duration)
-	
+
 	return plan, nil
 }
 
-// analyzeIntent uses LLM to understand the search query intent
+// analyzeIntent uses LLM to understand the search query intent.
 func (sp *SearchPlanner) analyzeIntent(ctx context.Context, query string, codeContext string) (*SearchIntent, error) {
 	prompt := fmt.Sprintf(`Analyze this search query and determine the search intent:
 
@@ -144,29 +144,29 @@ Exclude: [patterns or "none"]`, query, truncateText(codeContext, 500))
 	if err != nil {
 		return nil, err
 	}
-	
+
 	// Parse the LLM response
 	intent := sp.parseIntentResponse(llmResponse.Content)
-	
+
 	// Add query-specific analysis
 	intent.Keywords = append(intent.Keywords, sp.extractKeywords(query)...)
 	intent.FileHints = append(intent.FileHints, sp.extractFileHints(query)...)
-	
+
 	return intent, nil
 }
 
-// parseIntentResponse parses the LLM response into SearchIntent
+// parseIntentResponse parses the LLM response into SearchIntent.
 func (sp *SearchPlanner) parseIntentResponse(response string) *SearchIntent {
 	intent := &SearchIntent{
 		Primary:    "code_analysis", // default
 		Complexity: 3,               // default
 		Scope:      "medium",        // default
 	}
-	
+
 	lines := strings.Split(response, "\n")
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
-		
+
 		if strings.HasPrefix(line, "Primary:") {
 			intent.Primary = strings.TrimSpace(strings.TrimPrefix(line, "Primary:"))
 		} else if strings.HasPrefix(line, "Complexity:") {
@@ -201,11 +201,11 @@ func (sp *SearchPlanner) parseIntentResponse(response string) *SearchIntent {
 			}
 		}
 	}
-	
+
 	return intent
 }
 
-// createSpawnStrategy creates an agent spawn strategy based on intent
+// createSpawnStrategy creates an agent spawn strategy based on intent.
 func (sp *SearchPlanner) createSpawnStrategy(intent *SearchIntent) *SpawnStrategy {
 	strategy := &SpawnStrategy{
 		MaxParallel:      3, // default
@@ -213,28 +213,28 @@ func (sp *SearchPlanner) createSpawnStrategy(intent *SearchIntent) *SpawnStrateg
 		TypeDistribution: make(map[SearchAgentType]float64),
 		AdaptiveSpawning: true,
 	}
-	
+
 	// Adjust strategy based on intent
 	switch intent.Primary {
 	case "code_analysis":
 		strategy.TypeDistribution[CodeSearchAgent] = 0.6
 		strategy.TypeDistribution[ContextSearchAgent] = 0.3
 		strategy.TypeDistribution[SemanticSearchAgent] = 0.1
-		
+
 	case "guideline_check":
 		strategy.TypeDistribution[GuidelineSearchAgent] = 0.7
 		strategy.TypeDistribution[CodeSearchAgent] = 0.3
-		
+
 	case "context_gathering":
 		strategy.TypeDistribution[ContextSearchAgent] = 0.5
 		strategy.TypeDistribution[CodeSearchAgent] = 0.3
 		strategy.TypeDistribution[SemanticSearchAgent] = 0.2
-		
+
 	case "debugging":
 		strategy.TypeDistribution[CodeSearchAgent] = 0.4
 		strategy.TypeDistribution[ContextSearchAgent] = 0.3
 		strategy.TypeDistribution[SemanticSearchAgent] = 0.3
-		
+
 	default:
 		// Balanced approach
 		strategy.TypeDistribution[CodeSearchAgent] = 0.4
@@ -242,22 +242,22 @@ func (sp *SearchPlanner) createSpawnStrategy(intent *SearchIntent) *SpawnStrateg
 		strategy.TypeDistribution[ContextSearchAgent] = 0.2
 		strategy.TypeDistribution[SemanticSearchAgent] = 0.1
 	}
-	
+
 	// Adjust parallel agents based on complexity and scope
 	if intent.Complexity >= 4 || intent.Scope == "broad" {
 		strategy.MaxParallel = 5
 	} else if intent.Complexity <= 2 && intent.Scope == "narrow" {
 		strategy.MaxParallel = 2
 	}
-	
+
 	return strategy
 }
 
-// generateSearchSteps creates ordered search steps
+// generateSearchSteps creates ordered search steps.
 func (sp *SearchPlanner) generateSearchSteps(intent *SearchIntent, strategy *SpawnStrategy) []*SearchStep {
 	var steps []*SearchStep
 	stepID := 0
-	
+
 	// Generate steps based on agent distribution
 	for agentType, distribution := range strategy.TypeDistribution {
 		if distribution > 0 {
@@ -265,7 +265,7 @@ func (sp *SearchPlanner) generateSearchSteps(intent *SearchIntent, strategy *Spa
 			if count < 1 {
 				count = 1
 			}
-			
+
 			for i := 0; i < count; i++ {
 				stepID++
 				step := &SearchStep{
@@ -280,11 +280,11 @@ func (sp *SearchPlanner) generateSearchSteps(intent *SearchIntent, strategy *Spa
 			}
 		}
 	}
-	
+
 	return steps
 }
 
-// generateStepDescription creates a description for a search step
+// generateStepDescription creates a description for a search step.
 func (sp *SearchPlanner) generateStepDescription(agentType SearchAgentType, intent *SearchIntent) string {
 	switch agentType {
 	case CodeSearchAgent:
@@ -300,7 +300,7 @@ func (sp *SearchPlanner) generateStepDescription(agentType SearchAgentType, inte
 	}
 }
 
-// createSearchRequest creates a SearchRequest for an agent type
+// createSearchRequest creates a SearchRequest for an agent type.
 func (sp *SearchPlanner) createSearchRequest(agentType SearchAgentType, intent *SearchIntent) *SearchRequest {
 	request := &SearchRequest{
 		Query:           strings.Join(intent.Keywords, " "),
@@ -311,7 +311,7 @@ func (sp *SearchPlanner) createSearchRequest(agentType SearchAgentType, intent *
 		MaxResults:      sp.getMaxResults(agentType, intent.Scope),
 		TimeLimit:       sp.getTimeLimit(intent.Complexity),
 	}
-	
+
 	return request
 }
 
@@ -324,7 +324,7 @@ func (sp *SearchPlanner) getMaxResults(agentType SearchAgentType, scope string) 
 		ContextSearchAgent:   10,
 		SemanticSearchAgent:  25,
 	}[agentType]
-	
+
 	switch scope {
 	case "narrow":
 		return base / 2
@@ -347,7 +347,7 @@ func (sp *SearchPlanner) estimateStepDuration(agentType SearchAgentType, complex
 		ContextSearchAgent:   time.Second * 25,
 		SemanticSearchAgent:  time.Second * 45,
 	}[agentType]
-	
+
 	return base * time.Duration(complexity)
 }
 
@@ -368,7 +368,7 @@ func (sp *SearchPlanner) defineSuccessMetrics(intent *SearchIntent) *SuccessMetr
 		MaxDuration:      time.Minute * 5,
 		QualityThreshold: 0.7,
 	}
-	
+
 	// Adjust based on intent
 	switch intent.Primary {
 	case "guideline_check":
@@ -381,13 +381,13 @@ func (sp *SearchPlanner) defineSuccessMetrics(intent *SearchIntent) *SuccessMetr
 		metrics.MinResults = 15
 		metrics.MinConfidence = 0.8
 	}
-	
+
 	// Adjust based on complexity
 	if intent.Complexity >= 4 {
 		metrics.MaxDuration = time.Minute * 10
 		metrics.MinResults *= 2
 	}
-	
+
 	return metrics
 }
 
@@ -397,7 +397,7 @@ func (sp *SearchPlanner) extractKeywords(query string) []string {
 	// Simple keyword extraction
 	words := strings.Fields(strings.ToLower(query))
 	var keywords []string
-	
+
 	// Filter out common words
 	stopWords := map[string]bool{
 		"the": true, "a": true, "an": true, "and": true, "or": true,
@@ -408,41 +408,41 @@ func (sp *SearchPlanner) extractKeywords(query string) []string {
 		"did": true, "will": true, "would": true, "should": true, "could": true,
 		"can": true, "may": true, "might": true, "must": true,
 	}
-	
+
 	for _, word := range words {
 		if len(word) > 2 && !stopWords[word] {
 			keywords = append(keywords, word)
 		}
 	}
-	
+
 	return keywords
 }
 
 func (sp *SearchPlanner) extractFileHints(query string) []string {
 	var hints []string
 	words := strings.Fields(query)
-	
+
 	for _, word := range words {
 		// Look for file extensions or paths
 		if strings.Contains(word, ".go") || strings.Contains(word, ".md") || strings.Contains(word, "/") {
 			hints = append(hints, word)
 		}
 	}
-	
+
 	return hints
 }
 
-// NewSearchRouter creates a new search router with default rules
+// NewSearchRouter creates a new search router with default rules.
 func NewSearchRouter(planner *SearchPlanner, logger *logging.Logger) *SearchRouter {
 	router := &SearchRouter{
 		planner: planner,
 		logger:  logger,
 		rules:   make([]*RoutingRule, 0),
 	}
-	
+
 	// Add default routing rules
 	router.addDefaultRules()
-	
+
 	return router
 }
 
@@ -483,10 +483,10 @@ func (sr *SearchRouter) addDefaultRules() {
 	}
 }
 
-// Route determines the best search strategy for a query
+// Route determines the best search strategy for a query.
 func (sr *SearchRouter) Route(ctx context.Context, query string) (*SearchPlan, error) {
 	sr.logger.Debug(ctx, "Routing query: %s", query)
-	
+
 	// Check routing rules
 	var matchedRule *RoutingRule
 	for _, rule := range sr.rules {
@@ -496,11 +496,11 @@ func (sr *SearchRouter) Route(ctx context.Context, query string) (*SearchPlan, e
 			}
 		}
 	}
-	
+
 	if matchedRule != nil {
 		sr.logger.Debug(ctx, "Matched routing rule: %s", matchedRule.ID)
 	}
-	
+
 	// Create plan using planner
 	return sr.planner.CreateSearchPlan(ctx, query, "")
 }

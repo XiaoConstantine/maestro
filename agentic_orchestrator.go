@@ -12,7 +12,7 @@ import (
 	"github.com/XiaoConstantine/dspy-go/pkg/logging"
 )
 
-// AgenticSearchOrchestrator is the main orchestrator that replaces traditional RAG
+// AgenticSearchOrchestrator is the main orchestrator that replaces traditional RAG.
 type AgenticSearchOrchestrator struct {
 	agentPool     *AgentPool
 	searchPlanner *SearchPlanner
@@ -20,50 +20,50 @@ type AgenticSearchOrchestrator struct {
 	synthesizer   *ResultSynthesizer
 	llm           core.LLM
 	logger        *logging.Logger
-	
+
 	// Configuration
-	config        *OrchestrationConfig
-	
+	config *OrchestrationConfig
+
 	// State tracking
 	activeSearches map[string]*SearchExecution
-	mu            sync.RWMutex
+	mu             sync.RWMutex
 }
 
-// OrchestrationConfig configures the orchestrator behavior
+// OrchestrationConfig configures the orchestrator behavior.
 type OrchestrationConfig struct {
-	MaxParallelSearches  int
-	MaxTokensPerSearch   int
-	DefaultTimeout       time.Duration
-	AdaptiveEnabled      bool
-	SynthesisEnabled     bool
-	RetryAttempts        int
+	MaxParallelSearches int
+	MaxTokensPerSearch  int
+	DefaultTimeout      time.Duration
+	AdaptiveEnabled     bool
+	SynthesisEnabled    bool
+	RetryAttempts       int
 }
 
-// SearchExecution tracks a complete search operation
+// SearchExecution tracks a complete search operation.
 type SearchExecution struct {
-	ID            string
-	Query         string
-	Plan          *SearchPlan
-	Agents        []*UnifiedReActAgent
-	Responses     []*SearchResponse
-	FinalResult   *SynthesizedResult
-	Status        ExecutionStatus
-	StartTime     time.Time
-	Duration      time.Duration
-	mu            sync.RWMutex
+	ID          string
+	Query       string
+	Plan        *SearchPlan
+	Agents      []*UnifiedReActAgent
+	Responses   []*SearchResponse
+	FinalResult *SynthesizedResult
+	Status      ExecutionStatus
+	StartTime   time.Time
+	Duration    time.Duration
+	mu          sync.RWMutex
 }
 
-// ExecutionStatus tracks the status of a search execution
+// ExecutionStatus tracks the status of a search execution.
 type ExecutionStatus struct {
-	Phase       string    // "planning", "executing", "synthesizing", "complete", "failed"
-	Progress    float64   // 0.0 to 1.0
+	Phase       string  // "planning", "executing", "synthesizing", "complete", "failed"
+	Progress    float64 // 0.0 to 1.0
 	ActiveSteps int
 	TotalSteps  int
 	LastUpdate  time.Time
 	Error       error
 }
 
-// SynthesizedResult is the final result after multi-agent synthesis
+// SynthesizedResult is the final result after multi-agent synthesis.
 type SynthesizedResult struct {
 	Query           string
 	Summary         string
@@ -77,7 +77,7 @@ type SynthesizedResult struct {
 	Metadata        map[string]interface{}
 }
 
-// CodeSample represents a synthesized code finding
+// CodeSample represents a synthesized code finding.
 type CodeSample struct {
 	FilePath    string
 	Content     string
@@ -86,7 +86,7 @@ type CodeSample struct {
 	Context     []string
 }
 
-// Guideline represents a synthesized guideline finding
+// Guideline represents a synthesized guideline finding.
 type Guideline struct {
 	Title       string
 	Description string
@@ -95,13 +95,13 @@ type Guideline struct {
 	Source      string
 }
 
-// ResultSynthesizer combines results from multiple agents
+// ResultSynthesizer combines results from multiple agents.
 type ResultSynthesizer struct {
 	llm    core.LLM
 	logger *logging.Logger
 }
 
-// NewAgenticSearchOrchestrator creates a new orchestrator
+// NewAgenticSearchOrchestrator creates a new orchestrator.
 func NewAgenticSearchOrchestrator(searchTool *SimpleSearchTool, logger *logging.Logger) *AgenticSearchOrchestrator {
 	config := &OrchestrationConfig{
 		MaxParallelSearches: 3,
@@ -111,31 +111,31 @@ func NewAgenticSearchOrchestrator(searchTool *SimpleSearchTool, logger *logging.
 		SynthesisEnabled:    true,
 		RetryAttempts:       2,
 	}
-	
+
 	agentPool := NewAgentPool(5, 500000, searchTool, logger) // 5 agents max, 500K tokens total
 	planner := NewSearchPlanner(logger)
 	router := NewSearchRouter(planner, logger)
 	synthesizer := NewResultSynthesizer(logger)
-	
+
 	return &AgenticSearchOrchestrator{
 		agentPool:      agentPool,
 		searchPlanner:  planner,
 		searchRouter:   router,
 		synthesizer:    synthesizer,
-		llm:           core.GetDefaultLLM(),
-		logger:        logger,
-		config:        config,
+		llm:            core.GetDefaultLLM(),
+		logger:         logger,
+		config:         config,
 		activeSearches: make(map[string]*SearchExecution),
 	}
 }
 
-// ExecuteSearch performs a complete agentic search - this replaces FindSimilar
+// ExecuteSearch performs a complete agentic search - this replaces FindSimilar.
 func (aso *AgenticSearchOrchestrator) ExecuteSearch(ctx context.Context, query string, codeContext string) (*SynthesizedResult, error) {
 	startTime := time.Now()
 	searchID := fmt.Sprintf("search-%d", time.Now().UnixNano())
-	
+
 	aso.logger.Info(ctx, "🔍 Starting agentic search [%s]: %s", searchID, query)
-	
+
 	// Create search execution tracker
 	execution := &SearchExecution{
 		ID:        searchID,
@@ -146,97 +146,97 @@ func (aso *AgenticSearchOrchestrator) ExecuteSearch(ctx context.Context, query s
 			LastUpdate: startTime,
 		},
 	}
-	
+
 	// Register execution
 	aso.mu.Lock()
 	aso.activeSearches[searchID] = execution
 	aso.mu.Unlock()
-	
+
 	defer func() {
 		aso.mu.Lock()
 		delete(aso.activeSearches, searchID)
 		aso.mu.Unlock()
 	}()
-	
+
 	// Step 1: Plan the search
 	plan, err := aso.planSearch(ctx, query, codeContext, execution)
 	if err != nil {
 		execution.updateStatus("failed", 0, 0, 0, err)
 		return nil, fmt.Errorf("planning failed: %w", err)
 	}
-	
+
 	// Step 2: Execute multi-agent search
 	responses, err := aso.executeMultiAgentSearch(ctx, plan, execution)
 	if err != nil {
 		execution.updateStatus("failed", 0, 0, 0, err)
 		return nil, fmt.Errorf("execution failed: %w", err)
 	}
-	
+
 	// Step 3: Synthesize results
 	result, err := aso.synthesizeResults(ctx, query, responses, execution)
 	if err != nil {
 		execution.updateStatus("failed", 0, 0, 0, err)
 		return nil, fmt.Errorf("synthesis failed: %w", err)
 	}
-	
+
 	// Complete execution
 	execution.Duration = time.Since(startTime)
 	execution.FinalResult = result
 	execution.updateStatus("complete", 1.0, 0, len(plan.Steps), nil)
-	
+
 	aso.logger.Info(ctx, "✅ Agentic search completed [%s] in %v: %d findings, %.2f confidence",
 		searchID, execution.Duration, len(result.KeyFindings), result.ConfidenceScore)
-	
+
 	return result, nil
 }
 
-// planSearch creates a search plan
+// planSearch creates a search plan.
 func (aso *AgenticSearchOrchestrator) planSearch(ctx context.Context, query string, codeContext string, execution *SearchExecution) (*SearchPlan, error) {
 	aso.logger.Debug(ctx, "Planning search for: %s", query)
 	execution.updateStatus("planning", 0.1, 0, 0, nil)
-	
+
 	plan, err := aso.searchPlanner.CreateSearchPlan(ctx, query, codeContext)
 	if err != nil {
 		return nil, err
 	}
-	
+
 	execution.Plan = plan
 	execution.updateStatus("planning", 0.2, 0, len(plan.Steps), nil)
-	
+
 	return plan, nil
 }
 
-// executeMultiAgentSearch spawns agents and executes the search plan
+// executeMultiAgentSearch spawns agents and executes the search plan.
 func (aso *AgenticSearchOrchestrator) executeMultiAgentSearch(ctx context.Context, plan *SearchPlan, execution *SearchExecution) ([]*SearchResponse, error) {
 	aso.logger.Info(ctx, "Executing multi-agent search with %d steps", len(plan.Steps))
 	execution.updateStatus("executing", 0.3, 0, len(plan.Steps), nil)
-	
+
 	// Create context with timeout
 	searchCtx, cancel := context.WithTimeout(ctx, plan.ExpectedDuration*2)
 	defer cancel()
-	
+
 	// Spawn agents based on strategy
 	agents, err := aso.agentPool.SpawnAgentGroup(searchCtx, plan.Strategy, plan.Query)
 	if err != nil {
 		return nil, fmt.Errorf("failed to spawn agents: %w", err)
 	}
-	
+
 	execution.Agents = agents
 	aso.logger.Info(ctx, "Spawned %d agents", len(agents))
-	
+
 	// Execute searches in parallel
 	var wg sync.WaitGroup
 	responses := make([]*SearchResponse, len(agents))
 	errors := make([]error, len(agents))
-	
+
 	for i, agent := range agents {
 		wg.Add(1)
 		go func(idx int, a *UnifiedReActAgent) {
 			defer wg.Done()
-			
+
 			// Create request for this agent (simplified for unified agents)
 			request := aso.createAgentRequest(plan, SearchAgentType("unified"))
-			
+
 			// Execute search
 			response, err := a.ExecuteSearch(searchCtx, request)
 			if err != nil {
@@ -244,26 +244,26 @@ func (aso *AgenticSearchOrchestrator) executeMultiAgentSearch(ctx context.Contex
 				aso.logger.Warn(searchCtx, "Agent %s failed: %v", a.ID, err)
 				return
 			}
-			
+
 			responses[idx] = response
 			aso.logger.Debug(searchCtx, "Agent %s completed: %d results", a.ID, len(response.Results))
-			
+
 			// Update progress
 			execution.updateProgress()
-			
+
 		}(i, agent)
 	}
-	
+
 	// Wait for all agents to complete
 	wg.Wait()
-	
+
 	// Clean up agents
 	for _, agent := range agents {
 		if err := aso.agentPool.ReleaseAgent(ctx, agent.ID); err != nil {
 			aso.logger.Warn(ctx, "Failed to release agent %s: %v", agent.ID, err)
 		}
 	}
-	
+
 	// Check for errors
 	var validResponses []*SearchResponse
 	for i, response := range responses {
@@ -275,25 +275,25 @@ func (aso *AgenticSearchOrchestrator) executeMultiAgentSearch(ctx context.Contex
 			validResponses = append(validResponses, response)
 		}
 	}
-	
+
 	if len(validResponses) == 0 {
 		return nil, fmt.Errorf("all agents failed")
 	}
-	
+
 	execution.Responses = validResponses
 	return validResponses, nil
 }
 
-// synthesizeResults combines all agent responses into a final result
+// synthesizeResults combines all agent responses into a final result.
 func (aso *AgenticSearchOrchestrator) synthesizeResults(ctx context.Context, query string, responses []*SearchResponse, execution *SearchExecution) (*SynthesizedResult, error) {
 	aso.logger.Info(ctx, "Synthesizing results from %d agents", len(responses))
 	execution.updateStatus("synthesizing", 0.8, 0, len(execution.Plan.Steps), nil)
-	
+
 	result, err := aso.synthesizer.Synthesize(ctx, query, responses)
 	if err != nil {
 		return nil, fmt.Errorf("synthesis failed: %w", err)
 	}
-	
+
 	// Add execution metadata
 	result.AgentsInvolved = make([]string, len(responses))
 	totalTokens := 0
@@ -302,7 +302,7 @@ func (aso *AgenticSearchOrchestrator) synthesizeResults(ctx context.Context, que
 		totalTokens += response.TokensUsed
 	}
 	result.TokensUsed = totalTokens
-	
+
 	return result, nil
 }
 
@@ -315,7 +315,7 @@ func (aso *AgenticSearchOrchestrator) createAgentRequest(plan *SearchPlan, agent
 			return step.Request
 		}
 	}
-	
+
 	// Fallback request
 	return &SearchRequest{
 		Query:         plan.Query,
@@ -337,7 +337,7 @@ func NewResultSynthesizer(logger *logging.Logger) *ResultSynthesizer {
 
 func (rs *ResultSynthesizer) Synthesize(ctx context.Context, query string, responses []*SearchResponse) (*SynthesizedResult, error) {
 	rs.logger.Debug(ctx, "Synthesizing results for query: %s", query)
-	
+
 	if len(responses) == 0 {
 		return &SynthesizedResult{
 			Query:           query,
@@ -345,24 +345,24 @@ func (rs *ResultSynthesizer) Synthesize(ctx context.Context, query string, respo
 			ConfidenceScore: 0.0,
 		}, nil
 	}
-	
+
 	// Collect all results by category
 	codeResults := rs.collectCodeResults(responses)
 	guidelineResults := rs.collectGuidelineResults(responses)
-	
+
 	// Generate summary using LLM
 	summary, err := rs.generateSummary(ctx, query, responses)
 	if err != nil {
 		rs.logger.Warn(ctx, "Failed to generate summary: %v", err)
 		summary = rs.fallbackSummary(responses)
 	}
-	
+
 	// Extract key findings
 	keyFindings := rs.extractKeyFindings(responses)
-	
+
 	// Calculate confidence score
 	confidence := rs.calculateOverallConfidence(responses)
-	
+
 	result := &SynthesizedResult{
 		Query:           query,
 		Summary:         summary,
@@ -377,13 +377,13 @@ func (rs *ResultSynthesizer) Synthesize(ctx context.Context, query string, respo
 			"synthesis_time": time.Now(),
 		},
 	}
-	
+
 	return result, nil
 }
 
 func (rs *ResultSynthesizer) collectCodeResults(responses []*SearchResponse) []CodeSample {
 	var samples []CodeSample
-	
+
 	for _, response := range responses {
 		for _, result := range response.Results {
 			if result.Category == "code" || result.Category == "function" || result.Category == "type" {
@@ -398,22 +398,22 @@ func (rs *ResultSynthesizer) collectCodeResults(responses []*SearchResponse) []C
 			}
 		}
 	}
-	
+
 	// Sort by relevance and take top samples
 	sort.Slice(samples, func(i, j int) bool {
 		return samples[i].Relevance > samples[j].Relevance
 	})
-	
+
 	if len(samples) > 10 {
 		samples = samples[:10]
 	}
-	
+
 	return samples
 }
 
 func (rs *ResultSynthesizer) collectGuidelineResults(responses []*SearchResponse) []Guideline {
 	var guidelines []Guideline
-	
+
 	for _, response := range responses {
 		for _, result := range response.Results {
 			if result.Category == "guideline" {
@@ -427,16 +427,16 @@ func (rs *ResultSynthesizer) collectGuidelineResults(responses []*SearchResponse
 			}
 		}
 	}
-	
+
 	// Sort by relevance
 	sort.Slice(guidelines, func(i, j int) bool {
 		return guidelines[i].Relevance > guidelines[j].Relevance
 	})
-	
+
 	if len(guidelines) > 5 {
 		guidelines = guidelines[:5]
 	}
-	
+
 	return guidelines
 }
 
@@ -446,7 +446,7 @@ func (rs *ResultSynthesizer) generateSummary(ctx context.Context, query string, 
 	for _, response := range responses {
 		findings = append(findings, response.Synthesis)
 	}
-	
+
 	prompt := fmt.Sprintf(`Create a concise summary of these search results for the query: "%s"
 
 Agent Findings:
@@ -459,12 +459,12 @@ Generate a summary that:
 4. Is concise but comprehensive
 
 Summary:`, query, strings.Join(findings, "\n---\n"))
-	
+
 	response, err := rs.llm.Generate(ctx, prompt, core.WithMaxTokens(300))
 	if err != nil {
 		return "", err
 	}
-	
+
 	return response.Content, nil
 }
 
@@ -476,19 +476,19 @@ func (rs *ResultSynthesizer) fallbackSummary(responses []*SearchResponse) string
 
 func (rs *ResultSynthesizer) extractKeyFindings(responses []*SearchResponse) []string {
 	var findings []string
-	
+
 	for _, response := range responses {
 		// Take top results from each agent
 		for i, result := range response.Results {
 			if i >= 3 { // Top 3 per agent
 				break
 			}
-			
+
 			finding := fmt.Sprintf("%s: %s", result.FilePath, result.Explanation)
 			findings = append(findings, finding)
 		}
 	}
-	
+
 	return findings
 }
 
@@ -496,12 +496,12 @@ func (rs *ResultSynthesizer) calculateOverallConfidence(responses []*SearchRespo
 	if len(responses) == 0 {
 		return 0.0
 	}
-	
+
 	total := 0.0
 	for _, response := range responses {
 		total += response.Confidence
 	}
-	
+
 	return total / float64(len(responses))
 }
 
@@ -518,7 +518,7 @@ func (rs *ResultSynthesizer) countTotalResults(responses []*SearchResponse) int 
 func (se *SearchExecution) updateStatus(phase string, progress float64, activeSteps, totalSteps int, err error) {
 	se.mu.Lock()
 	defer se.mu.Unlock()
-	
+
 	se.Status.Phase = phase
 	se.Status.Progress = progress
 	se.Status.ActiveSteps = activeSteps
@@ -530,14 +530,14 @@ func (se *SearchExecution) updateStatus(phase string, progress float64, activeSt
 func (se *SearchExecution) updateProgress() {
 	se.mu.Lock()
 	defer se.mu.Unlock()
-	
+
 	completed := 0
 	for _, response := range se.Responses {
 		if response != nil {
 			completed++
 		}
 	}
-	
+
 	if se.Status.TotalSteps > 0 {
 		se.Status.Progress = 0.3 + (0.5 * float64(completed) / float64(se.Status.TotalSteps))
 	}
@@ -547,22 +547,22 @@ func (se *SearchExecution) updateProgress() {
 
 // Public interface methods that replace RAG functions
 
-// FindSimilarCode replaces the old RAG FindSimilar method
+// FindSimilarCode replaces the old RAG FindSimilar method.
 func (aso *AgenticSearchOrchestrator) FindSimilarCode(ctx context.Context, query string, codeContext string) (*SynthesizedResult, error) {
 	return aso.ExecuteSearch(ctx, query, codeContext)
 }
 
-// FindGuidelines replaces guideline-specific RAG queries
+// FindGuidelines replaces guideline-specific RAG queries.
 func (aso *AgenticSearchOrchestrator) FindGuidelines(ctx context.Context, query string) (*SynthesizedResult, error) {
 	guidelineQuery := fmt.Sprintf("guidelines and best practices for: %s", query)
 	return aso.ExecuteSearch(ctx, guidelineQuery, "")
 }
 
-// GetSearchStatus returns the status of an active search
+// GetSearchStatus returns the status of an active search.
 func (aso *AgenticSearchOrchestrator) GetSearchStatus(searchID string) (*ExecutionStatus, bool) {
 	aso.mu.RLock()
 	defer aso.mu.RUnlock()
-	
+
 	if execution, exists := aso.activeSearches[searchID]; exists {
 		execution.mu.RLock()
 		status := execution.Status
@@ -572,7 +572,7 @@ func (aso *AgenticSearchOrchestrator) GetSearchStatus(searchID string) (*Executi
 	return nil, false
 }
 
-// Shutdown gracefully shuts down the orchestrator
+// Shutdown gracefully shuts down the orchestrator.
 func (aso *AgenticSearchOrchestrator) Shutdown(ctx context.Context) error {
 	aso.logger.Info(ctx, "Shutting down agentic search orchestrator...")
 	return aso.agentPool.Shutdown(ctx)

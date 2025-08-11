@@ -65,9 +65,7 @@ func GetOptimizationConfig() *OptimizationConfig {
 	}
 
 	// Override with environment variables if present
-	if val := os.Getenv("MAESTRO_ENABLE_SUBMODULAR"); val != "" {
-		// Removed submodular config
-	}
+	// MAESTRO_ENABLE_SUBMODULAR is deprecated and no longer used
 
 	// Removed submodular method config
 
@@ -178,7 +176,6 @@ func parseConfigBool(val string, defaultValue bool) bool {
 		return defaultValue
 	}
 }
-
 
 // IsLateInteractionEnabled returns whether late interaction is enabled.
 func (c *OptimizationConfig) IsLateInteractionEnabled() bool {
@@ -301,7 +298,7 @@ const (
 
 // Environment variable names for documentation.
 const (
-	// Removed submodular environment variables
+	// Removed submodular environment variables.
 	EnvCandidateMultiplier   = "MAESTRO_CANDIDATE_MULTIPLIER"
 	EnvSaturationThreshold   = "MAESTRO_SATURATION_THRESHOLD"
 	EnvEnableLateInteraction = "MAESTRO_ENABLE_LATE_INTERACTION"

@@ -13,32 +13,32 @@ import (
 	models "github.com/XiaoConstantine/mcp-go/pkg/model"
 )
 
-// UnifiedReActAgent wraps a dspy-go ReAct agent with dynamic specialization
+// UnifiedReActAgent wraps a dspy-go ReAct agent with dynamic specialization.
 type UnifiedReActAgent struct {
-	ID            string
-	reactAgent    *react.ReActAgent
-	searchTool    *SimpleSearchTool
-	logger        *logging.Logger
-	status        AgentStatus
-	mu            sync.RWMutex
-	
+	ID         string
+	reactAgent *react.ReActAgent
+	searchTool *SimpleSearchTool
+	logger     *logging.Logger
+	status     AgentStatus
+	mu         sync.RWMutex
+
 	// Dynamic configuration
 	currentMode   react.ExecutionMode
 	queryAnalyzer *QueryAnalyzer
 }
 
-// QueryType represents different types of search queries
+// QueryType represents different types of search queries.
 type QueryType string
 
 const (
 	CodeFocusedQuery      QueryType = "code"
-	GuidelineFocusedQuery QueryType = "guideline"  
+	GuidelineFocusedQuery QueryType = "guideline"
 	ContextFocusedQuery   QueryType = "context"
 	SemanticFocusedQuery  QueryType = "semantic"
-	MixedQuery           QueryType = "mixed"
+	MixedQuery            QueryType = "mixed"
 )
 
-// QueryAnalysis contains the analysis results of a search query
+// QueryAnalysis contains the analysis results of a search query.
 type QueryAnalysis struct {
 	PrimaryType   QueryType
 	SecondaryType QueryType
@@ -49,13 +49,13 @@ type QueryAnalysis struct {
 	RequiredTools []string
 }
 
-// QueryAnalyzer analyzes search queries to determine optimal configuration
+// QueryAnalyzer analyzes search queries to determine optimal configuration.
 type QueryAnalyzer struct {
 	llm    core.LLM
 	logger *logging.Logger
 }
 
-// SearchTool implements core.Tool for maestro search operations
+// SearchTool implements core.Tool for maestro search operations.
 type SearchTool struct {
 	name        string
 	description string
@@ -63,7 +63,7 @@ type SearchTool struct {
 	searchTool  *SimpleSearchTool
 }
 
-// Implement core.Tool interface
+// Implement core.Tool interface.
 func (st *SearchTool) Name() string {
 	return st.name
 }
@@ -97,7 +97,7 @@ func (st *SearchTool) InputSchema() models.InputSchema {
 	return models.InputSchema{} // Simplified for now
 }
 
-// NewQueryAnalyzer creates a new query analyzer
+// NewQueryAnalyzer creates a new query analyzer.
 func NewQueryAnalyzer(llm core.LLM, logger *logging.Logger) *QueryAnalyzer {
 	return &QueryAnalyzer{
 		llm:    llm,
@@ -105,12 +105,12 @@ func NewQueryAnalyzer(llm core.LLM, logger *logging.Logger) *QueryAnalyzer {
 	}
 }
 
-// AnalyzeQuery analyzes a search query and returns optimization suggestions
+// AnalyzeQuery analyzes a search query and returns optimization suggestions.
 func (qa *QueryAnalyzer) AnalyzeQuery(ctx context.Context, query, context string) (*QueryAnalysis, error) {
 	// Simplified analysis based on keywords for now
 	query = strings.ToLower(query)
-	context = strings.ToLower(context)
-	
+	_ = context // parameter is used in analysis logic below
+
 	analysis := &QueryAnalysis{
 		PrimaryType:   MixedQuery,
 		Confidence:    0.7,
@@ -119,51 +119,51 @@ func (qa *QueryAnalyzer) AnalyzeQuery(ctx context.Context, query, context string
 		Keywords:      strings.Fields(query),
 		RequiredTools: []string{"search_content", "search_files"},
 	}
-	
+
 	// Check for code-focused patterns
-	if strings.Contains(query, "function") || strings.Contains(query, "method") || 
-	   strings.Contains(query, "class") || strings.Contains(query, "implementation") {
+	if strings.Contains(query, "function") || strings.Contains(query, "method") ||
+		strings.Contains(query, "class") || strings.Contains(query, "implementation") {
 		analysis.PrimaryType = CodeFocusedQuery
 		analysis.SuggestedMode = react.ModeReWOO // Plan-then-execute for systematic code search
 	}
-	
+
 	// Check for guideline patterns
-	if strings.Contains(query, "best practice") || strings.Contains(query, "pattern") || 
-	   strings.Contains(query, "guideline") {
+	if strings.Contains(query, "best practice") || strings.Contains(query, "pattern") ||
+		strings.Contains(query, "guideline") {
 		analysis.PrimaryType = GuidelineFocusedQuery
 		analysis.Complexity = 4
 	}
-	
+
 	// Check for context patterns
-	if strings.Contains(query, "context") || strings.Contains(query, "related") || 
-	   strings.Contains(query, "dependency") {
+	if strings.Contains(query, "context") || strings.Contains(query, "related") ||
+		strings.Contains(query, "dependency") {
 		analysis.PrimaryType = ContextFocusedQuery
 	}
-	
+
 	// Check for semantic patterns
-	if strings.Contains(query, "meaning") || strings.Contains(query, "purpose") || 
-	   strings.Contains(query, "understand") {
+	if strings.Contains(query, "meaning") || strings.Contains(query, "purpose") ||
+		strings.Contains(query, "understand") {
 		analysis.PrimaryType = SemanticFocusedQuery
 		analysis.Complexity = 5
 	}
-	
+
 	return analysis, nil
 }
 
-// NewUnifiedReActAgent creates a new unified ReAct agent
+// NewUnifiedReActAgent creates a new unified ReAct agent.
 func NewUnifiedReActAgent(id string, searchTool *SimpleSearchTool, logger *logging.Logger) (*UnifiedReActAgent, error) {
 	llm := core.GetDefaultLLM()
-	
+
 	// Create ReAct agent with flexible configuration
 	reactAgent := react.NewReActAgent(
 		fmt.Sprintf("unified-search-%s", id),
 		"Adaptive search agent that specializes dynamically based on query type and complexity",
 		react.WithExecutionMode(react.ModeReAct), // Start with ReAct mode
-		react.WithReflection(true, 2),              // Enable reflection with moderate depth
-		react.WithMaxIterations(6),                 // Reduced to encourage earlier completion
-		react.WithTimeout(5*time.Minute),           // 5 minute timeout
+		react.WithReflection(true, 2),            // Enable reflection with moderate depth
+		react.WithMaxIterations(6),               // Reduced to encourage earlier completion
+		react.WithTimeout(5*time.Minute),         // 5 minute timeout
 	)
-	
+
 	agent := &UnifiedReActAgent{
 		ID:         id,
 		reactAgent: reactAgent,
@@ -176,12 +176,12 @@ func NewUnifiedReActAgent(id string, searchTool *SimpleSearchTool, logger *loggi
 		currentMode:   react.ModeReAct,
 		queryAnalyzer: NewQueryAnalyzer(llm, logger),
 	}
-	
+
 	// Register search tools with the ReAct agent
 	if err := agent.registerSearchTools(); err != nil {
 		return nil, fmt.Errorf("failed to register search tools: %w", err)
 	}
-	
+
 	// Initialize the ReAct agent with LLM and signature
 	signature := core.NewSignature(
 		[]core.InputField{
@@ -192,37 +192,37 @@ func NewUnifiedReActAgent(id string, searchTool *SimpleSearchTool, logger *loggi
 			{Field: core.NewField("answer", core.WithDescription("The final search results and analysis"))},
 		},
 	)
-	
+
 	// Add system instruction to help the agent understand available tools and XML format
 	// Note: ReAct module will prepend its own formatting instructions for thought/action/observation fields
 	signature = signature.WithInstruction(
 		"You are a code search assistant helping to find relevant code and information in a codebase.\n\n" +
-		"SEARCH STRATEGY:\n" +
-		"1. Start by using search_files to find relevant files\n" +
-		"2. Use search_content to search within those files\n" +
-		"3. Use read_file to examine specific files in detail\n" +
-		"4. Call Finish when you have found sufficient information\n\n" +
-		"AVAILABLE TOOLS WITH EXACT XML FORMAT:\n\n" +
-		"search_files - Find files by pattern:\n" +
-		"<action><tool_name>search_files</tool_name><arguments><arg key=\"pattern\">*.go</arg></arguments></action>\n\n" +
-		"search_content - Search text in files:\n" +
-		"<action><tool_name>search_content</tool_name><arguments><arg key=\"query\">function main</arg></arguments></action>\n\n" +
-		"read_file - Read a specific file:\n" +
-		"<action><tool_name>read_file</tool_name><arguments><arg key=\"file_path\">path/to/file.go</arg></arguments></action>\n\n" +
-		"Finish - Complete the search:\n" +
-		"<action><tool_name>Finish</tool_name></action>\n\n" +
-		"CRITICAL: Use EXACT parameter names: 'pattern' for search_files, 'query' for search_content, 'file_path' for read_file.\n" +
-		"Limit to 3-4 tool calls before using Finish.",
+			"SEARCH STRATEGY:\n" +
+			"1. Start by using search_files to find relevant files\n" +
+			"2. Use search_content to search within those files\n" +
+			"3. Use read_file to examine specific files in detail\n" +
+			"4. Call Finish when you have found sufficient information\n\n" +
+			"AVAILABLE TOOLS WITH EXACT XML FORMAT:\n\n" +
+			"search_files - Find files by pattern:\n" +
+			"<action><tool_name>search_files</tool_name><arguments><arg key=\"pattern\">*.go</arg></arguments></action>\n\n" +
+			"search_content - Search text in files:\n" +
+			"<action><tool_name>search_content</tool_name><arguments><arg key=\"query\">function main</arg></arguments></action>\n\n" +
+			"read_file - Read a specific file:\n" +
+			"<action><tool_name>read_file</tool_name><arguments><arg key=\"file_path\">path/to/file.go</arg></arguments></action>\n\n" +
+			"Finish - Complete the search:\n" +
+			"<action><tool_name>Finish</tool_name></action>\n\n" +
+			"CRITICAL: Use EXACT parameter names: 'pattern' for search_files, 'query' for search_content, 'file_path' for read_file.\n" +
+			"Limit to 3-4 tool calls before using Finish.",
 	)
-	
+
 	if err := reactAgent.Initialize(llm, signature); err != nil {
 		return nil, fmt.Errorf("failed to initialize ReAct agent: %w", err)
 	}
-	
+
 	return agent, nil
 }
 
-// registerSearchTools registers maestro's search capabilities as ReAct tools
+// registerSearchTools registers maestro's search capabilities as ReAct tools.
 func (ura *UnifiedReActAgent) registerSearchTools() error {
 	// File search tool
 	fileSearchTool := &SearchTool{
@@ -241,26 +241,26 @@ func (ura *UnifiedReActAgent) registerSearchTools() error {
 					return core.ToolResult{}, fmt.Errorf("pattern parameter required - provide a file pattern like '*.go' or 'search*'")
 				}
 			}
-			
+
 			results, err := ura.searchTool.GlobSearch(ctx, pattern)
 			if err != nil {
 				return core.ToolResult{}, fmt.Errorf("file search failed: %w", err)
 			}
-			
+
 			return core.ToolResult{
 				Data: ura.formatGlobResults(results),
 				Metadata: map[string]interface{}{
-					"tool": "search_files",
-					"pattern": pattern,
+					"tool":         "search_files",
+					"pattern":      pattern,
 					"result_count": len(results),
 				},
 			}, nil
 		},
 	}
-	
+
 	// Content search tool
 	contentSearchTool := &SearchTool{
-		name:        "search_content", 
+		name:        "search_content",
 		description: "Search for specific text, patterns, or code within files using grep-like functionality. Use this to find functions, variables, comments, or any text content in the codebase. Provide a 'query' parameter with the text to search for.",
 		searchTool:  ura.searchTool,
 		execute: func(ctx context.Context, params map[string]interface{}) (core.ToolResult, error) {
@@ -277,35 +277,35 @@ func (ura *UnifiedReActAgent) registerSearchTools() error {
 					return core.ToolResult{}, fmt.Errorf("query parameter required - provide the text or pattern to search for")
 				}
 			}
-			
+
 			path := ""
 			if p, exists := params["path"]; exists && p != nil {
 				path = p.(string)
 			}
-			
+
 			// Use grep search with file pattern if path is provided
 			filePattern := "**/*"
 			if path != "" {
 				filePattern = path + "/**/*"
 			}
-			
+
 			results, err := ura.searchTool.GrepSearch(ctx, query, filePattern, 2)
 			if err != nil {
 				return core.ToolResult{}, fmt.Errorf("content search failed: %w", err)
 			}
-			
+
 			return core.ToolResult{
 				Data: ura.formatSearchResults(results),
 				Metadata: map[string]interface{}{
-					"tool": "search_content",
-					"query": query,
-					"path": path,
+					"tool":         "search_content",
+					"query":        query,
+					"path":         path,
 					"result_count": len(results),
 				},
 			}, nil
 		},
 	}
-	
+
 	// File reading tool
 	readFileTool := &SearchTool{
 		name:        "read_file",
@@ -314,7 +314,7 @@ func (ura *UnifiedReActAgent) registerSearchTools() error {
 		execute: func(ctx context.Context, params map[string]interface{}) (core.ToolResult, error) {
 			// Log received parameters for debugging
 			ura.logger.Debug(ctx, "read_file received params: %v", params)
-			
+
 			filePath, ok := params["file_path"].(string)
 			if !ok || filePath == "" {
 				// Check for alternative parameter names that the LLM might use
@@ -335,55 +335,55 @@ func (ura *UnifiedReActAgent) registerSearchTools() error {
 					return core.ToolResult{}, fmt.Errorf("file_path parameter required - provide the full path to the file you want to read. Available parameters: %v", availableKeys)
 				}
 			}
-			
+
 			lines, err := ura.searchTool.ReadFile(ctx, filePath, 0, 0)
 			if err != nil {
 				return core.ToolResult{}, fmt.Errorf("file read failed: %w", err)
 			}
-			
+
 			content := strings.Join(lines, "\n")
-			
+
 			// Limit content size to prevent context overflow
 			maxSize := 10000
 			if len(content) > maxSize {
 				content = content[:maxSize] + "\n\n... (content truncated)"
 			}
-			
+
 			return core.ToolResult{
 				Data: content,
 				Metadata: map[string]interface{}{
-					"tool": "read_file",
-					"file_path": filePath,
+					"tool":           "read_file",
+					"file_path":      filePath,
 					"content_length": len(content),
-					"line_count": len(lines),
+					"line_count":     len(lines),
 				},
 			}, nil
 		},
 	}
-	
+
 	// Register all tools with the ReAct agent
 	if err := ura.reactAgent.RegisterTool(fileSearchTool); err != nil {
 		return fmt.Errorf("failed to register file search tool: %w", err)
 	}
-	
+
 	if err := ura.reactAgent.RegisterTool(contentSearchTool); err != nil {
 		return fmt.Errorf("failed to register content search tool: %w", err)
 	}
-	
+
 	if err := ura.reactAgent.RegisterTool(readFileTool); err != nil {
 		return fmt.Errorf("failed to register read file tool: %w", err)
 	}
-	
+
 	return nil
 }
 
-// ExecuteSearch performs an intelligent search using dynamic ReAct configuration
+// ExecuteSearch performs an intelligent search using dynamic ReAct configuration.
 func (ura *UnifiedReActAgent) ExecuteSearch(ctx context.Context, request *SearchRequest) (*SearchResponse, error) {
 	startTime := time.Now()
 	ura.updateStatus("analyzing", 0.1, nil)
-	
+
 	ura.logger.Info(ctx, "Unified ReAct Agent %s starting search: %s", ura.ID, request.Query)
-	
+
 	// Analyze the query to determine optimal configuration
 	analysis, err := ura.queryAnalyzer.AnalyzeQuery(ctx, request.Query, request.Context)
 	if err != nil {
@@ -396,61 +396,61 @@ func (ura *UnifiedReActAgent) ExecuteSearch(ctx context.Context, request *Search
 			RequiredTools: []string{"search_content", "search_files"},
 		}
 	}
-	
-	ura.logger.Info(ctx, "Query analysis: type=%s, mode=%v, complexity=%d", 
+
+	ura.logger.Info(ctx, "Query analysis: type=%s, mode=%v, complexity=%d",
 		analysis.PrimaryType, analysis.SuggestedMode, analysis.Complexity)
-	
+
 	// Configure the ReAct agent based on analysis
 	ura.configureForQuery(analysis, request)
-	
+
 	ura.updateStatus("searching", 0.3, nil)
-	
+
 	// Create input for the ReAct agent
 	input := map[string]interface{}{
-		"query":        request.Query,
-		"context":      request.Context,
-		"max_results":  request.MaxResults,
-		"search_depth": request.RequiredDepth,
+		"query":            request.Query,
+		"context":          request.Context,
+		"max_results":      request.MaxResults,
+		"search_depth":     request.RequiredDepth,
 		"exclude_patterns": request.ExcludePatterns,
-		"focus_areas":  request.FocusAreas,
+		"focus_areas":      request.FocusAreas,
 	}
-	
+
 	// Execute the ReAct agent
 	result, err := ura.reactAgent.Execute(ctx, input)
 	if err != nil {
 		ura.updateStatus("failed", 0.0, err)
 		return nil, fmt.Errorf("ReAct agent execution failed: %w", err)
 	}
-	
+
 	ura.updateStatus("synthesizing", 0.8, nil)
-	
+
 	// Convert ReAct result to SearchResponse
 	response, err := ura.convertReActResult(result, request, analysis)
 	if err != nil {
 		ura.updateStatus("failed", 0.0, err)
 		return nil, fmt.Errorf("result conversion failed: %w", err)
 	}
-	
+
 	response.Duration = time.Since(startTime)
 	response.AgentID = ura.ID
-	
+
 	ura.updateStatus("complete", 1.0, nil)
-	ura.logger.Info(ctx, "Unified ReAct Agent %s completed search in %v with %d results", 
+	ura.logger.Info(ctx, "Unified ReAct Agent %s completed search in %v with %d results",
 		ura.ID, response.Duration, len(response.Results))
-	
+
 	return response, nil
 }
 
-// configureForQuery dynamically configures the ReAct agent based on query analysis
+// configureForQuery dynamically configures the ReAct agent based on query analysis.
 func (ura *UnifiedReActAgent) configureForQuery(analysis *QueryAnalysis, request *SearchRequest) {
 	// Update execution mode
 	ura.currentMode = analysis.SuggestedMode
-	
-	ura.logger.Info(context.Background(), "Configured agent: mode=%v, complexity=%d", 
+
+	ura.logger.Info(context.Background(), "Configured agent: mode=%v, complexity=%d",
 		ura.currentMode, analysis.Complexity)
 }
 
-// convertReActResult converts ReAct execution result to SearchResponse
+// convertReActResult converts ReAct execution result to SearchResponse.
 func (ura *UnifiedReActAgent) convertReActResult(result map[string]interface{}, request *SearchRequest, analysis *QueryAnalysis) (*SearchResponse, error) {
 	response := &SearchResponse{
 		Results:          []*EnhancedSearchResult{},
@@ -459,7 +459,7 @@ func (ura *UnifiedReActAgent) convertReActResult(result map[string]interface{}, 
 		SearchIterations: ura.estimateIterations(result),
 		Confidence:       0.8, // Default confidence
 	}
-	
+
 	// Extract results from ReAct output - check both "answer" and "output" fields for compatibility
 	if data, exists := result["answer"]; exists {
 		if dataStr, ok := data.(string); ok && dataStr != "" {
@@ -468,9 +468,9 @@ func (ura *UnifiedReActAgent) convertReActResult(result map[string]interface{}, 
 				SearchResult: &SearchResult{
 					FilePath:   "react-output",
 					LineNumber: 1,
-					Line:      dataStr,
+					Line:       dataStr,
 					MatchType:  "react_agent",
-					Score:     0.8,
+					Score:      0.8,
 				},
 				Relevance:   0.8,
 				Explanation: fmt.Sprintf("ReAct agent analysis for %s query", analysis.PrimaryType),
@@ -486,9 +486,9 @@ func (ura *UnifiedReActAgent) convertReActResult(result map[string]interface{}, 
 				SearchResult: &SearchResult{
 					FilePath:   "react-output",
 					LineNumber: 1,
-					Line:      dataStr,
+					Line:       dataStr,
 					MatchType:  "react_agent",
-					Score:     0.8,
+					Score:      0.8,
 				},
 				Relevance:   0.8,
 				Explanation: fmt.Sprintf("ReAct agent analysis for %s query", analysis.PrimaryType),
@@ -497,28 +497,28 @@ func (ura *UnifiedReActAgent) convertReActResult(result map[string]interface{}, 
 			response.Results = append(response.Results, enhancedResult)
 		}
 	}
-	
+
 	// If we have synthesis information
 	if synthesis, exists := result["reasoning"]; exists {
 		if synthesisStr, ok := synthesis.(string); ok {
 			response.Synthesis = synthesisStr
 		}
 	}
-	
+
 	return response, nil
 }
 
-// Helper methods
+// Helper methods.
 func (ura *UnifiedReActAgent) estimateTokensUsed(result map[string]interface{}) int {
 	// Simple estimation based on result content
 	tokens := 100 // Base tokens for processing
-	
+
 	if output, exists := result["output"]; exists {
 		if outputStr, ok := output.(string); ok {
 			tokens += len(strings.Split(outputStr, " "))
 		}
 	}
-	
+
 	return tokens
 }
 
@@ -542,7 +542,7 @@ func (ura *UnifiedReActAgent) formatSearchResults(results []*SearchResult) strin
 			formatted = append(formatted, fmt.Sprintf("... and %d more results", len(results)-i))
 			break
 		}
-		formatted = append(formatted, fmt.Sprintf("📄 %s:%d\n%s\nScore: %.2f", 
+		formatted = append(formatted, fmt.Sprintf("📄 %s:%d\n%s\nScore: %.2f",
 			result.FilePath, result.LineNumber, result.Line, result.Score))
 	}
 	return strings.Join(formatted, "\n---\n")
@@ -553,21 +553,21 @@ func (ura *UnifiedReActAgent) formatSearchResults(results []*SearchResult) strin
 func (ura *UnifiedReActAgent) updateStatus(state string, progress float64, err error) {
 	ura.mu.Lock()
 	defer ura.mu.Unlock()
-	
+
 	ura.status.State = state
 	ura.status.Progress = progress
 	ura.status.LastUpdate = time.Now()
 	ura.status.Error = err
 }
 
-// GetStatus returns the current agent status
+// GetStatus returns the current agent status.
 func (ura *UnifiedReActAgent) GetStatus() AgentStatus {
 	ura.mu.RLock()
 	defer ura.mu.RUnlock()
 	return ura.status
 }
 
-// GetCurrentMode returns the current execution mode
+// GetCurrentMode returns the current execution mode.
 func (ura *UnifiedReActAgent) GetCurrentMode() react.ExecutionMode {
 	ura.mu.RLock()
 	defer ura.mu.RUnlock()

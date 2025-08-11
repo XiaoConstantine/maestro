@@ -9,18 +9,18 @@ import (
 	"github.com/XiaoConstantine/dspy-go/pkg/logging"
 )
 
-// AgenticRAGAdapter adapts the agentic search system to work with existing RAG interface
+// AgenticRAGAdapter adapts the agentic search system to work with existing RAG interface.
 type AgenticRAGAdapter struct {
 	orchestrator *AgenticSearchOrchestrator
 	searchTool   *SimpleSearchTool
 	logger       *logging.Logger
 }
 
-// NewAgenticRAGAdapter creates an adapter for the existing RAG interface
+// NewAgenticRAGAdapter creates an adapter for the existing RAG interface.
 func NewAgenticRAGAdapter(rootPath string, logger *logging.Logger) *AgenticRAGAdapter {
 	searchTool := NewSimpleSearchTool(logger, rootPath)
 	orchestrator := NewAgenticSearchOrchestrator(searchTool, logger)
-	
+
 	return &AgenticRAGAdapter{
 		orchestrator: orchestrator,
 		searchTool:   searchTool,
@@ -28,30 +28,30 @@ func NewAgenticRAGAdapter(rootPath string, logger *logging.Logger) *AgenticRAGAd
 	}
 }
 
-// FindSimilar replaces the traditional RAG FindSimilar method
+// FindSimilar replaces the traditional RAG FindSimilar method.
 func (ara *AgenticRAGAdapter) FindSimilar(ctx context.Context, embedding []float32, limit int, contentTypes ...string) ([]*Content, error) {
 	// Since we don't use embeddings, we need to convert this call to a text query
 	// This is a compatibility layer - in practice, callers should use the new interface
 	query := ara.inferQueryFromEmbedding(contentTypes)
-	
+
 	result, err := ara.orchestrator.ExecuteSearch(ctx, query, "")
 	if err != nil {
 		return nil, fmt.Errorf("agentic search failed: %w", err)
 	}
-	
+
 	// Convert SynthesizedResult to []*Content for compatibility
 	return ara.convertToContent(result, limit), nil
 }
 
-// FindSimilarWithDebug provides debug information (compatibility method)
+// FindSimilarWithDebug provides debug information (compatibility method).
 func (ara *AgenticRAGAdapter) FindSimilarWithDebug(ctx context.Context, embedding []float32, limit int, contentTypes ...string) ([]*Content, DebugInfo, error) {
 	startTime := time.Now()
-	
+
 	contents, err := ara.FindSimilar(ctx, embedding, limit, contentTypes...)
 	if err != nil {
 		return nil, DebugInfo{}, err
 	}
-	
+
 	// Create debug info for compatibility
 	debugInfo := DebugInfo{
 		QueryEmbeddingDims: len(embedding),
@@ -66,49 +66,48 @@ func (ara *AgenticRAGAdapter) FindSimilarWithDebug(ctx context.Context, embeddin
 			AverageScore:   ara.calculateAverageScore(contents),
 		},
 	}
-	
+
 	return contents, debugInfo, nil
 }
 
-
-// FindSimilarWithLateInteraction performs iterative search refinement
+// FindSimilarWithLateInteraction performs iterative search refinement.
 func (ara *AgenticRAGAdapter) FindSimilarWithLateInteraction(ctx context.Context, embedding []float32, limit int, codeContext, queryContext string, contentTypes ...string) ([]*Content, *RefinementResult, error) {
 	// Create query from both contexts
 	query := fmt.Sprintf("%s %s", queryContext, ara.extractKeywords(codeContext))
-	
+
 	result, err := ara.orchestrator.ExecuteSearch(ctx, query, codeContext)
 	if err != nil {
 		return nil, nil, fmt.Errorf("interactive agentic search failed: %w", err)
 	}
-	
+
 	contents := ara.convertToContent(result, limit)
 	refinementResult := &RefinementResult{
-		OriginalCount:   1,
-		FinalCount:      len(contents),
-		ProcessingTime:  time.Second, // Placeholder
+		OriginalCount:  1,
+		FinalCount:     len(contents),
+		ProcessingTime: time.Second, // Placeholder
 		QualityMetrics: RefinementQualityMetrics{
 			ConfidenceScore: result.ConfidenceScore,
 			RelevanceScore:  result.ConfidenceScore,
 		},
 	}
-	
+
 	return contents, refinementResult, nil
 }
 
 // Enhanced methods that provide better agentic search interface
 
-// SearchCode performs code-specific agentic search
+// SearchCode performs code-specific agentic search.
 func (ara *AgenticRAGAdapter) SearchCode(ctx context.Context, query string, codeContext string) (*SynthesizedResult, error) {
 	codeQuery := fmt.Sprintf("code analysis: %s", query)
 	return ara.orchestrator.ExecuteSearch(ctx, codeQuery, codeContext)
 }
 
-// SearchGuidelines performs guideline-specific agentic search
+// SearchGuidelines performs guideline-specific agentic search.
 func (ara *AgenticRAGAdapter) SearchGuidelines(ctx context.Context, query string) (*SynthesizedResult, error) {
 	return ara.orchestrator.FindGuidelines(ctx, query)
 }
 
-// SearchWithIntent performs intent-aware search
+// SearchWithIntent performs intent-aware search.
 func (ara *AgenticRAGAdapter) SearchWithIntent(ctx context.Context, query string, intent string, codeContext string) (*SynthesizedResult, error) {
 	intentQuery := fmt.Sprintf("[Intent: %s] %s", intent, query)
 	return ara.orchestrator.ExecuteSearch(ctx, intentQuery, codeContext)
@@ -127,13 +126,13 @@ func (ara *AgenticRAGAdapter) inferQueryFromEmbedding(contentTypes []string) str
 
 func (ara *AgenticRAGAdapter) convertToContent(result *SynthesizedResult, limit int) []*Content {
 	var contents []*Content
-	
+
 	// Convert code samples to Content
 	for i, sample := range result.CodeSamples {
 		if i >= limit {
 			break
 		}
-		
+
 		content := &Content{
 			ID:   fmt.Sprintf("code-%d", i),
 			Text: sample.Content,
@@ -146,14 +145,14 @@ func (ara *AgenticRAGAdapter) convertToContent(result *SynthesizedResult, limit 
 		}
 		contents = append(contents, content)
 	}
-	
+
 	// Convert guidelines to Content
 	remaining := limit - len(contents)
 	for i, guideline := range result.Guidelines {
 		if i >= remaining {
 			break
 		}
-		
+
 		content := &Content{
 			ID:   fmt.Sprintf("guideline-%d", i),
 			Text: guideline.Description,
@@ -166,35 +165,26 @@ func (ara *AgenticRAGAdapter) convertToContent(result *SynthesizedResult, limit 
 		}
 		contents = append(contents, content)
 	}
-	
+
 	return contents
 }
 
-func (ara *AgenticRAGAdapter) createContextualQuery(codeContext string, contentTypes []string) string {
-	keywords := ara.extractKeywords(codeContext)
-	typeContext := ""
-	if len(contentTypes) > 0 {
-		typeContext = fmt.Sprintf("focusing on %s", strings.Join(contentTypes, " and "))
-	}
-	
-	return fmt.Sprintf("analyze %s %s", keywords, typeContext)
-}
 
 func (ara *AgenticRAGAdapter) extractKeywords(text string) string {
 	// Simple keyword extraction
 	words := strings.Fields(text)
 	var keywords []string
-	
+
 	for _, word := range words {
 		if len(word) > 3 && !ara.isStopWord(word) {
 			keywords = append(keywords, word)
 		}
 	}
-	
+
 	if len(keywords) > 5 {
 		keywords = keywords[:5] // Limit to top 5
 	}
-	
+
 	return strings.Join(keywords, " ")
 }
 
@@ -214,12 +204,12 @@ func (ara *AgenticRAGAdapter) createTopMatches(contents []*Content) []string {
 		if i >= 3 { // Top 3 matches
 			break
 		}
-		
+
 		relevance := "unknown"
 		if rel, exists := content.Metadata["relevance"]; exists {
 			relevance = rel
 		}
-		
+
 		match := fmt.Sprintf("%s (relevance: %s)", content.ID, relevance)
 		matches = append(matches, match)
 	}
@@ -242,29 +232,29 @@ func (ara *AgenticRAGAdapter) calculateAverageScore(contents []*Content) float64
 	if len(contents) == 0 {
 		return 0.0
 	}
-	
+
 	total := 0.0
 	count := 0
-	
+
 	for _, content := range contents {
 		if relStr, exists := content.Metadata["relevance"]; exists {
 			total += agenticParseFloat(relStr)
 			count++
 		}
 	}
-	
+
 	if count == 0 {
 		return 0.0
 	}
-	
+
 	return total / float64(count)
 }
 
-// agenticParseFloat safely parses a float from string
+// agenticParseFloat safely parses a float from string.
 func agenticParseFloat(s string) float64 {
 	if f, err := fmt.Sscanf(s, "%f", new(float64)); err == nil && f == 1 {
 		var result float64
-		fmt.Sscanf(s, "%f", &result)
+		_, _ = fmt.Sscanf(s, "%f", &result)
 		return result
 	}
 	return 0.0
@@ -292,13 +282,13 @@ func (ara *AgenticRAGAdapter) DeleteContent(ctx context.Context, id string) erro
 func (ara *AgenticRAGAdapter) PopulateGuidelines(ctx context.Context, language string) error {
 	// Guidelines are searched dynamically, but we can pre-index common patterns
 	ara.logger.Info(ctx, "PopulateGuidelines called for language: %s", language)
-	
+
 	// Use the search tool to discover guideline files
 	guidelineFiles, err := ara.searchTool.GlobSearch(ctx, "**/*.md")
 	if err != nil {
 		return fmt.Errorf("failed to find guideline files: %w", err)
 	}
-	
+
 	ara.logger.Info(ctx, "Found %d potential guideline files", len(guidelineFiles))
 	return nil
 }
@@ -333,7 +323,7 @@ func (ara *AgenticRAGAdapter) Close() error {
 	return ara.orchestrator.Shutdown(context.Background())
 }
 
-// AgenticRAGFactory creates agentic RAG instances
+// AgenticRAGFactory creates agentic RAG instances.
 type AgenticRAGFactory struct {
 	logger *logging.Logger
 }
@@ -342,7 +332,7 @@ func NewAgenticRAGFactory(logger *logging.Logger) *AgenticRAGFactory {
 	return &AgenticRAGFactory{logger: logger}
 }
 
-// CreateRAGStore creates an agentic RAG adapter that implements RAGStore interface
+// CreateRAGStore creates an agentic RAG adapter that implements RAGStore interface.
 func (arf *AgenticRAGFactory) CreateRAGStore(rootPath string) RAGStore {
 	return NewAgenticRAGAdapter(rootPath, arf.logger)
 }
