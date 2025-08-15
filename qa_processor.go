@@ -81,10 +81,22 @@ func (p *RepoQAProcessor) Process(ctx context.Context, task agents.Task, context
 		return nil, fmt.Errorf("task %s: %w", task.ID, err)
 	}
 
-	// Create embedding and find similar content
+	// Check if we have agentic search available
+	if agenticAdapter, ok := p.ragStore.(*AgenticRAGAdapter); ok {
+		// Use direct agentic search with the text query
+		result, err := agenticAdapter.SearchWithIntent(ctx, metadata.Question, "code_assistance", "")
+		if err != nil {
+			return nil, fmt.Errorf("failed to perform agentic search: %w", err)
+		}
+
+		// Convert agentic results to traditional format for compatibility
+		similar := p.convertAgenticResultToContent(result)
+		return p.processResults(ctx, signature, metadata, similar)
+	}
+
+	// Fallback to traditional RAG with embeddings
 	llm := core.GetTeacherLLM()
 	questionEmbedding, err := llm.CreateEmbedding(ctx, metadata.Question)
-
 	if err != nil {
 		return nil, fmt.Errorf("failed to create embedding: %w", err)
 	}
@@ -92,6 +104,20 @@ func (p *RepoQAProcessor) Process(ctx context.Context, task agents.Task, context
 	similar, err := p.ragStore.FindSimilar(ctx, questionEmbedding.Vector, 10)
 	if err != nil {
 		return nil, fmt.Errorf("failed to find similar content: %w", err)
+	}
+
+	return p.processResults(ctx, signature, metadata, similar)
+}
+
+// processResults handles the common result processing for both agentic and traditional RAG.
+func (p *RepoQAProcessor) processResults(ctx context.Context, signature core.Signature, metadata *QAMetadata, similar []*Content) (*QAResponse, error) {
+	// Handle case where no results were found
+	if len(similar) == 0 {
+		return &QAResponse{
+			Answer:      fmt.Sprintf("I couldn't find any relevant information about \"%s\" in this repository. This codebase may not contain the patterns or examples you're looking for.", metadata.Question),
+			Confidence:  0.1,
+			SourceFiles: []string{},
+		}, nil
 	}
 
 	// Format context for LLM
@@ -150,20 +176,104 @@ func extractQAMetadata(metadata map[string]interface{}) (*QAMetadata, error) {
 func extractQAResult(result interface{}, response *QAResponse) error {
 	resultMap, ok := result.(map[string]interface{})
 	if !ok {
+		// If we can't parse the result, treat it as a string answer
+		if str, ok := result.(string); ok && str != "" {
+			response.Answer = "I found some information, but couldn't parse it properly. Raw response: " + str
+			response.Confidence = 0.3
+			return nil
+		}
 		return fmt.Errorf("invalid result type: %T", result)
 	}
 
-	if answer, ok := resultMap["answer"].(string); ok {
+	if answer, ok := resultMap["answer"].(string); ok && answer != "" {
 		response.Answer = answer
 	} else {
-		return fmt.Errorf("missing or invalid answer")
+		// Check if there's any text content we can use
+		if rawContent, exists := resultMap["content"].(string); exists && rawContent != "" {
+			response.Answer = rawContent
+		} else {
+			// Fallback: create a generic "no information found" response
+			response.Answer = "I was unable to find relevant information to answer your question in this repository."
+		}
 	}
 
 	if confidence, ok := resultMap["confidence"].(float64); ok {
 		response.Confidence = confidence
+	} else if confidenceStr, ok := resultMap["confidence"].(string); ok {
+		// Try to parse confidence as string
+		if conf, err := fmt.Sscanf(confidenceStr, "%f", new(float64)); err == nil && conf == 1 {
+			var parsedConf float64
+			_, _ = fmt.Sscanf(confidenceStr, "%f", &parsedConf)
+			response.Confidence = parsedConf
+		} else {
+			response.Confidence = 0.5
+		}
 	} else {
-		response.Confidence = 0.7
+		// Default confidence when answer was found but confidence wasn't specified
+		if response.Answer != "" {
+			response.Confidence = 0.7
+		} else {
+			response.Confidence = 0.1
+		}
 	}
 
 	return nil
+}
+
+// convertAgenticResultToContent converts agentic search results to traditional Content format.
+func (p *RepoQAProcessor) convertAgenticResultToContent(result *SynthesizedResult) []*Content {
+	var contents []*Content
+
+	// MOST IMPORTANT: Include the synthesized summary as the primary content
+	// This is what the QA processor will actually use to generate the answer
+	if result.Summary != "" {
+		summaryContent := &Content{
+			ID:   "agentic-synthesis",
+			Text: result.Summary,
+			Metadata: map[string]string{
+				"file_path":    "synthesis_result.md",
+				"content_type": ContentTypeRepository,
+				"source":       "agentic_search",
+				"relevance":    fmt.Sprintf("%.2f", result.ConfidenceScore),
+				"summary":      "true",
+			},
+		}
+		contents = append(contents, summaryContent)
+	}
+
+	// Convert code samples to Content
+	for i, sample := range result.CodeSamples {
+		content := &Content{
+			ID:   fmt.Sprintf("agentic-code-%d", i),
+			Text: sample.Content,
+			Metadata: map[string]string{
+				"file_path":    sample.FilePath,
+				"content_type": ContentTypeRepository,
+				"explanation":  sample.Explanation,
+				"relevance":    fmt.Sprintf("%.2f", sample.Relevance),
+				"start_line":   "1",  // Default values for compatibility
+				"end_line":     "50", // Will be improved in future
+			},
+		}
+		contents = append(contents, content)
+	}
+
+	// Convert guidelines to Content
+	for i, guideline := range result.Guidelines {
+		content := &Content{
+			ID:   fmt.Sprintf("agentic-guideline-%d", i),
+			Text: guideline.Description,
+			Metadata: map[string]string{
+				"file_path":    fmt.Sprintf("guidelines/%s", guideline.Source),
+				"content_type": ContentTypeGuideline,
+				"title":        guideline.Title,
+				"relevance":    fmt.Sprintf("%.2f", guideline.Relevance),
+				"start_line":   "1",
+				"end_line":     "1",
+			},
+		}
+		contents = append(contents, content)
+	}
+
+	return contents
 }
