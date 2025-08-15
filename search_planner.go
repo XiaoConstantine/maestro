@@ -214,131 +214,47 @@ func (sp *SearchPlanner) createSpawnStrategy(intent *SearchIntent) *SpawnStrateg
 		AdaptiveSpawning: true,
 	}
 
-	// Adjust strategy based on intent
-	switch intent.Primary {
-	case "code_analysis":
-		strategy.TypeDistribution[CodeSearchAgent] = 0.6
-		strategy.TypeDistribution[ContextSearchAgent] = 0.3
-		strategy.TypeDistribution[SemanticSearchAgent] = 0.1
-
-	case "guideline_check":
-		strategy.TypeDistribution[GuidelineSearchAgent] = 0.7
-		strategy.TypeDistribution[CodeSearchAgent] = 0.3
-
-	case "context_gathering":
-		strategy.TypeDistribution[ContextSearchAgent] = 0.5
-		strategy.TypeDistribution[CodeSearchAgent] = 0.3
-		strategy.TypeDistribution[SemanticSearchAgent] = 0.2
-
-	case "debugging":
-		strategy.TypeDistribution[CodeSearchAgent] = 0.4
-		strategy.TypeDistribution[ContextSearchAgent] = 0.3
-		strategy.TypeDistribution[SemanticSearchAgent] = 0.3
-
-	default:
-		// Balanced approach
-		strategy.TypeDistribution[CodeSearchAgent] = 0.4
-		strategy.TypeDistribution[GuidelineSearchAgent] = 0.3
-		strategy.TypeDistribution[ContextSearchAgent] = 0.2
-		strategy.TypeDistribution[SemanticSearchAgent] = 0.1
-	}
+	// Since we use UnifiedReActAgents that dynamically specialize,
+	// we simplify the strategy to focus on parallel count and token allocation
+	// rather than complex type distribution
 
 	// Adjust parallel agents based on complexity and scope
 	if intent.Complexity >= 4 || intent.Scope == "broad" {
-		strategy.MaxParallel = 5
+		strategy.MaxParallel = 4        // Reduced from 5 to avoid overwhelming
+		strategy.TokensPerAgent = 80000 // More agents, fewer tokens per agent
 	} else if intent.Complexity <= 2 && intent.Scope == "narrow" {
 		strategy.MaxParallel = 2
+		strategy.TokensPerAgent = 120000 // Fewer agents, more tokens per agent
 	}
+
+	// Set a single unified agent type since all agents are now UnifiedReActAgents
+	// The TypeDistribution is kept for backward compatibility but simplified
+	strategy.TypeDistribution[CodeSearchAgent] = 1.0
 
 	return strategy
 }
 
-// generateSearchSteps creates ordered search steps.
+// generateSearchSteps creates a unified search plan for the agent pool.
 func (sp *SearchPlanner) generateSearchSteps(intent *SearchIntent, strategy *SpawnStrategy) []*SearchStep {
 	var steps []*SearchStep
-	stepID := 0
 
-	// Generate steps based on agent distribution
-	for agentType, distribution := range strategy.TypeDistribution {
-		if distribution > 0 {
-			count := int(float64(strategy.MaxParallel) * distribution)
-			if count < 1 {
-				count = 1
-			}
-
-			for i := 0; i < count; i++ {
-				stepID++
-				step := &SearchStep{
-					ID:          fmt.Sprintf("step-%d", stepID),
-					Description: sp.generateStepDescription(agentType, intent),
-					AgentType:   agentType,
-					Request:     sp.createSearchRequest(agentType, intent),
-					Priority:    distribution,
-					Estimated:   sp.estimateStepDuration(agentType, intent.Complexity),
-				}
-				steps = append(steps, step)
-			}
-		}
+	// Since we use unified agents, create a single coordinated search step
+	// The UnifiedReActAgent pool will handle the parallel execution and specialization
+	step := &SearchStep{
+		ID:          "unified-search",
+		Description: sp.generateUnifiedDescription(intent),
+		AgentType:   CodeSearchAgent, // Default type - agents will specialize dynamically
+		Request:     sp.createUnifiedSearchRequest(intent),
+		Priority:    1.0,
+		Estimated:   sp.estimateStepDuration(CodeSearchAgent, intent.Complexity),
 	}
+	steps = append(steps, step)
 
 	return steps
 }
 
-// generateStepDescription creates a description for a search step.
-func (sp *SearchPlanner) generateStepDescription(agentType SearchAgentType, intent *SearchIntent) string {
-	switch agentType {
-	case CodeSearchAgent:
-		return fmt.Sprintf("Search for code patterns related to: %s", strings.Join(intent.Keywords, ", "))
-	case GuidelineSearchAgent:
-		return fmt.Sprintf("Find guidelines and best practices for: %s", intent.Primary)
-	case ContextSearchAgent:
-		return fmt.Sprintf("Gather context and related information for: %s", strings.Join(intent.Keywords, ", "))
-	case SemanticSearchAgent:
-		return fmt.Sprintf("Perform semantic analysis for: %s", intent.Primary)
-	default:
-		return "Generic search step"
-	}
-}
-
-// createSearchRequest creates a SearchRequest for an agent type.
-func (sp *SearchPlanner) createSearchRequest(agentType SearchAgentType, intent *SearchIntent) *SearchRequest {
-	request := &SearchRequest{
-		Query:           strings.Join(intent.Keywords, " "),
-		Context:         intent.Primary,
-		RequiredDepth:   intent.Complexity,
-		FocusAreas:      intent.FileHints,
-		ExcludePatterns: intent.Exclusions,
-		MaxResults:      sp.getMaxResults(agentType, intent.Scope),
-		TimeLimit:       sp.getTimeLimit(intent.Complexity),
-	}
-
-	return request
-}
-
-// Helper functions
-
-func (sp *SearchPlanner) getMaxResults(agentType SearchAgentType, scope string) int {
-	base := map[SearchAgentType]int{
-		CodeSearchAgent:      20,
-		GuidelineSearchAgent: 15,
-		ContextSearchAgent:   10,
-		SemanticSearchAgent:  25,
-	}[agentType]
-
-	switch scope {
-	case "narrow":
-		return base / 2
-	case "broad":
-		return base * 2
-	default:
-		return base
-	}
-}
-
-func (sp *SearchPlanner) getTimeLimit(complexity int) time.Duration {
-	base := time.Minute * 2
-	return base * time.Duration(complexity)
-}
+// These legacy functions have been removed as they're no longer needed
+// with the unified agent architecture
 
 func (sp *SearchPlanner) estimateStepDuration(agentType SearchAgentType, complexity int) time.Duration {
 	base := map[SearchAgentType]time.Duration{
@@ -522,4 +438,24 @@ func truncateText(s string, maxLen int) string {
 		return s
 	}
 	return s[:maxLen] + "..."
+}
+
+// generateUnifiedDescription creates a description for unified agent search.
+func (sp *SearchPlanner) generateUnifiedDescription(intent *SearchIntent) string {
+	return fmt.Sprintf("Unified search for %s intent with %s scope (complexity: %d)",
+		intent.Primary, intent.Scope, intent.Complexity)
+}
+
+// Note: This receives the original query and context from the calling method.
+func (sp *SearchPlanner) createUnifiedSearchRequest(intent *SearchIntent) *SearchRequest {
+	// Create a generalized search request based on intent
+	// The actual query will be passed separately to the agents
+	return &SearchRequest{
+		Query:           strings.Join(intent.Keywords, " "), // Use keywords as the base query
+		Context:         fmt.Sprintf("Intent: %s, Scope: %s", intent.Primary, intent.Scope),
+		MaxResults:      20, // Reasonable default
+		RequiredDepth:   intent.Complexity,
+		ExcludePatterns: intent.Exclusions,
+		FocusAreas:      intent.Keywords,
+	}
 }

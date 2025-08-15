@@ -90,7 +90,7 @@ func (p *RepoQAProcessor) Process(ctx context.Context, task agents.Task, context
 		}
 
 		// Convert agentic results to traditional format for compatibility
-		similar := convertAgenticResultToContent(result)
+		similar := p.convertAgenticResultToContent(result)
 		return p.processResults(ctx, signature, metadata, similar)
 	}
 
@@ -221,8 +221,25 @@ func extractQAResult(result interface{}, response *QAResponse) error {
 }
 
 // convertAgenticResultToContent converts agentic search results to traditional Content format.
-func convertAgenticResultToContent(result *SynthesizedResult) []*Content {
+func (p *RepoQAProcessor) convertAgenticResultToContent(result *SynthesizedResult) []*Content {
 	var contents []*Content
+
+	// MOST IMPORTANT: Include the synthesized summary as the primary content
+	// This is what the QA processor will actually use to generate the answer
+	if result.Summary != "" {
+		summaryContent := &Content{
+			ID:   "agentic-synthesis",
+			Text: result.Summary,
+			Metadata: map[string]string{
+				"file_path":    "synthesis_result.md",
+				"content_type": ContentTypeRepository,
+				"source":       "agentic_search",
+				"relevance":    fmt.Sprintf("%.2f", result.ConfidenceScore),
+				"summary":      "true",
+			},
+		}
+		contents = append(contents, summaryContent)
+	}
 
 	// Convert code samples to Content
 	for i, sample := range result.CodeSamples {

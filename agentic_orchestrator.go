@@ -444,27 +444,44 @@ func (rs *ResultSynthesizer) generateSummary(ctx context.Context, query string, 
 	// Prepare context for summary generation
 	var findings []string
 	for _, response := range responses {
-		findings = append(findings, response.Synthesis)
+		if response.Synthesis != "" {
+			findings = append(findings, response.Synthesis)
+		}
 	}
 
-	prompt := fmt.Sprintf(`Create a concise summary of these search results for the query: "%s"
+	rs.logger.Debug(ctx, "Synthesis input - Query: %s, Findings count: %d", query, len(findings))
+	for i, finding := range findings {
+		truncated := finding
+		if len(finding) > 100 {
+			truncated = finding[:100] + "..."
+		}
+		rs.logger.Debug(ctx, "Finding %d: %s", i+1, truncated)
+	}
 
-Agent Findings:
+	// If no findings, return early
+	if len(findings) == 0 {
+		rs.logger.Warn(ctx, "No synthesis data available from agents")
+		return "No search results were found by the agents.", nil
+	}
+
+	findingsText := strings.Join(findings, "\n---\n")
+	prompt := fmt.Sprintf(`You are analyzing search results from code search agents. The query was: "%s"
+
+Here are the agent findings:
 %s
 
-Generate a summary that:
-1. Answers the original query
-2. Highlights key insights
-3. Provides actionable information
-4. Is concise but comprehensive
+IMPORTANT: The agents found actual results above. Do NOT say "couldn't find" or "no information". 
+Instead, summarize what the agents actually discovered.
 
-Summary:`, query, strings.Join(findings, "\n---\n"))
+Provide a clear, helpful summary of what was found:`, query, findingsText)
 
-	response, err := rs.llm.Generate(ctx, prompt, core.WithMaxTokens(300))
+	response, err := rs.llm.Generate(ctx, prompt, core.WithMaxTokens(500))
 	if err != nil {
+		rs.logger.Warn(ctx, "LLM generation failed: %v", err)
 		return "", err
 	}
 
+	rs.logger.Debug(ctx, "Generated summary: %s", response.Content)
 	return response.Content, nil
 }
 

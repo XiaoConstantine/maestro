@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/XiaoConstantine/dspy-go/pkg/logging"
 )
@@ -302,13 +303,53 @@ func (s *SimpleSearchTool) readLines(r io.Reader) []string {
 func (s *SimpleSearchTool) getCachedFile(path string) []string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.fileCache[path]
+
+	// Check if cache entry exists and is still valid (TTL: 5 minutes)
+	if expiry, exists := s.cacheExpiry[path]; exists {
+		if time.Now().Unix() > expiry {
+			// Cache expired - clean it up in a separate goroutine to avoid blocking
+			go s.evictExpiredEntry(path)
+			return nil
+		}
+		return s.fileCache[path]
+	}
+	return nil
 }
 
 func (s *SimpleSearchTool) cacheFile(path string, lines []string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	// Set cache entry with 5-minute TTL
 	s.fileCache[path] = lines
+	s.cacheExpiry[path] = time.Now().Add(5 * time.Minute).Unix()
+
+	// Periodically clean up expired entries if cache gets large
+	if len(s.fileCache) > 100 {
+		go s.cleanupExpiredEntries()
+	}
+}
+
+// evictExpiredEntry removes a specific expired cache entry.
+func (s *SimpleSearchTool) evictExpiredEntry(path string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.fileCache, path)
+	delete(s.cacheExpiry, path)
+}
+
+// cleanupExpiredEntries removes all expired cache entries.
+func (s *SimpleSearchTool) cleanupExpiredEntries() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	now := time.Now().Unix()
+	for path, expiry := range s.cacheExpiry {
+		if now > expiry {
+			delete(s.fileCache, path)
+			delete(s.cacheExpiry, path)
+		}
+	}
 }
 
 func (s *SimpleSearchTool) fuzzyScore(queryTokens []string, text string) float64 {
