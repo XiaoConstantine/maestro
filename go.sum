@@ -6,8 +6,8 @@ github.com/Netflix/go-expect v0.0.0-20220104043353-73e0943537d2 h1:+vx7roKuyA63n
 github.com/Netflix/go-expect v0.0.0-20220104043353-73e0943537d2/go.mod h1:HBCaDeC1lPdgDeDbhX8XFpy1jqjK0IBG8W5K+xYqA0w=
 github.com/XiaoConstantine/anthropic-go v0.0.8 h1:10Z87ZuFhIdyHMsXu0B+7L+Ha7vwCQXYRgZ2fDVVQGk=
 github.com/XiaoConstantine/anthropic-go v0.0.8/go.mod h1:ARxRchhwI8HCfEFJtFCIRET3K2QqoyGyuvMra/6nfoI=
-github.com/XiaoConstantine/dspy-go v0.59.0 h1:mYxcdzZznp1xm10Gvo7G6xnNlxZ5MildRYi2eSJEvrQ=
-github.com/XiaoConstantine/dspy-go v0.59.0/go.mod h1:YsdK029wtoiRLfjkRH0A0U+Ajma8cFIZe0A7R+6WG3g=
+github.com/XiaoConstantine/dspy-go v0.60.0 h1:qdoHOWT0VVz9qIXSE+48sWAR1ToAK6M/K008f1iJ8x8=
+github.com/XiaoConstantine/dspy-go v0.60.0/go.mod h1:YsdK029wtoiRLfjkRH0A0U+Ajma8cFIZe0A7R+6WG3g=
 github.com/XiaoConstantine/mcp-go v0.3.1 h1:5aSrqvvulbKI1hxN7Aj3iSotX0VRSpDShXIDls4ZC+U=
 github.com/XiaoConstantine/mcp-go v0.3.1/go.mod h1:qsY3Gm4CYMREmoLXEMwtf0Hdb5F957kgcpF6huoNHcY=
 github.com/andybalholm/brotli v1.0.4 h1:V7DdXeJtZscaqfNuAdSRuRFzuiKlHSC/Zh3zl9qY3JY=

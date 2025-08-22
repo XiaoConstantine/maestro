@@ -5,11 +5,15 @@ import (
 	"crypto/md5"
 	"encoding/hex"
 	"fmt"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/XiaoConstantine/dspy-go/pkg/agents"
 	"github.com/XiaoConstantine/dspy-go/pkg/core"
+	"github.com/XiaoConstantine/dspy-go/pkg/interceptors"
 	"github.com/XiaoConstantine/dspy-go/pkg/logging"
 	"github.com/XiaoConstantine/dspy-go/pkg/modules"
 )
@@ -28,17 +32,37 @@ func getCachedPredictModule(signature core.Signature) *modules.Predict {
 		hasher.Write([]byte(output.Name + ":" + output.Description))
 	}
 	hasher.Write([]byte(signature.Instruction))
+	// Include XML config in hash to force cache miss when XML config changes
+	hasher.Write([]byte("xml-enabled-v3"))
 	signatureHash := hex.EncodeToString(hasher.Sum(nil))
+
+	logger := logging.GetLogger()
+	logger.Debug(context.Background(), "Looking for cached module with hash: %s", signatureHash)
 
 	// Try to get from cache
 	if cached, ok := qaModuleCache.Load(signatureHash); ok {
 		if predict, ok := cached.(*modules.Predict); ok {
+			logger.Debug(context.Background(), "Using cached predict module")
 			return predict
 		}
 	}
 
-	// Create new and cache
-	predict := modules.NewPredict(signature).WithName("QAAnalyzer")
+	logger.Debug(context.Background(), "Creating new predict module with XML output")
+
+	// Create new and cache with XML output enabled
+	predict := modules.NewPredict(signature).
+		WithName("QAAnalyzer").
+		WithXMLOutput(interceptors.XMLConfig{
+			StrictParsing:      false,
+			FallbackToText:     true,  // Enable fallback for markdown-wrapped XML
+			ValidateXML:        false, // Disable validation for LLM output
+			MaxDepth:           10,    // Security limit
+			MaxSize:            10000,
+			ParseTimeout:       10 * time.Second, // Correct type
+			CustomTags:         make(map[string]string),
+			IncludeTypeHints:   false,
+			PreserveWhitespace: false,
+		})
 	qaModuleCache.Store(signatureHash, predict)
 	return predict
 }
@@ -67,9 +91,9 @@ func (p *RepoQAProcessor) Process(ctx context.Context, task agents.Task, context
 			{Field: core.Field{Name: "relevant_context"}},
 		},
 		[]core.OutputField{
-			{Field: core.NewField("answer")},
-			{Field: core.NewField("confidence")},
-			{Field: core.NewField("source_files")},
+			{Field: core.Field{Name: "answer"}},
+			{Field: core.Field{Name: "confidence"}},
+			{Field: core.Field{Name: "source_files"}},
 		},
 	).WithInstruction(`Answer questions about the repository using the provided context.
     Follow repository conventions and patterns when explaining code.
@@ -123,6 +147,7 @@ func (p *RepoQAProcessor) processResults(ctx context.Context, signature core.Sig
 	// Format context for LLM
 	contextBuilder := strings.Builder{}
 	sourceFiles := make([]string, 0, len(similar))
+	seenFiles := make(map[string]bool) // Track seen files for deduplication
 
 	for _, content := range similar {
 		contextBuilder.WriteString(fmt.Sprintf("File: %s\n", content.Metadata["file_path"]))
@@ -132,11 +157,21 @@ func (p *RepoQAProcessor) processResults(ctx context.Context, signature core.Sig
 		contextBuilder.WriteString(content.Text)
 		contextBuilder.WriteString("\n---\n")
 
-		sourceFiles = append(sourceFiles, content.Metadata["file_path"])
+		// Only add file if not already seen
+		filePath := content.Metadata["file_path"]
+		if !seenFiles[filePath] {
+			seenFiles[filePath] = true
+			sourceFiles = append(sourceFiles, filePath)
+		}
 	}
 
 	// Use cached predict module
 	predict := getCachedPredictModule(signature)
+
+	// Debug: Check if the predict module has XML output enabled
+	logger := logging.GetLogger()
+	logger.Debug(ctx, "Using predict module: %T, with signature: %+v", predict, signature)
+
 	streamHandler := CreateStreamHandler(ctx, logging.GetLogger())
 	result, err := predict.Process(ctx, map[string]interface{}{
 		"question":         metadata.Question,
@@ -145,6 +180,9 @@ func (p *RepoQAProcessor) processResults(ctx context.Context, signature core.Sig
 	if err != nil {
 		return nil, fmt.Errorf("prediction failed: %w", err)
 	}
+
+	// Debug: Log the raw result before processing
+	logger.Debug(ctx, "Raw result from predict.Process: type=%T, value=%+v", result, result)
 
 	response := &QAResponse{
 		SourceFiles: sourceFiles,
@@ -174,10 +212,42 @@ func extractQAMetadata(metadata map[string]interface{}) (*QAMetadata, error) {
 }
 
 func extractQAResult(result interface{}, response *QAResponse) error {
+	// Debug logging
+	logger := logging.GetLogger()
+	logger.Debug(context.Background(), "extractQAResult input type: %T, value: %+v", result, result)
+
 	resultMap, ok := result.(map[string]interface{})
-	if !ok {
+	// TODO(human): Trigger manual parsing for empty maps too
+	if !ok || len(resultMap) == 0 {
 		// If we can't parse the result, treat it as a string answer
 		if str, ok := result.(string); ok && str != "" {
+			// Remove markdown code block formatting
+			cleanXML := str
+			if strings.Contains(str, "```xml") {
+				// Extract content between ```xml and ```
+				start := strings.Index(str, "```xml")
+				if start != -1 {
+					start += 6 // Skip "```xml"
+					end := strings.Index(str[start:], "```")
+					if end != -1 {
+						cleanXML = strings.TrimSpace(str[start : start+end])
+					}
+				}
+			}
+
+			// Try to parse XML manually if the automatic parsing failed
+			if strings.Contains(cleanXML, "<answer>") && strings.Contains(cleanXML, "</answer>") {
+				if answer := extractXMLField(cleanXML, "answer"); answer != "" {
+					response.Answer = answer
+					if confidence := extractXMLField(cleanXML, "confidence"); confidence != "" {
+						response.Confidence = parseConfidence(confidence)
+					} else {
+						response.Confidence = 0.7
+					}
+					logger.Debug(context.Background(), "Manual XML parsing successful: answer=%s, confidence=%.2f", response.Answer, response.Confidence)
+					return nil
+				}
+			}
 			response.Answer = "I found some information, but couldn't parse it properly. Raw response: " + str
 			response.Confidence = 0.3
 			return nil
@@ -185,8 +255,18 @@ func extractQAResult(result interface{}, response *QAResponse) error {
 		return fmt.Errorf("invalid result type: %T", result)
 	}
 
+	// Debug log the resultMap
+	logger.Debug(context.Background(), "resultMap contents: %+v", resultMap)
+
 	if answer, ok := resultMap["answer"].(string); ok && answer != "" {
-		response.Answer = answer
+		logger.Debug(context.Background(), "Found answer field: %s", answer)
+		// Handle dspy-go XML format that includes field name prefix
+		if strings.HasPrefix(answer, "answer:") {
+			response.Answer = strings.TrimPrefix(answer, "answer:")
+			logger.Debug(context.Background(), "Stripped answer prefix, result: %s", response.Answer)
+		} else {
+			response.Answer = answer
+		}
 	} else {
 		// Check if there's any text content we can use
 		if rawContent, exists := resultMap["content"].(string); exists && rawContent != "" {
@@ -200,13 +280,25 @@ func extractQAResult(result interface{}, response *QAResponse) error {
 	if confidence, ok := resultMap["confidence"].(float64); ok {
 		response.Confidence = confidence
 	} else if confidenceStr, ok := resultMap["confidence"].(string); ok {
-		// Try to parse confidence as string
-		if conf, err := fmt.Sscanf(confidenceStr, "%f", new(float64)); err == nil && conf == 1 {
-			var parsedConf float64
-			_, _ = fmt.Sscanf(confidenceStr, "%f", &parsedConf)
-			response.Confidence = parsedConf
-		} else {
-			response.Confidence = 0.5
+		// Handle dspy-go XML format that includes field name prefix
+		confidenceStr = strings.TrimPrefix(confidenceStr, "confidence:")
+		// Parse confidence value - handle "High", "Medium", "Low" or numeric values
+		switch strings.ToLower(strings.TrimSpace(confidenceStr)) {
+		case "high":
+			response.Confidence = 0.9
+		case "medium":
+			response.Confidence = 0.7
+		case "low":
+			response.Confidence = 0.4
+		default:
+			// Try to parse as numeric
+			if conf, err := fmt.Sscanf(confidenceStr, "%f", new(float64)); err == nil && conf == 1 {
+				var parsedConf float64
+				_, _ = fmt.Sscanf(confidenceStr, "%f", &parsedConf)
+				response.Confidence = parsedConf
+			} else {
+				response.Confidence = 0.5
+			}
 		}
 	} else {
 		// Default confidence when answer was found but confidence wasn't specified
@@ -218,6 +310,38 @@ func extractQAResult(result interface{}, response *QAResponse) error {
 	}
 
 	return nil
+}
+
+// extractXMLField extracts content from XML tags manually.
+func extractXMLField(xmlString, fieldName string) string {
+	pattern := fmt.Sprintf(`<%s>(.*?)</%s>`, fieldName, fieldName)
+	re := regexp.MustCompile(pattern)
+	matches := re.FindStringSubmatch(xmlString)
+	if len(matches) > 1 {
+		return strings.TrimSpace(matches[1])
+	}
+	return ""
+}
+
+// parseConfidence converts confidence string to float64.
+func parseConfidence(confidenceStr string) float64 {
+	confidenceStr = strings.TrimSpace(confidenceStr)
+
+	// Handle text values
+	switch strings.ToLower(confidenceStr) {
+	case "high":
+		return 0.9
+	case "medium":
+		return 0.7
+	case "low":
+		return 0.4
+	default:
+		// Try to parse as numeric
+		if conf, err := strconv.ParseFloat(confidenceStr, 64); err == nil {
+			return conf
+		}
+		return 0.7 // Default
+	}
 }
 
 // convertAgenticResultToContent converts agentic search results to traditional Content format.

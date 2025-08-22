@@ -9,7 +9,9 @@ import (
 
 	"github.com/XiaoConstantine/dspy-go/pkg/agents/react"
 	"github.com/XiaoConstantine/dspy-go/pkg/core"
+	"github.com/XiaoConstantine/dspy-go/pkg/interceptors"
 	"github.com/XiaoConstantine/dspy-go/pkg/logging"
+	"github.com/XiaoConstantine/dspy-go/pkg/modules"
 	models "github.com/XiaoConstantine/mcp-go/pkg/model"
 )
 
@@ -23,10 +25,13 @@ type UnifiedReActAgent struct {
 	mu         sync.RWMutex
 
 	// Dynamic configuration
-	currentMode    react.ExecutionMode
-	queryAnalyzer  *QueryAnalyzer
-	searchContext  *SearchContext
-	qualityTracker *QualityTracker
+	currentMode       react.ExecutionMode
+	queryAnalyzer     *QueryAnalyzer
+	searchContext     *SearchContext
+	qualityTracker    *QualityTracker
+	xmlFactory        *XMLConfigFactory
+	toolCallParser    *ToolCallParser
+	xmlEnabledModules map[string]*modules.Predict
 }
 
 // SearchContext tracks the evolution of a search.
@@ -543,7 +548,10 @@ func NewUnifiedReActAgent(id string, searchTool *SimpleSearchTool, logger *loggi
 			DecisionPoints:    []DecisionPoint{},
 			CurrentPhase:      1,
 		},
-		qualityTracker: &QualityTracker{},
+		qualityTracker:    &QualityTracker{},
+		xmlFactory:        NewXMLConfigFactory(),
+		toolCallParser:    NewToolCallParser(),
+		xmlEnabledModules: make(map[string]*modules.Predict),
 	}
 
 	// Register search tools with the ReAct agent
@@ -562,19 +570,17 @@ func NewUnifiedReActAgent(id string, searchTool *SimpleSearchTool, logger *loggi
 		},
 	)
 
-	// Add initial system instruction - will be updated dynamically
+	// Add initial system instruction with native XML support
 	signature = signature.WithInstruction(
 		"You are a code search assistant helping to find relevant code and information in a codebase.\n\n" +
-			"AVAILABLE TOOLS WITH EXACT XML FORMAT:\n\n" +
-			"search_files - Find files by pattern:\n" +
-			"<action><tool_name>search_files</tool_name><arguments><arg key=\"pattern\">*.go</arg></arguments></action>\n\n" +
-			"search_content - Search text in files:\n" +
-			"<action><tool_name>search_content</tool_name><arguments><arg key=\"query\">function main</arg></arguments></action>\n\n" +
-			"read_file - Read a specific file:\n" +
-			"<action><tool_name>read_file</tool_name><arguments><arg key=\"file_path\">path/to/file.go</arg></arguments></action>\n\n" +
-			"Finish - Complete the search:\n" +
-			"<action><tool_name>Finish</tool_name></action>\n\n" +
-			"CRITICAL: Use EXACT parameter names. This instruction will be updated dynamically based on query analysis.",
+			"AVAILABLE TOOLS:\n" +
+			"- search_files: Find files by pattern (parameter: 'pattern')\n" +
+			"- search_content: Search text in files (parameters: 'query', optional 'path')\n" +
+			"- read_file: Read file contents (parameter: 'file_path')\n" +
+			"- Finish: Complete the search (no parameters)\n\n" +
+			"Tool calls are automatically formatted in XML by the system. " +
+			"Focus on selecting appropriate tools and parameters for the task.\n" +
+			"This instruction will be dynamically updated based on query analysis.",
 	)
 
 	if err := reactAgent.Initialize(llm, signature); err != nil {
@@ -584,20 +590,93 @@ func NewUnifiedReActAgent(id string, searchTool *SimpleSearchTool, logger *loggi
 	return agent, nil
 }
 
-// registerSearchTools registers maestro's search capabilities as ReAct tools.
+// createXMLEnabledModule creates a Predict module with XML output for tool calling.
+func (ura *UnifiedReActAgent) createXMLEnabledModule(toolName, description string, xmlConfig interceptors.XMLConfig) *modules.Predict {
+	// Create signature for tool execution
+	signature := core.NewSignature(
+		[]core.InputField{
+			{Field: core.NewField("tool_request", core.WithDescription("The tool request to process"))},
+			{Field: core.NewField("context", core.WithDescription("Additional context for tool execution"))},
+		},
+		[]core.OutputField{
+			{Field: core.NewField("tool_call", core.WithDescription("Structured XML tool call"))},
+		},
+	).WithInstruction(fmt.Sprintf(
+		"You are a %s tool executor. Process the request and generate a structured XML tool call. "+
+			"Focus on extracting the correct parameters for the %s operation.",
+		toolName, description,
+	))
+
+	// Create Predict module with XML output
+	predict := modules.NewPredict(signature).WithXMLOutput(xmlConfig)
+
+	// Cache the module for reuse
+	ura.xmlEnabledModules[toolName] = predict
+
+	return predict
+}
+
+// extractXMLParameters uses XML-enabled module to parse tool parameters.
+func (ura *UnifiedReActAgent) extractXMLParameters(ctx context.Context, toolName string, rawParams map[string]interface{}) (map[string]interface{}, error) {
+	// Check if XML-enabled module exists for this tool
+	_, exists := ura.xmlEnabledModules[toolName]
+	if !exists {
+		// Fallback to manual parameter extraction if XML module not available
+		return rawParams, nil
+	}
+
+	// Use XML module to validate and parse parameters
+	// In future, we can use the module for more sophisticated XML processing
+	if err := ura.toolCallParser.ValidateToolArguments(toolName, rawParams); err != nil {
+		return nil, fmt.Errorf("parameter validation failed: %w", err)
+	}
+
+	return rawParams, nil
+}
+
+// registerSearchTools registers maestro's search capabilities as ReAct tools with native XML support.
 func (ura *UnifiedReActAgent) registerSearchTools() error {
+	// Initialize XML-enabled modules for each tool type
+	ura.initializeXMLModules()
+
+	return ura.registerSearchToolsWithXML()
+}
+
+// initializeXMLModules creates XML-enabled Predict modules for all tool types.
+func (ura *UnifiedReActAgent) initializeXMLModules() {
+	// Create XML configs for different tool types
+	searchConfig := ura.xmlFactory.GetSearchToolXMLConfig()
+	fileConfig := ura.xmlFactory.GetFileToolXMLConfig()
+	generalConfig := ura.xmlFactory.GetGeneralXMLConfig()
+
+	// Initialize modules for each tool
+	ura.createXMLEnabledModule("search_files", "file pattern searching", searchConfig)
+	ura.createXMLEnabledModule("search_content", "content searching", searchConfig)
+	ura.createXMLEnabledModule("read_file", "file reading", fileConfig)
+	ura.createXMLEnabledModule("Finish", "task completion", generalConfig)
+}
+
+// registerSearchToolsWithXML registers tools with native XML parsing support.
+func (ura *UnifiedReActAgent) registerSearchToolsWithXML() error {
 	// File search tool
 	fileSearchTool := &SearchTool{
 		name:        "search_files",
 		description: "Search for files by pattern, name, or extension. Use patterns like '*.go' for Go files, 'test*' for test files, or specific names. This finds files in the codebase matching your pattern.",
 		searchTool:  ura.searchTool,
 		execute: func(ctx context.Context, params map[string]interface{}) (core.ToolResult, error) {
-			pattern, ok := params["pattern"].(string)
+			// Use XML-enabled parameter extraction
+			validatedParams, err := ura.extractXMLParameters(ctx, "search_files", params)
+			if err != nil {
+				return core.ToolResult{}, fmt.Errorf("XML parameter extraction failed: %w", err)
+			}
+
+			// Extract pattern with improved fallback handling
+			pattern, ok := validatedParams["pattern"].(string)
 			if !ok || pattern == "" {
-				// Check for alternative parameter names
-				if p, exists := params["query"].(string); exists && p != "" {
+				// Check for alternative parameter names with XML validation
+				if p, exists := validatedParams["query"].(string); exists && p != "" {
 					pattern = p
-				} else if p, exists := params["search"].(string); exists && p != "" {
+				} else if p, exists := validatedParams["search"].(string); exists && p != "" {
 					pattern = p
 				} else {
 					return core.ToolResult{}, fmt.Errorf("pattern parameter required - provide a file pattern like '*.go' or 'search*'")
@@ -615,6 +694,7 @@ func (ura *UnifiedReActAgent) registerSearchTools() error {
 					"tool":         "search_files",
 					"pattern":      pattern,
 					"result_count": len(results),
+					"xml_enabled":  true,
 				},
 			}, nil
 		},
@@ -626,14 +706,20 @@ func (ura *UnifiedReActAgent) registerSearchTools() error {
 		description: "Search for specific text, patterns, or code within files using grep-like functionality. Use this to find functions, variables, comments, or any text content in the codebase. Provide a 'query' parameter with the text to search for.",
 		searchTool:  ura.searchTool,
 		execute: func(ctx context.Context, params map[string]interface{}) (core.ToolResult, error) {
-			query, ok := params["query"].(string)
+			// Use XML-enabled parameter extraction
+			validatedParams, err := ura.extractXMLParameters(ctx, "search_content", params)
+			if err != nil {
+				return core.ToolResult{}, fmt.Errorf("XML parameter extraction failed: %w", err)
+			}
+
+			query, ok := validatedParams["query"].(string)
 			if !ok || query == "" {
-				// Check for alternative parameter names
-				if q, exists := params["search"].(string); exists && q != "" {
+				// Check for alternative parameter names with XML validation
+				if q, exists := validatedParams["search"].(string); exists && q != "" {
 					query = q
-				} else if q, exists := params["text"].(string); exists && q != "" {
+				} else if q, exists := validatedParams["text"].(string); exists && q != "" {
 					query = q
-				} else if q, exists := params["pattern"].(string); exists && q != "" {
+				} else if q, exists := validatedParams["pattern"].(string); exists && q != "" {
 					query = q
 				} else {
 					return core.ToolResult{}, fmt.Errorf("query parameter required - provide the text or pattern to search for")
@@ -641,7 +727,7 @@ func (ura *UnifiedReActAgent) registerSearchTools() error {
 			}
 
 			path := ""
-			if p, exists := params["path"]; exists && p != nil {
+			if p, exists := validatedParams["path"]; exists && p != nil {
 				path = p.(string)
 			}
 
@@ -663,6 +749,7 @@ func (ura *UnifiedReActAgent) registerSearchTools() error {
 					"query":        query,
 					"path":         path,
 					"result_count": len(results),
+					"xml_enabled":  true,
 				},
 			}, nil
 		},
@@ -674,24 +761,30 @@ func (ura *UnifiedReActAgent) registerSearchTools() error {
 		description: "Read the complete contents of a specific file. Provide the 'file_path' parameter with the path to the file you want to read. Use this after finding interesting files with search_files or search_content.",
 		searchTool:  ura.searchTool,
 		execute: func(ctx context.Context, params map[string]interface{}) (core.ToolResult, error) {
-			// Log received parameters for debugging
-			ura.logger.Debug(ctx, "read_file received params: %v", params)
+			// Use XML-enabled parameter extraction
+			validatedParams, err := ura.extractXMLParameters(ctx, "read_file", params)
+			if err != nil {
+				return core.ToolResult{}, fmt.Errorf("XML parameter extraction failed: %w", err)
+			}
 
-			filePath, ok := params["file_path"].(string)
+			// Log validated parameters for debugging
+			ura.logger.Debug(ctx, "read_file validated params: %v", validatedParams)
+
+			filePath, ok := validatedParams["file_path"].(string)
 			if !ok || filePath == "" {
-				// Check for alternative parameter names that the LLM might use
-				if fp, exists := params["path"].(string); exists && fp != "" {
+				// Check for alternative parameter names with XML validation
+				if fp, exists := validatedParams["path"].(string); exists && fp != "" {
 					filePath = fp
-				} else if fp, exists := params["filepath"].(string); exists && fp != "" {
+				} else if fp, exists := validatedParams["filepath"].(string); exists && fp != "" {
 					filePath = fp
-				} else if fp, exists := params["filename"].(string); exists && fp != "" {
+				} else if fp, exists := validatedParams["filename"].(string); exists && fp != "" {
 					filePath = fp
-				} else if fp, exists := params["file"].(string); exists && fp != "" {
+				} else if fp, exists := validatedParams["file"].(string); exists && fp != "" {
 					filePath = fp
 				} else {
 					// Log all available parameters for debugging
 					var availableKeys []string
-					for k := range params {
+					for k := range validatedParams {
 						availableKeys = append(availableKeys, k)
 					}
 					return core.ToolResult{}, fmt.Errorf("file_path parameter required - provide the full path to the file you want to read. Available parameters: %v", availableKeys)
@@ -718,6 +811,7 @@ func (ura *UnifiedReActAgent) registerSearchTools() error {
 					"file_path":      filePath,
 					"content_length": len(content),
 					"line_count":     len(lines),
+					"xml_enabled":    true,
 				},
 			}, nil
 		},
@@ -1259,20 +1353,16 @@ QUALITY: Balanced approach to code discovery and analysis
 		baseInstruction += "\n"
 	}
 
-	// Add tool specifications
-	baseInstruction += `AVAILABLE TOOLS WITH EXACT XML FORMAT:
+	// Add tool specifications (XML formatting handled by dspy-go natively)
+	baseInstruction += `AVAILABLE TOOLS:
 
-search_files - Find files by pattern:
-<action><tool_name>search_files</tool_name><arguments><arg key="pattern">*.go</arg></arguments></action>
+search_files - Find files by pattern (provide 'pattern' parameter)
+search_content - Search text in files (provide 'query' parameter, optional 'path')
+read_file - Read a specific file (provide 'file_path' parameter)
+Finish - Complete the search (no parameters needed)
 
-search_content - Search text in files:
-<action><tool_name>search_content</tool_name><arguments><arg key="query">function main</arg></arguments></action>
-
-read_file - Read a specific file:
-<action><tool_name>read_file</tool_name><arguments><arg key="file_path">path/to/file.go</arg></arguments></action>
-
-Finish - Complete the search:
-<action><tool_name>Finish</tool_name></action>
+Tool parameters will be automatically formatted in XML by the system.
+Focus on selecting the right tool and parameters for the task.
 
 `
 
@@ -1286,8 +1376,8 @@ Finish - Complete the search:
 		baseInstruction += "RESPONSE STYLE: Balanced detail with practical examples and context.\n"
 	}
 
-	baseInstruction += "\nCRITICAL: Use EXACT parameter names: 'pattern' for search_files, 'query' for search_content, 'file_path' for read_file.\n"
-	baseInstruction += fmt.Sprintf("Aim for %d-%d tool calls before using Finish.\n",
+	baseInstruction += "\nTool parameters are automatically validated and parsed with XML support.\n"
+	baseInstruction += fmt.Sprintf("Aim for %d-%d tool calls to thoroughly explore before completing the search.\n",
 		max(2, analysis.MaxIterations-1), analysis.MaxIterations)
 
 	return baseInstruction

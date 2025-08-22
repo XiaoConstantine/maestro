@@ -4,7 +4,7 @@ go 1.24.1
 
 require (
 	github.com/AlecAivazis/survey/v2 v2.3.7
-	github.com/XiaoConstantine/dspy-go v0.59.0
+	github.com/XiaoConstantine/dspy-go v0.60.0
 	github.com/XiaoConstantine/mcp-go v0.3.1
 	github.com/asg017/sqlite-vec-go-bindings v0.1.6
 	github.com/briandowns/spinner v1.23.2
