@@ -57,7 +57,7 @@ type ModelChoice struct {
 }
 
 func commandCompleter(d prompt.Document) []prompt.Suggest {
-	// Commands with their descriptions
+	// Commands with their descriptions - matching Claude Code style
 	commandSuggestions := []prompt.Suggest{
 		{Text: "/help", Description: "Show available commands"},
 		{Text: "/exit", Description: "Exit the application"},
@@ -73,18 +73,17 @@ func commandCompleter(d prompt.Document) []prompt.Suggest {
 		{Text: "/switch", Description: "Switch between Claude sessions"},
 		{Text: "/enter", Description: "Enter interactive mode with current session"},
 		{Text: "/list", Description: "List all available sessions"},
-		{Text: "/diagram", Description: "Generate architecture diagrams"},
 	}
 
 	text := d.TextBeforeCursor()
 
-	// If starting with slash, provide command completion
+	// Always show suggestions when starting with "/" - like Claude Code
 	if strings.HasPrefix(text, "/") {
 		// Check if we're typing a command or its arguments
 		parts := strings.Fields(text)
 
 		if len(parts) == 1 {
-			// We're still typing the command itself
+			// We're still typing the command itself - filter and return matches
 			return prompt.FilterHasPrefix(commandSuggestions, text, true)
 		} else if len(parts) > 1 {
 			// We're typing arguments for a command
@@ -103,25 +102,6 @@ func commandCompleter(d prompt.Document) []prompt.Suggest {
 				return []prompt.Suggest{
 					{Text: parts[0] + " How does the codebase handle errors?", Description: "Error handling patterns"},
 					{Text: parts[0] + " What's the project structure?", Description: "Code organization"},
-				}
-			case "/diagram":
-				// Diagram subcommands and types
-				if len(parts) == 2 {
-					return []prompt.Suggest{
-						{Text: parts[0] + " generate", Description: "Generate architecture diagram"},
-						{Text: parts[0] + " list", Description: "List available diagram types"},
-						{Text: parts[0] + " check", Description: "Check dependencies"},
-						{Text: parts[0] + " help", Description: "Show diagram help"},
-					}
-				} else if len(parts) == 3 && parts[1] == "generate" {
-					return []prompt.Suggest{
-						{Text: parts[0] + " " + parts[1] + " overview", Description: "High-level system overview"},
-						{Text: parts[0] + " " + parts[1] + " detailed", Description: "Detailed architecture view"},
-						{Text: parts[0] + " " + parts[1] + " microservices", Description: "Microservices architecture"},
-						{Text: parts[0] + " " + parts[1] + " dataflow", Description: "Data flow diagram"},
-						{Text: parts[0] + " " + parts[1] + " deployment", Description: "Deployment architecture"},
-						{Text: parts[0] + " " + parts[1] + " security", Description: "Security architecture"},
-					}
 				}
 			}
 		}
@@ -523,35 +503,6 @@ func createInteractiveCommands(cfg *config, console ConsoleInterface, agent Revi
 	}
 	rootCmd.AddCommand(listCmd)
 
-	// Diagram generation command
-	diagramCmd := &cobra.Command{
-		Use:   "diagram [action] [args...]",
-		Short: "Generate architecture diagrams",
-		Run: func(cmd *cobra.Command, args []string) {
-			if len(args) == 0 {
-				ShowDiagramHelp(console)
-				return
-			}
-
-			// Initialize architecture analyzer with the agent for LLM access
-			// The agent already has the RAG system and repository knowledge
-			analyzer := NewArchitectureAnalyzer(nil, agent, logging.GetLogger(), console, ".")
-
-			switch args[0] {
-			case "generate":
-				handleDiagramGenerate(ctx, analyzer, args[1:], console)
-			case "list":
-				handleDiagramList(console)
-			case "check":
-				handleDiagramCheck(ctx, analyzer, console)
-			case "help":
-				ShowDiagramHelp(console)
-			default:
-				console.Printf("Unknown diagram command: %s. Use '/diagram help' for available commands.\n", args[0])
-			}
-		},
-	}
-	rootCmd.AddCommand(diagramCmd)
 
 	return rootCmd
 }
@@ -672,14 +623,14 @@ func main() {
 	// Create root command
 	rootCmd := &cobra.Command{
 		Use:   "Maestro",
-		Short: "Maestro - Code assistant",
-		Long: `Maestro is an AI-powered code assistant that helps you review PR
-and impl changes through interactive learning sessions.
+		Short: "Maestro - AI Code Assistant",
+		Long: `Maestro is an AI-powered code assistant with Claude Code-inspired interface
+that helps you review PRs and analyze code through interactive sessions.
 
-Try the new conversational interface with slash commands:
+Interactive mode with clean terminal interface:
   maestro -i  (or --interactive)
 
-Available slash commands in conversation mode:
+Available slash commands in interactive mode:
   /help                   - Show help for available commands
   /review <PR-NUMBER>     - Review a specific pull request
   /ask <QUESTION>         - Ask a question about the repository
@@ -927,6 +878,7 @@ func getVectorDimensions() int {
 	return 768 // Default for text-embedding-004
 }
 
+
 func runInteractiveMode(cfg *config) error {
 	printMaestroBanner()
 	ctx := core.WithExecutionState(context.Background())
@@ -1145,28 +1097,30 @@ Examples:
 	ctrlCTimer := time.NewTimer(0)
 	ctrlCTimer.Stop() // Initialize in stopped state
 
-	// Configure go-prompt options
+	// Configure go-prompt options with Claude Code-inspired theme
 	options := []prompt.Option{
 		prompt.OptionTitle("Maestro AI Code Assistant"),
-		prompt.OptionPrefix("maestro> "),
-		// Use lighter colors for a cleaner look
-		prompt.OptionPrefixTextColor(prompt.Brown),
+		prompt.OptionPrefix("> "), // Clean terminal-style prompt like Claude Code
 
-		// Style the suggestions to look more like Claude's style
+		// Claude Code theme colors - minimal and clean
+		prompt.OptionPrefixTextColor(prompt.White),
+
+		// Minimal suggestion styling - dark background with subtle text
 		prompt.OptionSuggestionBGColor(prompt.Black),
-		prompt.OptionSuggestionTextColor(prompt.Brown),
+		prompt.OptionSuggestionTextColor(prompt.DarkGray),
 		prompt.OptionDescriptionBGColor(prompt.Black),
-		prompt.OptionDescriptionTextColor(prompt.White),
+		prompt.OptionDescriptionTextColor(prompt.LightGray),
 
-		// Selected item styling
+		// Selected item styling - subtle highlight
 		prompt.OptionSelectedSuggestionBGColor(prompt.DarkGray),
-		prompt.OptionSelectedSuggestionTextColor(prompt.Brown),
+		prompt.OptionSelectedSuggestionTextColor(prompt.White),
 		prompt.OptionSelectedDescriptionBGColor(prompt.DarkGray),
 		prompt.OptionSelectedDescriptionTextColor(prompt.White),
 
-		// Format and layout
-		prompt.OptionMaxSuggestion(6),        // Limit visible suggestions
-		prompt.OptionShowCompletionAtStart(), // Show immediately when typing /
+		// Format and layout - make suggestions selectable like Claude Code
+		prompt.OptionMaxSuggestion(10),        // Show more suggestions like Claude Code
+		prompt.OptionShowCompletionAtStart(),  // Show immediately when typing /
+		prompt.OptionCompletionWordSeparator(" \t\n"), // Standard word separators
 		prompt.OptionAddKeyBind(
 			// Handle Ctrl+C
 			prompt.KeyBind{
@@ -1191,6 +1145,12 @@ Examples:
 				},
 			},
 		),
+		// Enable arrow key navigation in suggestions
+		prompt.OptionHistory([]string{}), // Initialize history
+		
+		// Input behavior - essential for proper suggestion navigation
+		prompt.OptionInputTextColor(prompt.DefaultColor),
+		prompt.OptionCompletionOnDown(),  // Enable down arrow to enter completion mode
 	}
 
 	console.Println("\nType / to see available commands, or ask questions naturally.")
@@ -1236,73 +1196,6 @@ Examples:
 	return nil
 }
 
-// Diagram command handlers.
-func handleDiagramGenerate(ctx context.Context, analyzer *ArchitectureAnalyzer, args []string, console ConsoleInterface) {
-	diagramType := "overview" // default
-	if len(args) > 0 {
-		if dt, err := ValidateDiagramType(args[0]); err != nil {
-			console.Printf("Error: %v\n", err)
-			console.Printf("Use '/diagram list' to see available types.\n")
-			return
-		} else {
-			diagramType = string(dt)
-		}
-	}
-
-	console.Printf("🎨 Generating %s architecture diagram...\n", diagramType)
-
-	// Step 1: Analyze repository
-	analysis, err := analyzer.AnalyzeRepository(ctx)
-	if err != nil {
-		console.Printf("❌ Failed to analyze repository: %v\n", err)
-		return
-	}
-
-	console.Printf("📊 Analysis complete: %d components, %d connections\n",
-		len(analysis.Components), len(analysis.Connections))
-
-	// Step 2: Generate diagram
-	result, err := analyzer.GenerateDiagram(ctx, analysis, diagramType)
-	if err != nil {
-		console.Printf("❌ Failed to generate diagram: %v\n", err)
-		if result != nil && result.PythonCode != "" {
-			console.Printf("Generated Python code:\n%s\n", result.PythonCode)
-		}
-		return
-	}
-
-	// Step 3: Display result
-	FormatDiagramResult(result, console)
-}
-
-func handleDiagramList(console ConsoleInterface) {
-	console.PrintHeader("📋 Available Diagram Types")
-
-	for _, dt := range GetSupportedDiagramTypes() {
-		console.Printf("  %-15s - %s\n", string(dt), GetDiagramTypeDescription(dt))
-	}
-
-	console.Printf("\nUsage: /diagram generate <type>\n")
-	console.Printf("Example: /diagram generate overview\n")
-}
-
-func handleDiagramCheck(ctx context.Context, analyzer *ArchitectureAnalyzer, console ConsoleInterface) {
-	console.PrintHeader("🔍 Checking Dependencies")
-
-	if err := analyzer.CheckDependencies(ctx); err != nil {
-		console.Printf("❌ Dependency check failed: %v\n", err)
-		console.Printf("\nTo install dependencies:\n")
-		console.Printf("  # Install uv: curl -LsSf https://astral.sh/uv/install.sh | sh\n")
-		console.Printf("  # For macOS: brew install graphviz\n")
-		console.Printf("  # For Ubuntu: sudo apt-get install graphviz\n")
-		return
-	}
-
-	console.Printf("✅ All dependencies are installed and ready!\n")
-	console.Printf("  - uv (Python package runner)\n")
-	console.Printf("  - diagrams library (auto-installed via uv)\n")
-	console.Printf("  - Graphviz\n")
-}
 
 func showHelpMessage(c ConsoleInterface) {
 	c.PrintHeader("Available Commands")
@@ -1325,14 +1218,14 @@ func showHelpMessage(c ConsoleInterface) {
 		{"/switch [SESSION]", "Switch between Claude sessions"},
 		{"/enter [SESSION]", "Enter interactive mode with session"},
 		{"/list", "List all available sessions"},
-		{"/diagram [action]", "Generate architecture diagrams"},
 	}
 
 	for _, cmd := range commands {
 		if c.Color() {
+			// Use subtle blue for commands, minimal styling like Claude Code
 			c.Printf("%s %s\n",
-				aurora.Index(209, cmd.Command).Bold().String(),
-				cmd.Description)
+				aurora.Blue(cmd.Command).String(),
+				aurora.Gray(12, cmd.Description).String())
 		} else {
 			c.Printf("%s - %s\n", cmd.Command, cmd.Description)
 		}

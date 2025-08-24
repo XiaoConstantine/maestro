@@ -433,9 +433,11 @@ func (c *Console) SeverityIcon(severity string) string {
 
 func (c *Console) PrintHeader(text string) {
 	if c.color {
-		text = aurora.Bold(text).String()
+		// Use subtle gray text instead of bold for minimal aesthetic
+		text = aurora.Gray(12, text).String()
 	}
-	c.Printf("\n=== %s ===\n", text)
+	// Clean minimal header - just text without decorative borders
+	c.Printf("\n%s\n\n", text)
 }
 
 func (c *Console) Println(a ...interface{}) {
