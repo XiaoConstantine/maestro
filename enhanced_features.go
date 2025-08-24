@@ -408,12 +408,8 @@ func InitializeEnhancedFeatures() {
 
 	globalMetrics = &FeatureUsageMetrics{}
 
-	// Initialize Phase 2 integration if any Phase 2 features are enabled
-	if globalFeatures.DeclarativeWorkflows || globalFeatures.IntelligentParallelProcessing || globalFeatures.AdvancedMemory {
-		// Note: RAG system needs to be passed from the main application
-		// This will be handled in the main.go initialization
-		println("INFO: Phase 2 features enabled - will initialize advanced workflows")
-	}
+	// Phase 2 features are automatically initialized when needed
+	// RAG system integration is handled in main.go initialization
 
 	// Validate configuration and log warnings
 	if warnings := globalFeatures.ValidateConfiguration(); len(warnings) > 0 {

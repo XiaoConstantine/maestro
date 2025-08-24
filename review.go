@@ -443,10 +443,10 @@ func NewPRReviewAgent(ctx context.Context, githubTool GitHubInterface, dbPath st
 	// Initialize declarative workflow if Phase 2 features are enabled
 	var declarativeChain *DeclarativeReviewChain
 	if shouldUseDeclarativeWorkflows() {
-		logger.Info(ctx, "🏗️ Initializing Declarative Workflow Builder")
-		logger.Info(ctx, "📋 Declarative workflow features: retry logic, parallel validation, conditional refinement")
+		logger.Debug(ctx, "🏗️ Initializing Declarative Workflow Builder")
+		logger.Debug(ctx, "📋 Declarative workflow features: retry logic, parallel validation, conditional refinement")
 		declarativeChain = NewDeclarativeReviewChain(ctx)
-		logger.Info(ctx, "✅ Declarative Workflow initialized successfully")
+		logger.Debug(ctx, "✅ Declarative Workflow initialized successfully")
 	} else {
 		logger.Debug(ctx, "⚪ Declarative workflows disabled - using legacy orchestrator")
 	}
@@ -464,7 +464,7 @@ func NewPRReviewAgent(ctx context.Context, githubTool GitHubInterface, dbPath st
 	}
 
 	// Start background indexing AFTER agent creation
-	logger.Info(ctx, "🚀 Agent ready! Starting background repository indexing...")
+	logger.Debug(ctx, "🚀 Agent ready! Starting background repository indexing...")
 	go agent.startBackgroundIndexing(ctx, githubTool, store, dbPath, config.IndexWorkers)
 
 	return agent, nil

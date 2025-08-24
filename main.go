@@ -922,46 +922,15 @@ func runInteractiveMode(cfg *config) error {
 		}
 	}
 
-	var customizeConcurrency bool
-	concurrencyPrompt := &survey.Confirm{
-		Message: fmt.Sprintf("Customize concurrency settings? (currently using %d workers)", runtime.NumCPU()),
-		Default: false,
-	}
-	if err := survey.AskOne(concurrencyPrompt, &customizeConcurrency); err != nil {
-		return fmt.Errorf("failed to get concurrency preference: %w", err)
-	}
-
-	if customizeConcurrency {
-		workersPrompt := &survey.Input{
-			Message: fmt.Sprintf("Enter number of concurrent workers for indexing (current: %d):", cfg.indexWorkers),
-			Default: strconv.Itoa(cfg.indexWorkers),
-		}
-		var workersStr string
-		if err := survey.AskOne(workersPrompt, &workersStr); err != nil {
-			return fmt.Errorf("failed to get worker count: %w", err)
-		}
-		if workers, err := strconv.Atoi(workersStr); err == nil && workers > 0 {
-			cfg.indexWorkers = workers
-		}
-
-		workersPrompt = &survey.Input{
-			Message: fmt.Sprintf("Enter number of concurrent workers for review (current: %d):", cfg.reviewWorkers),
-			Default: strconv.Itoa(cfg.reviewWorkers),
-		}
-		if err := survey.AskOne(workersPrompt, &workersStr); err != nil {
-			return fmt.Errorf("failed to get worker count: %w", err)
-		}
-		if workers, err := strconv.Atoi(workersStr); err == nil && workers > 0 {
-			cfg.reviewWorkers = workers
-		}
-	}
+	// Skip concurrency customization for cleaner startup like Claude Code
+	// Use sensible defaults silently
 
 	// Optional settings
 	if cfg.modelProvider == DefaultModelProvider && cfg.modelName == DefaultModelName {
 
 		var useCustomModel bool
 		modelPrompt := &survey.Confirm{
-			Message: "Default to models with llamacpp, Would you like to use a custom model?",
+			Message: "Use custom model?",
 			Default: false,
 		}
 		if err := survey.AskOne(modelPrompt, &useCustomModel); err != nil {
@@ -1088,8 +1057,7 @@ Examples:
 		return fmt.Errorf("failed to initialize agent: %w", err)
 	}
 
-	console.Println("Type /help to see available commands, or describe any task directly.")
-	console.Printf("🔄 Repository indexing started in the background for enhanced code analysis.\n")
+	console.Println("Type /help or ask questions directly.")
 
 	// Create interactive commands with the pre-initialized agent
 	interactiveCmd := createInteractiveCommands(cfg, console, agent)
@@ -1153,7 +1121,7 @@ Examples:
 		prompt.OptionCompletionOnDown(),  // Enable down arrow to enter completion mode
 	}
 
-	console.Println("\nType / to see available commands, or ask questions naturally.")
+	console.Println("")
 	// Start the interactive prompt with auto-completion
 	p := prompt.New(
 		// Executor function runs when the user presses Enter
@@ -1198,49 +1166,32 @@ Examples:
 
 
 func showHelpMessage(c ConsoleInterface) {
-	c.PrintHeader("Available Commands")
-
+	// Clean, minimal help like Claude Code
 	commands := []struct {
 		Command     string
 		Description string
 	}{
-		{"/help", "Show this help message"},
-		{"/exit", "Exit the application"},
-		{"/quit", "Exit the application"},
-		{"/review <PR-NUMBER>", "Review a specific pull request"},
-		{"/ask <QUESTION>", "Ask a specific question about the repository"},
-		{"/claude [ARGS...]", "Interact with Claude Code CLI"},
-		{"/gemini [ARGS...]", "Interact with Gemini CLI"},
-		{"/tools [setup|status]", "Manage CLI tools (setup, status)"},
-		{"/sessions [action]", "Manage Claude sessions"},
-		{"/dashboard", "Show Claude sessions dashboard"},
-		{"/coordinate <TASK>", "Coordinate multi-session tasks"},
-		{"/switch [SESSION]", "Switch between Claude sessions"},
-		{"/enter [SESSION]", "Enter interactive mode with session"},
-		{"/list", "List all available sessions"},
+		{"/help", "Show available commands"},
+		{"/ask", "Ask about the repository"},
+		{"/review <PR>", "Review a pull request"},
+		{"/sessions", "Manage sessions"},
+		{"/tools", "Manage CLI tools"},
+		{"/exit", "Exit"},
 	}
 
 	for _, cmd := range commands {
 		if c.Color() {
-			// Use subtle blue for commands, minimal styling like Claude Code
-			c.Printf("%s %s\n",
+			c.Printf("%-12s %s\n",
 				aurora.Blue(cmd.Command).String(),
 				aurora.Gray(12, cmd.Description).String())
 		} else {
-			c.Printf("%s - %s\n", cmd.Command, cmd.Description)
+			c.Printf("%-12s %s\n", cmd.Command, cmd.Description)
 		}
 	}
 
-	c.Println("\nYou can also type a question directly to ask about the repository.")
-	c.Println("\nClaude Session Management:")
-	c.Println("  Use /sessions create <name> <purpose> to start new Claude sessions")
-	c.Println("  Use /switch <session> to switch between sessions")
-	c.Println("  Use /enter <session> to start interactive mode with a session")
-	c.Println("  Use /list to see all available sessions")
-	c.Println("  Use /dashboard to see all active sessions and their status")
-	c.Println("  Use /coordinate <task> to distribute work across multiple sessions")
-	c.Println("\nCLI Tools Integration:")
-	c.Println("  Use /claude or /gemini to access external AI CLI tools directly")
-	c.Println("  Run /tools setup to install and configure CLI tools")
-	c.Println("  Run /tools status to check CLI tools installation")
+	if c.Color() {
+		c.Printf("\n%s\n", aurora.Gray(12, "Type a question or use tab completion with /").String())
+	} else {
+		c.Printf("\nType a question or use tab completion with /\n")
+	}
 }
