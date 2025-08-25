@@ -21,8 +21,9 @@ import (
 	"golang.org/x/text/cases"
 	"golang.org/x/text/language"
 
-	sqlite_vec "github.com/asg017/sqlite-vec-go-bindings/cgo"
 	"path/filepath"
+
+	sqlite_vec "github.com/asg017/sqlite-vec-go-bindings/cgo"
 
 	_ "github.com/mattn/go-sqlite3"
 )
@@ -814,7 +815,7 @@ func runFullPRReview(ctx context.Context, prNumber int, cfg *config, console Con
 	// Use MCP if available, otherwise fall back to GitHub API
 	if mcpHelper != nil {
 		logger.Debug(ctx, "Using MCP bash helper to fetch PR changes")
-		changes, err = GetPullRequestChangesWithMCP(ctx, prNumber, mcpHelper)
+		changes, err = GetPullRequestChangesWithMCP(ctx, cfg.owner, cfg.repo, prNumber, mcpHelper)
 	} else {
 		logger.Debug(ctx, "Using GitHub API to fetch PR changes")
 		changes, err = githubTools.GetPullRequestChanges(ctx, prNumber)

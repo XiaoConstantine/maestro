@@ -2,7 +2,10 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
+	"net/url"
 	"strings"
 
 	"github.com/XiaoConstantine/dspy-go/pkg/logging"
@@ -23,15 +26,22 @@ type PRInfo struct {
 // (removed unused reviewPRWithPersistentMCP)
 
 // GetPullRequestChangesWithMCP retrieves PR changes using MCP bash helper instead of GitHub API.
-func GetPullRequestChangesWithMCP(ctx context.Context, prNumber int, bashHelper *MCPBashHelper) (*PRChanges, error) {
+// It explicitly scopes gh commands to the provided owner/repo to avoid cwd-dependent behavior.
+func GetPullRequestChangesWithMCP(ctx context.Context, owner, repo string, prNumber int, bashHelper *MCPBashHelper) (*PRChanges, error) {
 	logger := logging.GetLogger()
 
 	if bashHelper == nil {
 		return nil, fmt.Errorf("MCP bash helper not available")
 	}
 
+	repoArg := fmt.Sprintf("--repo=%s/%s", owner, repo)
+	// Get PR head SHA to fetch file contents at the correct ref
+	headSHA, err := getPRHeadSHA(ctx, bashHelper, owner, repo, prNumber)
+	if err != nil || headSHA == "" {
+		return nil, fmt.Errorf("failed to get PR head SHA: %w", err)
+	}
 	// Get list of changed files
-	filesOutput, err := bashHelper.ExecuteGHCommand(ctx, "pr", "diff", fmt.Sprintf("%d", prNumber), "--name-only")
+	filesOutput, err := bashHelper.ExecuteGHCommand(ctx, "pr", "diff", repoArg, fmt.Sprintf("%d", prNumber), "--name-only")
 	if err != nil {
 		return nil, fmt.Errorf("failed to get changed files: %w", err)
 	}
@@ -48,7 +58,7 @@ func GetPullRequestChangesWithMCP(ctx context.Context, prNumber int, bashHelper 
 	}
 
 	// Get full diff for parsing patches
-	fullDiff, err := bashHelper.ExecuteGHCommand(ctx, "pr", "diff", fmt.Sprintf("%d", prNumber))
+	fullDiff, err := bashHelper.ExecuteGHCommand(ctx, "pr", "diff", repoArg, fmt.Sprintf("%d", prNumber))
 	if err != nil {
 		return nil, fmt.Errorf("failed to get PR diff: %w", err)
 	}
@@ -97,8 +107,8 @@ func GetPullRequestChangesWithMCP(ctx context.Context, prNumber int, bashHelper 
 			// For now, leave empty - the patch contains the removed content
 			fileChange.FileContent = ""
 		} else {
-			// Get current file content using gh CLI
-			content, err := getFileContentWithMCP(ctx, bashHelper, filename)
+			// Get current file content using gh API at PR head SHA
+			content, err := getFileContentWithMCP(ctx, bashHelper, owner, repo, headSHA, filename)
 			if err != nil {
 				logger.Warn(ctx, "Could not get content for file %s: %v", filename, err)
 				fileChange.FileContent = ""
@@ -179,20 +189,49 @@ func parseDiffOutput(diffOutput string) map[string]FileDiffInfo {
 	return fileDiffs
 }
 
-// getFileContentWithMCP gets the current content of a file using gh CLI.
-func getFileContentWithMCP(ctx context.Context, bashHelper *MCPBashHelper, filename string) (string, error) {
-	// First try to get it from the local working directory
-	// This is more reliable and faster than API calls
-	content, err := bashHelper.ExecuteCommand(ctx, fmt.Sprintf("cat '%s'", filename))
+// getFileContentWithMCP fetches file content from GitHub at a specific ref using gh api.
+func getFileContentWithMCP(ctx context.Context, bashHelper *MCPBashHelper, owner, repo, ref, filename string) (string, error) {
+	// Build gh api path; filename should retain slashes, only ref needs query escaping
+	refEscaped := url.QueryEscape(ref)
+	apiPath := fmt.Sprintf("repos/%s/%s/contents/%s?ref=%s", owner, repo, filename, refEscaped)
+	resp, err := bashHelper.ExecuteGHCommand(ctx, "api", apiPath)
 	if err != nil {
-		// If local file access fails, try gh CLI to show file from repo
-		content, err = bashHelper.ExecuteCommand(ctx, fmt.Sprintf("gh repo view --web=false && cat '%s'", filename))
-		if err != nil {
-			return "", fmt.Errorf("failed to get file content: %w", err)
-		}
+		return "", fmt.Errorf("gh api failed for %s: %w", filename, err)
 	}
 
-	return content, nil
+	var payload struct {
+		Content  string `json:"content"`
+		Encoding string `json:"encoding"`
+	}
+	if err := json.Unmarshal([]byte(resp), &payload); err != nil {
+		return "", fmt.Errorf("failed to parse gh api response for %s: %w", filename, err)
+	}
+	if strings.TrimSpace(payload.Content) == "" {
+		return "", fmt.Errorf("empty content for %s at ref %s", filename, ref)
+	}
+	// GitHub returns base64 with newlines; strip and decode
+	cleaned := strings.ReplaceAll(payload.Content, "\n", "")
+	decoded, err := base64.StdEncoding.DecodeString(cleaned)
+	if err != nil {
+		return "", fmt.Errorf("failed to decode content for %s: %w", filename, err)
+	}
+	return string(decoded), nil
+}
+
+// getPRHeadSHA returns the head commit SHA for a PR via gh pr view.
+func getPRHeadSHA(ctx context.Context, bashHelper *MCPBashHelper, owner, repo string, prNumber int) (string, error) {
+	repoArg := fmt.Sprintf("--repo=%s/%s", owner, repo)
+	out, err := bashHelper.ExecuteGHCommand(ctx, "pr", "view", repoArg, fmt.Sprintf("%d", prNumber), "--json", "headRefOid")
+	if err != nil {
+		return "", err
+	}
+	var payload struct {
+		HeadRefOid string `json:"headRefOid"`
+	}
+	if err := json.Unmarshal([]byte(out), &payload); err != nil {
+		return "", err
+	}
+	return payload.HeadRefOid, nil
 }
 
 // (removed unused base64DecodeContent)
