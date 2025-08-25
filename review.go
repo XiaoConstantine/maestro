@@ -189,11 +189,12 @@ type PRReviewAgent struct {
 	rag              RAGStore
 	activeThreads    map[int64]*ThreadTracker // Track active discussion threads
 	// TODO: should align with dspy agent interface
-	githubTools GitHubInterface // Add this field
-	stopper     *Stopper
-	metrics     MetricsCollector
-	workers     *AgentConfig
-	indexStatus *IndexingStatus // Track background indexing progress
+	githubTools         GitHubInterface // Add this field
+	stopper             *Stopper
+	metrics             MetricsCollector
+	workers             *AgentConfig
+	indexStatus         *IndexingStatus // Track background indexing progress
+	hadExistingComments bool            // Track if any comments/reviews exist (including bots)
 }
 
 type ThreadTracker struct {
@@ -334,6 +335,33 @@ func NewPRReviewAgent(ctx context.Context, githubTool GitHubInterface, dbPath st
 			return nil, fmt.Errorf("failed to initialize rag store: %v", err)
 		}
 	}
+
+	// Ensure guidelines are populated for primary repo language so guideline matching doesn't return 0
+	// Detect primary language via GitHub API; default to Go
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				logger.Warn(ctx, "guideline population panic recovered: %v", r)
+			}
+		}()
+		repo := githubTool.GetRepositoryInfo(ctx)
+		langs, _, err := githubTool.ListLanguages(ctx, repo.Owner, repo.Name)
+		primary := "go"
+		if err == nil && len(langs) > 0 {
+			max := 0
+			for lang, count := range langs {
+				if count > max {
+					max = count
+					primary = strings.ToLower(lang)
+				}
+			}
+		}
+		if err := store.PopulateGuidelines(ctx, primary); err != nil {
+			logger.Warn(ctx, "Failed to populate guidelines for %s: %v", primary, err)
+		} else {
+			logger.Debug(ctx, "Guidelines populated for language: %s", primary)
+		}
+	}()
 
 	metrics := NewBusinessMetrics(logger)
 
@@ -784,12 +812,17 @@ func (a *PRReviewAgent) ReviewPRWithChanges(ctx context.Context, prNumber int, t
 	}
 	if len(myOpenThreads) == 0 && len(repliestoMe) == 0 {
 		if console.Color() {
-			console.Printf("%s %s\n",
-				aurora.Cyan("⋮").Bold(),
-				aurora.White("No existing review found, performing initial review").Bold(),
-			)
+			msg := "No existing review found, performing initial review"
+			if a.hadExistingComments {
+				msg = "Existing comments found (no actionable threads), performing initial review"
+			}
+			console.Printf("%s %s\n", aurora.Cyan("⋮").Bold(), aurora.White(msg).Bold())
 		} else {
-			console.Println("⋮ No existing review found, performing initial review")
+			if a.hadExistingComments {
+				console.Println("⋮ Existing comments found (no actionable threads), performing initial review")
+			} else {
+				console.Println("⋮ No existing review found, performing initial review")
+			}
 		}
 		initialReviewStart := time.Now()
 		comments, err := a.performInitialReview(ctx, tasks, console)
@@ -2092,7 +2125,9 @@ func (a *PRReviewAgent) processExistingCommentsWithChanges(ctx context.Context, 
 		logger.Warn(ctx, "Failed to fetch existing reviews: %v", err)
 	}
 
-	logger.Debug(ctx, "Found %d existing comments and %d reviews", len(comments), len(reviews))
+	logger.Debug(ctx, "Found %d existing review comments, %d reviews", len(comments), len(reviews))
+	// Track presence of any existing discussion (including issue comments)
+	a.hadExistingComments = (len(comments) + len(reviews)) > 0
 	commentsByID := make(map[int64]*github.PullRequestComment)
 	threadHistory := make(map[int64][]PRReviewComment)
 	// Debug log to see who made the comments
@@ -2172,6 +2207,49 @@ func (a *PRReviewAgent) processExistingCommentsWithChanges(ctx context.Context, 
 				review.GetUser().GetLogin(), review.GetState())
 			a.processReview(ctx, review, prNumber, console)
 		}
+	}
+
+	// Fetch general PR (issue) comments as well – many bots and users comment here rather than as review comments
+	issueComments, _, err := githubTools.Client().Issues.ListComments(ctx, repoInfo.Owner, repoInfo.Name, prNumber, &github.IssueListCommentsOptions{})
+	if err != nil {
+		logger.Warn(ctx, "Failed to fetch PR issue comments: %v", err)
+	}
+
+	// Process general PR (issue) comments as separate discussions
+	for _, ic := range issueComments {
+		login := ic.GetUser().GetLogin()
+		lower := strings.ToLower(login)
+		// Skip obvious bots
+		if strings.Contains(lower, "bot") || strings.Contains(lower, "codecov") || strings.Contains(lower, "actions") {
+			continue
+		}
+		id := ic.GetID()
+		reviewComment := PRReviewComment{
+			FilePath:   "",
+			LineNumber: 1,
+			Content:    ic.GetBody(),
+			ThreadID:   &id,
+			Timestamp:  ic.GetCreatedAt().Time,
+			Author:     login,
+			Severity:   "info",
+			Category:   "discussion",
+		}
+		a.metrics.StartThreadTracking(ctx, reviewComment)
+		a.activeThreads[id] = &ThreadTracker{
+			LastComment:     &reviewComment,
+			ParentCommentID: 0,
+			LastUpdate:      ic.GetCreatedAt().Time,
+			Status:          ThreadOpen,
+			FileContent:     "",
+			OriginalAuthor:  login,
+			ConversationHistory: []PRReviewComment{
+				reviewComment,
+			},
+			ThreadID:           id,
+			InReplyToMyComment: false,
+		}
+		// Flag presence of comments
+		a.hadExistingComments = true
 	}
 
 	return nil

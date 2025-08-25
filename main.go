@@ -1124,7 +1124,6 @@ Examples:
 
 		// Format and layout - make suggestions selectable like Claude Code
 		prompt.OptionMaxSuggestion(10),                // Show more suggestions like Claude Code
-		prompt.OptionShowCompletionAtStart(),          // Show immediately when typing /
 		prompt.OptionCompletionWordSeparator(" \t\n"), // Standard word separators
 		prompt.OptionAddKeyBind(
 			// Handle Ctrl+C
