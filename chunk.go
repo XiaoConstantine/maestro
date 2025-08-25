@@ -293,7 +293,9 @@ func chunkByFunction(content string, config *ChunkConfig) ([]ReviewChunk, error)
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, "", content, parser.ParseComments)
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse file: %w", err)
+		// Fallback: if Go parser fails (e.g., unterminated string), fall back to size-based chunking
+		logging.GetLogger().Warn(context.Background(), "Go parser failed in chunkByFunction, falling back to size-based chunking: %v", err)
+		return chunkBySize(content, config)
 	}
 	var chunks []ReviewChunk
 
@@ -398,6 +400,7 @@ func chunkByLogic(content string, config *ChunkConfig) ([]ReviewChunk, error) {
 	changes := ""
 	if changesData, ok := config.fileMetadata["changes"].(string); ok {
 		changes = changesData
+		// If type assertion fails, changes remains empty string
 	}
 	var chunks []ReviewChunk
 

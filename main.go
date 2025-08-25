@@ -263,7 +263,7 @@ You can also set this via environment variables:
 }
 
 // Create an interactive command system using Cobra.
-func createInteractiveCommands(cfg *config, console ConsoleInterface, agent ReviewAgent) *cobra.Command {
+func createInteractiveCommands(cfg *config, console ConsoleInterface, agent ReviewAgent, mcpHelper *MCPBashHelper) *cobra.Command {
 	ctx := context.Background()
 
 	// Initialize CLI tool manager
@@ -333,8 +333,8 @@ func createInteractiveCommands(cfg *config, console ConsoleInterface, agent Revi
 				return
 			}
 
-			cfg.prNumber = prNumber
-			if err := runCLIWithoutBanner(cfg); err != nil {
+			// Run full PR review process
+			if err := runFullPRReview(ctx, prNumber, cfg, console, agent, mcpHelper); err != nil {
 				console.Printf("Error: %v\n", err)
 			}
 		},
@@ -502,7 +502,6 @@ func createInteractiveCommands(cfg *config, console ConsoleInterface, agent Revi
 		},
 	}
 	rootCmd.AddCommand(listCmd)
-
 
 	return rootCmd
 }
@@ -752,6 +751,19 @@ func runCLIWithoutBanner(cfg *config) error {
 	}
 	githubTools := NewGitHubTools(cfg.githubToken, cfg.owner, cfg.repo)
 
+	// Initialize MCP bash helper for GitHub operations
+	var mcpHelper *MCPBashHelper
+	if helper, err := NewMCPBashHelper(); err != nil {
+		logger.Warn(ctx, "Failed to initialize MCP bash helper: %v", err)
+		logger.Info(ctx, "Falling back to GitHub API for PR operations")
+		mcpHelper = nil
+	} else {
+		mcpHelper = helper
+		// Ensure cleanup on exit
+		defer mcpHelper.Close()
+		logger.Debug(ctx, "MCP bash helper initialized successfully")
+	}
+
 	dbPath, err := CreateStoragePath(ctx, cfg.owner, cfg.repo)
 	// Check if we already have an index for this commit
 	if err != nil {
@@ -768,32 +780,49 @@ func runCLIWithoutBanner(cfg *config) error {
 	// Validate PR number
 	if cfg.prNumber <= 0 {
 		logger.Error(ctx, "Invalid PR number: %d. Please specify a valid PR number with --pr flag", cfg.prNumber)
-		fmt.Fprintf(os.Stderr, "Error: Invalid PR number %d. Please specify a valid PR number with --pr flag\n", cfg.prNumber)
-		os.Exit(1)
+		return fmt.Errorf("invalid PR number %d", cfg.prNumber)
 	}
 
+	return runFullPRReview(ctx, cfg.prNumber, cfg, console, agent, mcpHelper)
+}
+
+// runFullPRReview executes the complete PR review process.
+func runFullPRReview(ctx context.Context, prNumber int, cfg *config, console ConsoleInterface, agent ReviewAgent, mcpHelper *MCPBashHelper) error {
+	logger := logging.GetLogger()
+
+	githubTools := NewGitHubTools(cfg.githubToken, cfg.owner, cfg.repo)
+
 	// Fetching PR changes
-	// Before calling changes, err := githubTools.GetPullRequestChanges()
 	if console.Color() {
 		console.Printf("%s %s %s\n",
 			aurora.Blue("↳").Bold(), // Arrow indicator for fetching
 			aurora.White("Fetching changes for PR").Bold(),
-			aurora.Cyan(fmt.Sprintf("#%d", cfg.prNumber)).Bold(),
+			aurora.Cyan(fmt.Sprintf("#%d", prNumber)).Bold(),
 		)
 	} else {
-		console.Printf("↳ Fetching changes for PR #%d\n", cfg.prNumber)
+		console.Printf("↳ Fetching changes for PR #%d\n", prNumber)
 	}
-	pr, _, err := githubTools.Client().PullRequests.Get(ctx, cfg.owner, cfg.repo, cfg.prNumber)
+	pr, _, err := githubTools.Client().PullRequests.Get(ctx, cfg.owner, cfg.repo, prNumber)
 	if err != nil {
-		logger.Error(ctx, "Failed to get PR #%d: %v", cfg.prNumber, err)
-		os.Exit(1)
+		logger.Error(ctx, "Failed to get PR #%d: %v", prNumber, err)
+		return fmt.Errorf("PR #%d not found: %w", prNumber, err)
 	}
 	console.StartReview(pr)
 
-	changes, err := githubTools.GetPullRequestChanges(ctx, cfg.prNumber)
+	var changes *PRChanges
+
+	// Use MCP if available, otherwise fall back to GitHub API
+	if mcpHelper != nil {
+		logger.Debug(ctx, "Using MCP bash helper to fetch PR changes")
+		changes, err = GetPullRequestChangesWithMCP(ctx, prNumber, mcpHelper)
+	} else {
+		logger.Debug(ctx, "Using GitHub API to fetch PR changes")
+		changes, err = githubTools.GetPullRequestChanges(ctx, prNumber)
+	}
+
 	if err != nil {
 		logger.Error(ctx, "Failed to get PR changes: %v", err)
-		os.Exit(1)
+		return fmt.Errorf("failed to get PR changes: %w", err)
 	}
 	tasks := make([]PRReviewTask, 0, len(changes.Files))
 	for _, file := range changes.Files {
@@ -816,10 +845,6 @@ func runCLIWithoutBanner(cfg *config) error {
 			Changes:     file.Patch,
 		})
 	}
-	if err != nil {
-		logger.Error(ctx, "Failed to get PR changes: %v", err)
-		os.Exit(1)
-	}
 
 	if console.Color() {
 		console.Printf("%s %s %s\n",
@@ -840,27 +865,27 @@ func runCLIWithoutBanner(cfg *config) error {
 		defer cancel()
 		agent.Stop(shutdownCtx)
 	}()
-	comments, err := agent.ReviewPR(ctx, cfg.prNumber, tasks, console)
+	comments, err := agent.ReviewPRWithChanges(ctx, prNumber, tasks, console, changes)
 	if err != nil {
 		logger.Error(ctx, "Failed to review PR: %v", err)
-		os.Exit(1)
+		return fmt.Errorf("failed to review PR: %w", err)
 	}
 	if len(comments) != 0 {
 
-		shouldPost, err := githubTools.PreviewReview(ctx, console, cfg.prNumber, comments, agent.Metrics(ctx))
+		shouldPost, err := githubTools.PreviewReview(ctx, console, prNumber, comments, agent.Metrics(ctx))
 		if err != nil {
 			logger.Error(ctx, "Failed to preview review: %v", err)
-			os.Exit(1)
+			return fmt.Errorf("failed to preview review: %w", err)
 		}
 
 		console.ShowReviewMetrics(agent.Metrics(ctx), comments)
 
 		if shouldPost {
 			logger.Info(ctx, "Posting review comments to GitHub")
-			err = githubTools.CreateReviewComments(ctx, cfg.prNumber, comments)
+			err = githubTools.CreateReviewComments(ctx, prNumber, comments)
 			if err != nil {
 				logger.Error(ctx, "Failed to post review comments: %v", err)
-				os.Exit(1)
+				return fmt.Errorf("failed to post review comments: %w", err)
 			}
 		}
 	}
@@ -877,7 +902,6 @@ func getVectorDimensions() int {
 	}
 	return 768 // Default for text-embedding-004
 }
-
 
 func runInteractiveMode(cfg *config) error {
 	printMaestroBanner()
@@ -1059,8 +1083,20 @@ Examples:
 
 	console.Println("Type /help or ask questions directly.")
 
-	// Create interactive commands with the pre-initialized agent
-	interactiveCmd := createInteractiveCommands(cfg, console, agent)
+	// Initialize persistent MCP bash helper
+	var mcpHelper *MCPBashHelper
+	if helper, err := NewMCPBashHelper(); err != nil {
+		console.Printf("Warning: Failed to initialize MCP bash helper: %v\n", err)
+		console.Println("GitHub operations will use fallback methods.")
+		mcpHelper = nil
+	} else {
+		mcpHelper = helper
+		// Ensure cleanup on exit
+		defer mcpHelper.Close()
+	}
+
+	// Create interactive commands with the pre-initialized agent and MCP helper
+	interactiveCmd := createInteractiveCommands(cfg, console, agent, mcpHelper)
 	ctrlCPressed := false
 	ctrlCTimer := time.NewTimer(0)
 	ctrlCTimer.Stop() // Initialize in stopped state
@@ -1086,8 +1122,8 @@ Examples:
 		prompt.OptionSelectedDescriptionTextColor(prompt.White),
 
 		// Format and layout - make suggestions selectable like Claude Code
-		prompt.OptionMaxSuggestion(10),        // Show more suggestions like Claude Code
-		prompt.OptionShowCompletionAtStart(),  // Show immediately when typing /
+		prompt.OptionMaxSuggestion(10),                // Show more suggestions like Claude Code
+		prompt.OptionShowCompletionAtStart(),          // Show immediately when typing /
 		prompt.OptionCompletionWordSeparator(" \t\n"), // Standard word separators
 		prompt.OptionAddKeyBind(
 			// Handle Ctrl+C
@@ -1115,10 +1151,10 @@ Examples:
 		),
 		// Enable arrow key navigation in suggestions
 		prompt.OptionHistory([]string{}), // Initialize history
-		
+
 		// Input behavior - essential for proper suggestion navigation
 		prompt.OptionInputTextColor(prompt.DefaultColor),
-		prompt.OptionCompletionOnDown(),  // Enable down arrow to enter completion mode
+		prompt.OptionCompletionOnDown(), // Enable down arrow to enter completion mode
 	}
 
 	console.Println("")
@@ -1163,7 +1199,6 @@ Examples:
 	p.Run()
 	return nil
 }
-
 
 func showHelpMessage(c ConsoleInterface) {
 	// Clean, minimal help like Claude Code

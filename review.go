@@ -104,6 +104,7 @@ const (
 
 type ReviewAgent interface {
 	ReviewPR(ctx context.Context, prNumber int, tasks []PRReviewTask, console ConsoleInterface) ([]PRReviewComment, error)
+	ReviewPRWithChanges(ctx context.Context, prNumber int, tasks []PRReviewTask, console ConsoleInterface, preloadedChanges *PRChanges) ([]PRReviewComment, error)
 	Stop(ctx context.Context)
 	Metrics(ctx context.Context) MetricsCollector
 	Orchestrator(ctx context.Context) *agents.FlexibleOrchestrator
@@ -316,7 +317,7 @@ func NewPRReviewAgent(ctx context.Context, githubTool GitHubInterface, dbPath st
 	}
 
 	logger.Debug(ctx, "Successfully opened database")
-	
+
 	var store RAGStore
 	// Feature flag to enable agentic search system
 	if os.Getenv("MAESTRO_AGENTIC_SEARCH") == "true" {
@@ -700,6 +701,11 @@ func (a *PRReviewAgent) Close() error {
 
 // ReviewPR reviews a complete pull request.
 func (a *PRReviewAgent) ReviewPR(ctx context.Context, prNumber int, tasks []PRReviewTask, console ConsoleInterface) ([]PRReviewComment, error) {
+	return a.ReviewPRWithChanges(ctx, prNumber, tasks, console, nil)
+}
+
+// ReviewPRWithChanges reviews a complete pull request with pre-fetched changes data.
+func (a *PRReviewAgent) ReviewPRWithChanges(ctx context.Context, prNumber int, tasks []PRReviewTask, console ConsoleInterface, preloadedChanges *PRChanges) ([]PRReviewComment, error) {
 	logger := logging.GetLogger()
 	reviewStart := time.Now()
 	logger.Info(ctx, "🎬 Starting PR #%d review for %d files", prNumber, len(tasks))
@@ -723,7 +729,7 @@ func (a *PRReviewAgent) ReviewPR(ctx context.Context, prNumber int, tasks []PRRe
 		console.Printf("Proceeding with basic review capabilities.\n\n")
 	}
 
-	if err := a.processExistingComments(ctx, prNumber, console); err != nil {
+	if err := a.processExistingCommentsWithChanges(ctx, prNumber, console, preloadedChanges); err != nil {
 		return nil, fmt.Errorf("failed to process existing comments: %w", err)
 	}
 
@@ -942,9 +948,9 @@ func (a *PRReviewAgent) analyzePatterns(ctx context.Context, tasks []PRReviewTas
 				// Use unified embedding model consistent with guidelines and code indexing
 				embeddingModel := os.Getenv("MAESTRO_UNIFIED_EMBEDDING_MODEL")
 				if embeddingModel == "" {
-					embeddingModel = "jinaai/jina-embeddings-v4" // Default unified model
+					embeddingModel = getGuidelineEmbeddingModel()
 				}
-				
+
 				// Track embedding generation performance if debugging enabled
 				embeddingStartTime := time.Now()
 				fileEmbedding, err := llm.CreateEmbedding(ctx, chunk, core.WithModel(embeddingModel))
@@ -953,7 +959,7 @@ func (a *PRReviewAgent) analyzePatterns(ctx context.Context, tasks []PRReviewTas
 				if err != nil {
 					return fmt.Errorf("failed to create file embedding: %w", err)
 				}
-				
+
 				// Log embedding generation debug info if enabled
 				if getEnvBool("MAESTRO_LLM_RESPONSE_DEBUG", false) {
 					// Debug: Log embedding generation time and dimensions
@@ -978,7 +984,7 @@ func (a *PRReviewAgent) analyzePatterns(ctx context.Context, tasks []PRReviewTas
 				}
 
 				totalRepoMatches += len(repoPatterns)
-				
+
 				// Find guideline matches with debug logging if enabled
 				var guidelineMatch []*Content
 				if getEnvBool("MAESTRO_RAG_DEBUG_ENABLED", false) {
@@ -991,12 +997,12 @@ func (a *PRReviewAgent) analyzePatterns(ctx context.Context, tasks []PRReviewTas
 					}
 					guidelineMatches = append(guidelineMatches, guidelineMatch...)
 					fmt.Printf("Guideline retrieval: found %d matches in %v\n", debugInfo.ResultCount, debugInfo.RetrievalTime)
-					
+
 					// Add comprehensive guideline match analysis for debugging
 					if ragStore, ok := a.rag.(*sqliteRAGStore); ok {
 						ragStore.logGuidelineMatchAnalysis(ctx, task.FilePath, guidelineMatch, debugInfo)
 					}
-					
+
 					// Add similarity analysis debugging for enhanced processing
 					if getEnvBool("MAESTRO_SIMILARITY_LOGGING", false) {
 						fmt.Printf("Similarity scores: %v\n", debugInfo.SimilarityScores)
@@ -1150,7 +1156,6 @@ func formatMethodSignatures(methods []MethodSignature) string {
 	}
 	return formatted.String()
 }
-
 
 // processChunkWithEnhancements processes a chunk with enhanced DSPy-Go features if enabled.
 func (a *PRReviewAgent) processChunkWithEnhancements(ctx context.Context, workData interface{}, chunkContext map[string]interface{}) (*agents.OrchestratorResult, error) {
@@ -2045,6 +2050,10 @@ func (a *PRReviewAgent) processChunksManual(ctx context.Context, tasks []PRRevie
 }
 
 func (a *PRReviewAgent) processExistingComments(ctx context.Context, prNumber int, console ConsoleInterface) error {
+	return a.processExistingCommentsWithChanges(ctx, prNumber, console, nil)
+}
+
+func (a *PRReviewAgent) processExistingCommentsWithChanges(ctx context.Context, prNumber int, console ConsoleInterface, preloadedChanges *PRChanges) error {
 	logger := logging.GetLogger()
 	if console.Color() {
 		console.Printf("\n%s %s\n",
@@ -2056,9 +2065,16 @@ func (a *PRReviewAgent) processExistingComments(ctx context.Context, prNumber in
 	}
 	githubTools := a.GetGitHubTools()
 
-	changes, err := githubTools.GetPullRequestChanges(ctx, prNumber)
-	if err != nil {
-		return fmt.Errorf("failed to fetch PR changes: %w", err)
+	var changes *PRChanges
+	var err error
+
+	if preloadedChanges != nil {
+		changes = preloadedChanges
+	} else {
+		changes, err = githubTools.GetPullRequestChanges(ctx, prNumber)
+		if err != nil {
+			return fmt.Errorf("failed to fetch PR changes: %w", err)
+		}
 	}
 	fileContents := make(map[string]string)
 	for _, change := range changes.Files {
@@ -2639,4 +2655,3 @@ func defaultAgentConfig() *AgentConfig {
 		ReviewWorkers: runtime.NumCPU(), // Default to CPU count for review
 	}
 }
-
