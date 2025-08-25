@@ -253,15 +253,10 @@ func (cd *ClaudeDashboard) ShowSessionDetail(sessionID string) error {
 		cd.console.Printf("\nTags: %s\n", strings.Join(session.tags, ", "))
 	}
 
-	// Recent output
-	output, err := cd.sessionManager.GetSessionOutput(sessionID, 10)
-	if err == nil && len(output) > 0 {
-		cd.console.Println("\nRecent Output:")
-		cd.console.Println(strings.Repeat("─", 50))
-		for _, line := range output {
-			cd.console.Printf("  %s\n", line)
-		}
-	}
+	// Recent output display is deprecated; instruct user to use interactive mode
+	cd.console.Println("\nRecent Output: (deprecated)")
+	cd.console.Println(strings.Repeat("─", 50))
+	cd.console.Println("Use /switch <session> then /enter to view and interact with live output.")
 
 	return nil
 }
@@ -434,16 +429,9 @@ func (cd *ClaudeDashboard) handleSendCommand(args []string) error {
 	if len(args) < 2 {
 		return fmt.Errorf("usage: send <session_id> <command>")
 	}
-
-	sessionID := args[0]
-	command := strings.Join(args[1:], " ")
-
-	err := cd.sessionManager.SendCommand(sessionID, command)
-	if err != nil {
-		return err
-	}
-
-	cd.console.Printf("✅ Sent command to session %s\n", sessionID)
+	// Deprecated: direct command sending is no longer supported.
+	// Use the session switcher to enter interactive mode with Claude.
+	cd.console.Println("⚠️  'send' is deprecated. Use /sessions to list, /switch <session>, then /enter to interact.")
 	return nil
 }
 

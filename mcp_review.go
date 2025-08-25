@@ -2,8 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/base64"
-	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -22,96 +20,7 @@ type PRInfo struct {
 	BaseRefName string `json:"baseRefName"`
 }
 
-// reviewPRWithPersistentMCP reviews a PR using persistent MCP bash helper.
-func reviewPRWithPersistentMCP(ctx context.Context, prNumber int, console ConsoleInterface, bashHelper *MCPBashHelper) error {
-	logger := logging.GetLogger()
-
-	if bashHelper == nil {
-		return fmt.Errorf("MCP bash helper not available")
-	}
-
-	console.Printf("↳ Fetching PR #%d information via gh CLI...\n", prNumber)
-
-	// Get PR information using gh CLI
-	prInfoJSON, err := bashHelper.ExecuteGHCommand(ctx, "pr", "view", fmt.Sprintf("%d", prNumber), "--json", "number,title,body,author,headRefName,baseRefName")
-	if err != nil {
-		if strings.Contains(err.Error(), "gh auth login") || strings.Contains(err.Error(), "GH_TOKEN") {
-			return fmt.Errorf("GitHub CLI not authenticated. Please run 'gh auth login' or set GH_TOKEN environment variable")
-		}
-		return fmt.Errorf("PR #%d not found: %w", prNumber, err)
-	}
-
-	// Parse PR information
-	var prInfo PRInfo
-	if err := json.Unmarshal([]byte(prInfoJSON), &prInfo); err != nil {
-		return fmt.Errorf("failed to parse PR information: %w", err)
-	}
-
-	console.Printf("\nReviewing PR #%d: %s\n", prInfo.Number, prInfo.Title)
-	console.Printf("Author     : %s\n", prInfo.Author.Login)
-	console.Printf("Branch     : %s -> %s\n", prInfo.HeadRefName, prInfo.BaseRefName)
-
-	// Get PR diff using gh CLI
-	console.Println("↳ Fetching PR changes...")
-	diffOutput, err := bashHelper.ExecuteGHCommand(ctx, "pr", "diff", fmt.Sprintf("%d", prNumber), "--name-only")
-	if err != nil {
-		return fmt.Errorf("failed to get PR changes: %w", err)
-	}
-
-	changedFiles := strings.Split(strings.TrimSpace(diffOutput), "\n")
-	if len(changedFiles) == 0 || (len(changedFiles) == 1 && changedFiles[0] == "") {
-		return fmt.Errorf("no reviewable files found in PR #%d", prNumber)
-	}
-
-	console.Printf("Files      : %d files changed\n", len(changedFiles))
-
-	// Show the changed files
-	console.Println("\nChanged files:")
-	for i, file := range changedFiles {
-		if strings.TrimSpace(file) != "" {
-			console.Printf("  %d. %s\n", i+1, file)
-		}
-	}
-
-	// Get detailed diff for review
-	console.Println("\n↳ Getting detailed changes for analysis...")
-	detailedDiff, err := bashHelper.ExecuteGHCommand(ctx, "pr", "diff", fmt.Sprintf("%d", prNumber))
-	if err != nil {
-		logger.Debug(ctx, "Failed to get detailed diff: %v", err)
-		detailedDiff = ""
-	}
-
-	// For now, just show that we've successfully fetched the data
-	// In a full implementation, you would:
-	// 1. Parse the diff and extract meaningful changes
-	// 2. Run the changes through your review agent
-	// 3. Generate review comments
-	// 4. Post the review back using gh CLI
-
-	console.Printf("\n✅ Successfully fetched PR data using MCP bash tool!\n")
-	console.Printf("📊 Diff size: %d characters\n", len(detailedDiff))
-
-	// Show first few lines of diff as proof of concept
-	if detailedDiff != "" {
-		lines := strings.Split(detailedDiff, "\n")
-		console.Println("\nFirst 5 lines of diff:")
-		for i, line := range lines {
-			if i >= 5 {
-				break
-			}
-			console.Printf("  %s\n", line)
-		}
-		if len(lines) > 5 {
-			console.Printf("  ... (%d more lines)\n", len(lines)-5)
-		}
-	}
-
-	// Demonstrate posting a comment (commented out to avoid spam)
-	console.Println("\n💡 To post a review comment, you could run:")
-	console.Printf("   gh pr review %d --comment --body \"Review comment here\"\n", prNumber)
-
-	return nil
-}
+// (removed unused reviewPRWithPersistentMCP)
 
 // GetPullRequestChangesWithMCP retrieves PR changes using MCP bash helper instead of GitHub API.
 func GetPullRequestChangesWithMCP(ctx context.Context, prNumber int, bashHelper *MCPBashHelper) (*PRChanges, error) {
@@ -286,16 +195,4 @@ func getFileContentWithMCP(ctx context.Context, bashHelper *MCPBashHelper, filen
 	return content, nil
 }
 
-// base64DecodeContent decodes base64 content and handles line breaks.
-func base64DecodeContent(encoded string) (string, error) {
-	// Remove any whitespace/newlines from base64 string
-	cleaned := strings.ReplaceAll(encoded, "\n", "")
-	cleaned = strings.ReplaceAll(cleaned, " ", "")
-
-	decoded, err := base64.StdEncoding.DecodeString(cleaned)
-	if err != nil {
-		return "", err
-	}
-
-	return string(decoded), nil
-}
+// (removed unused base64DecodeContent)

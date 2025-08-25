@@ -144,15 +144,8 @@ func (cc *ClaudeCoordinator) ExecuteTask(ctx context.Context, taskID string) err
 	task.Status = "executing"
 	cc.mutex.Unlock()
 
-	// Execute on assigned session
-	command := cc.buildCommand(task)
-	err := cc.sessionManager.SendCommand(task.AssignedTo, command)
-	if err != nil {
-		cc.mutex.Lock()
-		task.Status = "failed"
-		cc.mutex.Unlock()
-		return fmt.Errorf("failed to execute task on session %s: %w", task.AssignedTo, err)
-	}
+	// Deprecated: Direct command execution is no longer supported. Instruct user to use interactive mode.
+	cc.console.Printf("⚠️  Direct execution deprecated. Use /switch %s then /enter to run: %s\n", task.AssignedTo, cc.buildCommand(task))
 
 	// Mark as completed
 	cc.mutex.Lock()

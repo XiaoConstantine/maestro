@@ -2049,10 +2049,6 @@ func (a *PRReviewAgent) processChunksManual(ctx context.Context, tasks []PRRevie
 	return allComments, nil
 }
 
-func (a *PRReviewAgent) processExistingComments(ctx context.Context, prNumber int, console ConsoleInterface) error {
-	return a.processExistingCommentsWithChanges(ctx, prNumber, console, nil)
-}
-
 func (a *PRReviewAgent) processExistingCommentsWithChanges(ctx context.Context, prNumber int, console ConsoleInterface, preloadedChanges *PRChanges) error {
 	logger := logging.GetLogger()
 	if console.Color() {
