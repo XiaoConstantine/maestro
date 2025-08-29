@@ -904,7 +904,11 @@ func (a *PRReviewAgent) performInitialReview(ctx context.Context, tasks []PRRevi
 		return nil, fmt.Errorf("failed to analyze patterns: %w", err)
 	}
 	phase1Duration := time.Since(phase1Start)
-	logger.Info(ctx, "✅ Phase 1 completed in %v (avg: %v/file)", phase1Duration, phase1Duration/time.Duration(len(tasks)))
+	if len(tasks) > 0 {
+		logger.Info(ctx, "✅ Phase 1 completed in %v (avg: %v/file)", phase1Duration, phase1Duration/time.Duration(len(tasks)))
+	} else {
+		logger.Info(ctx, "✅ Phase 1 completed in %v (no files to process)", phase1Duration)
+	}
 
 	// Phase 2: Create chunks for all files
 	phase2Start := time.Now()
@@ -930,13 +934,21 @@ func (a *PRReviewAgent) performInitialReview(ctx context.Context, tasks []PRRevi
 	phase3Duration := time.Since(phase3Start)
 	totalDuration := time.Since(totalStart)
 
-	logger.Info(ctx, "✅ Phase 3 completed in %v (avg: %v/chunk)", phase3Duration, phase3Duration/time.Duration(totalChunks))
-	logger.Info(ctx, "🎉 Total review completed in %v | Phase 1: %v (%.1f%%) | Phase 2: %v (%.1f%%) | Phase 3: %v (%.1f%%) | Generated %d comments",
-		totalDuration,
-		phase1Duration, float64(phase1Duration)/float64(totalDuration)*100,
-		phase2Duration, float64(phase2Duration)/float64(totalDuration)*100,
-		phase3Duration, float64(phase3Duration)/float64(totalDuration)*100,
-		len(comments))
+	if totalChunks > 0 {
+		logger.Info(ctx, "✅ Phase 3 completed in %v (avg: %v/chunk)", phase3Duration, phase3Duration/time.Duration(totalChunks))
+	} else {
+		logger.Info(ctx, "✅ Phase 3 completed in %v (no chunks to process)", phase3Duration)
+	}
+	if totalDuration > 0 {
+		logger.Info(ctx, "🎉 Total review completed in %v | Phase 1: %v (%.1f%%) | Phase 2: %v (%.1f%%) | Phase 3: %v (%.1f%%) | Generated %d comments",
+			totalDuration,
+			phase1Duration, float64(phase1Duration)/float64(totalDuration)*100,
+			phase2Duration, float64(phase2Duration)/float64(totalDuration)*100,
+			phase3Duration, float64(phase3Duration)/float64(totalDuration)*100,
+			len(comments))
+	} else {
+		logger.Info(ctx, "🎉 Total review completed instantly | Generated %d comments", len(comments))
+	}
 
 	return comments, nil
 }

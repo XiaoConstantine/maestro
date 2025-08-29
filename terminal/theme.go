@@ -30,25 +30,25 @@ type Theme struct {
 // ClaudeCodeTheme returns the minimal Claude Code-inspired theme.
 func ClaudeCodeTheme() *Theme {
 	return &Theme{
-		// Backgrounds - very subtle, no contrast
-		Background: lipgloss.Color("#0f0f11"), // Deep muted dark
-		Surface:    lipgloss.Color("#1a1a1c"), // Barely lighter
+		// Backgrounds - navy/purple tones matching the screenshot
+		Background: lipgloss.Color("#1F2041"), // Deep navy background
+		Surface:    lipgloss.Color("#2B2D42"), // Slightly lighter purple-navy
 
 		// Text - clean hierarchy
-		TextPrimary:   lipgloss.Color("#fafafa"), // Clean off-white
-		TextSecondary: lipgloss.Color("#a1a1aa"), // Muted gray
-		TextMuted:     lipgloss.Color("#71717a"), // Very muted
+		TextPrimary:   lipgloss.Color("#E8E9F3"), // Clean off-white
+		TextSecondary: lipgloss.Color("#A9A9B8"), // Muted gray-purple
+		TextMuted:     lipgloss.Color("#6B6B7E"), // Very muted purple-gray
 
-		// Functional - minimal use
-		Accent: lipgloss.Color("#3b82f6"), // Subtle blue, used rarely
-		Border: lipgloss.Color("#27272a"), // Very subtle borders
-		Cursor: lipgloss.Color("#fafafa"), // Same as primary text
+		// Functional - used for accents and highlights
+		Accent: lipgloss.Color("#00D9FF"), // Cyan accent for active elements
+		Border: lipgloss.Color("#3A3C55"), // Subtle purple borders
+		Cursor: lipgloss.Color("#00D9FF"), // Cyan cursor
 
-		// Code syntax - subtle differentiation
-		Code:    lipgloss.Color("#e4e4e7"), // Slightly different from text
-		Comment: lipgloss.Color("#71717a"), // Same as muted text
-		String:  lipgloss.Color("#84cc16"), // Subtle green
-		Keyword: lipgloss.Color("#8b5cf6"), // Subtle purple
+		// Code syntax - purple/cyan palette
+		Code:    lipgloss.Color("#D4D4E5"), // Light purple-gray for code
+		Comment: lipgloss.Color("#6B6B7E"), // Same as muted text
+		String:  lipgloss.Color("#7FE9DE"), // Cyan-green for strings
+		Keyword: lipgloss.Color("#B185F7"), // Light purple for keywords
 	}
 }
 

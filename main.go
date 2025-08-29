@@ -24,6 +24,8 @@ import (
 	"path/filepath"
 
 	sqlite_vec "github.com/asg017/sqlite-vec-go-bindings/cgo"
+	
+	"github.com/XiaoConstantine/maestro/terminal"
 
 	_ "github.com/mattn/go-sqlite3"
 )
@@ -651,6 +653,13 @@ Available slash commands in interactive mode:
 			}
 
 			interactive, _ := cmd.Flags().GetBool("interactive")
+			modernUI, _ := cmd.Flags().GetBool("ui")
+			
+			// Handle modern UI flag
+			if modernUI {
+				return runModernUI(cfg)
+			}
+			
 			// Force interactive mode if no PR number is specified, even when other flags are set
 			if interactive || cmd.Flags().NFlag() == 0 || cfg.prNumber == 0 {
 				return runInteractiveMode(cfg)
@@ -670,6 +679,7 @@ Available slash commands in interactive mode:
 	rootCmd.PersistentFlags().BoolVar(&cfg.verifyOnly, "verify-only", false, "Only verify token permissions")
 
 	rootCmd.PersistentFlags().BoolP("interactive", "i", false, "Run in interactive mode")
+	rootCmd.PersistentFlags().Bool("ui", false, "Use modern terminal UI (experimental)")
 
 	rootCmd.PersistentFlags().StringP("model", "m", "", `Full model specification (e.g. "ollama:mistral:q4", "llamacpp:", "anthropic:claude-3")`)
 	rootCmd.PersistentFlags().StringVar(&cfg.modelProvider, "provider", DefaultModelProvider, "Model provider (llamacpp, ollama, anthropic)")
@@ -861,11 +871,7 @@ func runFullPRReview(ctx context.Context, prNumber int, cfg *config, console Con
 			pluralize("file", len(tasks)))
 	}
 	// Starting code review
-	defer func() {
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		agent.Stop(shutdownCtx)
-	}()
+	// Note: Don't stop the agent here in interactive mode - it's managed at the session level
 	comments, err := agent.ReviewPRWithChanges(ctx, prNumber, tasks, console, changes)
 	if err != nil {
 		logger.Error(ctx, "Failed to review PR: %v", err)
@@ -1081,6 +1087,12 @@ Examples:
 	if err != nil {
 		return fmt.Errorf("failed to initialize agent: %w", err)
 	}
+	// Ensure agent cleanup on exit
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		agent.Stop(shutdownCtx)
+	}()
 
 	console.Println("Type /help or ask questions directly.")
 
@@ -1198,6 +1210,19 @@ Examples:
 	)
 	p.Run()
 	return nil
+}
+
+func runModernUI(cfg *config) error {
+	printMaestroBanner()
+	
+	// Simple validation - just check if GitHub token is provided
+	if cfg.githubToken == "" {
+		fmt.Fprintln(os.Stderr, "GitHub token required via --github-token or MAESTRO_GITHUB_TOKEN")
+		return fmt.Errorf("GitHub token required")
+	}
+	
+	// Start the modern terminal UI
+	return terminal.RunModernUI()
 }
 
 func showHelpMessage(c ConsoleInterface) {

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"syscall"
 	"time"
 
 	dspyLogging "github.com/XiaoConstantine/dspy-go/pkg/logging"
@@ -41,6 +42,13 @@ func NewMCPBashHelper() (*MCPBashHelper, error) {
 
 	// Redirect server's stderr to our stderr for debugging
 	cmd.Stderr = os.Stderr
+
+	// Start the server in its own process group to prevent it from receiving
+	// signals meant for the parent process (like Ctrl+C)
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		Setpgid: true,
+		Pgid:    0,
+	}
 
 	// Start the server
 	if err := cmd.Start(); err != nil {
@@ -139,10 +147,12 @@ func (h *MCPBashHelper) Close() error {
 
 	// Terminate the server subprocess
 	if h.cmd != nil && h.cmd.Process != nil {
-		if err := h.cmd.Process.Signal(os.Interrupt); err != nil {
-			h.dspyLogger.Debug(context.Background(), "Failed to send interrupt signal, killing process")
-			if err := h.cmd.Process.Kill(); err != nil {
-				errors = append(errors, fmt.Errorf("failed to kill bash MCP server: %w", err))
+		// Since we put the process in its own group, we need to kill the entire group
+		pgid := h.cmd.Process.Pid
+		if err := syscall.Kill(-pgid, syscall.SIGINT); err != nil {
+			h.dspyLogger.Debug(context.Background(), "Failed to send interrupt signal to process group, killing process")
+			if err := syscall.Kill(-pgid, syscall.SIGKILL); err != nil {
+				errors = append(errors, fmt.Errorf("failed to kill bash MCP server process group: %w", err))
 			}
 		}
 
