@@ -124,12 +124,11 @@ func getModelChoices() []ModelChoice {
 
 	// Create model-specific descriptions
 	modelDescriptions := map[core.ModelID]string{
-		core.ModelAnthropicHaiku:            "Fastest Claude model, optimized for quick tasks and real-time interactions",
-		core.ModelAnthropicSonnet:           "Balanced performance model suitable for most tasks",
-		core.ModelAnthropicOpus:             "Most powerful Claude model for complex reasoning and analysis",
-		core.ModelGoogleGeminiFlash:         "Fast Google model focused on quick response times",
-		core.ModelGoogleGeminiPro:           "Advanced Google model for sophisticated tasks",
-		core.ModelGoogleGeminiFlashThinking: "Enhanced reasoning capabilities with rapid response times",
+		core.ModelAnthropicHaiku:    "Fastest Claude model, optimized for quick tasks and real-time interactions",
+		core.ModelAnthropicSonnet:   "Balanced performance model suitable for most tasks",
+		core.ModelAnthropicOpus:     "Most powerful Claude model for complex reasoning and analysis",
+		core.ModelGoogleGeminiFlash: "Fast Google model focused on quick response times",
+		core.ModelGoogleGeminiPro:   "Advanced Google model for sophisticated tasks",
 	}
 
 	var choices []ModelChoice
