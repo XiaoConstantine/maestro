@@ -24,6 +24,7 @@ type ConsoleInterface interface {
 	StopSpinner()
 	WithSpinner(ctx context.Context, message string, fn func() error) error
 	ShowComments(comments []PRReviewComment, metric MetricsCollector)
+	ShowCommentsInteractive(comments []PRReviewComment, onPost func([]PRReviewComment) error) error
 	ShowSummary(comments []PRReviewComment, metric MetricsCollector)
 	StartReview(pr *github.PullRequest)
 	ReviewingFile(file string, current, total int)
@@ -41,6 +42,7 @@ type ConsoleInterface interface {
 	SeverityIcon(severity string) string
 	Color() bool
 	Spinner() *spinner.Spinner
+	IsInteractive() bool
 }
 
 // Console handles user-facing output separate from logging.
@@ -666,4 +668,84 @@ func (c *Console) UpdateSpinnerText(text string) {
 func indent(s string, spaces int) string {
 	prefix := strings.Repeat(" ", spaces)
 	return prefix + strings.ReplaceAll(s, "\n", "\n"+prefix)
+}
+
+// IsInteractive returns whether the console is running in an interactive terminal.
+func (c *Console) IsInteractive() bool {
+	if f, ok := c.w.(*os.File); ok {
+		return isatty.IsTerminal(f.Fd())
+	}
+	return false
+}
+
+// ShowCommentsInteractive launches the interactive TUI for reviewing comments.
+// This provides a lazygit-style interface for navigating and managing review comments.
+func (c *Console) ShowCommentsInteractive(comments []PRReviewComment, onPost func([]PRReviewComment) error) error {
+	if len(comments) == 0 {
+		c.Println("No comments to display.")
+		return nil
+	}
+
+	// Check if we're in an interactive terminal
+	if !c.IsInteractive() {
+		c.Println("Non-interactive mode: falling back to standard output")
+		c.ShowComments(comments, nil)
+		return nil
+	}
+
+	// Convert PRReviewComment to terminal.ReviewComment
+	tuiComments := make([]reviewComment, 0, len(comments))
+	for _, comment := range comments {
+		tuiComments = append(tuiComments, reviewComment{
+			FilePath:   comment.FilePath,
+			LineNumber: comment.LineNumber,
+			Content:    comment.Content,
+			Severity:   comment.Severity,
+			Suggestion: comment.Suggestion,
+			Category:   comment.Category,
+		})
+	}
+
+	// Create post callback that converts back to PRReviewComment
+	var postCallback func([]reviewComment) error
+	if onPost != nil {
+		postCallback = func(tuiComments []reviewComment) error {
+			prComments := make([]PRReviewComment, 0, len(tuiComments))
+			for _, tc := range tuiComments {
+				prComments = append(prComments, PRReviewComment{
+					FilePath:   tc.FilePath,
+					LineNumber: tc.LineNumber,
+					Content:    tc.Content,
+					Severity:   tc.Severity,
+					Suggestion: tc.Suggestion,
+					Category:   tc.Category,
+				})
+			}
+			return onPost(prComments)
+		}
+	}
+
+	return runReviewTUI(tuiComments, postCallback)
+}
+
+// reviewComment is a local type that mirrors terminal.ReviewComment
+// to avoid import cycles.
+type reviewComment struct {
+	FilePath   string
+	LineNumber int
+	Content    string
+	Severity   string
+	Suggestion string
+	Category   string
+	CodeBlock  string
+	DiffBlock  string
+}
+
+// runReviewTUI is a wrapper that launches the review TUI.
+// It's separated to allow for easier testing and to avoid import cycles.
+func runReviewTUI(comments []reviewComment, onPost func([]reviewComment) error) error {
+	// Import the terminal package's TUI here
+	// Since we can't import terminal package from main due to cycles,
+	// we need to use the exported function from terminal package
+	return launchReviewTUI(comments, onPost)
 }
