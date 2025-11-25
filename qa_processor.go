@@ -118,9 +118,9 @@ func (p *RepoQAProcessor) Process(ctx context.Context, task agents.Task, context
 		return p.processResults(ctx, signature, metadata, similar)
 	}
 
-	// Fallback to traditional RAG with embeddings
-	llm := core.GetTeacherLLM()
-	questionEmbedding, err := llm.CreateEmbedding(ctx, metadata.Question)
+	// Fallback to traditional RAG with embeddings (latency-critical query)
+	router := GetEmbeddingRouter()
+	questionEmbedding, err := router.CreateEmbedding(ctx, metadata.Question, WithLatencyCritical(true))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create embedding: %w", err)
 	}

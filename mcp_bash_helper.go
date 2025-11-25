@@ -147,20 +147,7 @@ func (h *MCPBashHelper) Close() error {
 
 	// Terminate the server subprocess
 	if h.cmd != nil && h.cmd.Process != nil {
-		// Since we put the process in its own group, we need to kill the entire group
-		pgid := h.cmd.Process.Pid
-		if err := syscall.Kill(-pgid, syscall.SIGINT); err != nil {
-			h.dspyLogger.Debug(context.Background(), "Failed to send interrupt signal to process group, killing process")
-			if err := syscall.Kill(-pgid, syscall.SIGKILL); err != nil {
-				errors = append(errors, fmt.Errorf("failed to kill bash MCP server process group: %w", err))
-			}
-		}
-
-		// Wait for the server to exit
-		if err := h.cmd.Wait(); err != nil {
-			// Exit errors are expected when we kill the process
-			h.dspyLogger.Debug(context.Background(), "Bash MCP server exited: %v", err)
-		}
+		h.terminateProcess()
 	}
 
 	// Return the first error if any
@@ -168,4 +155,50 @@ func (h *MCPBashHelper) Close() error {
 		return errors[0]
 	}
 	return nil
+}
+
+// terminateProcess gracefully terminates the bash-mcp-server with timeout fallback to SIGKILL.
+func (h *MCPBashHelper) terminateProcess() {
+	if h.cmd == nil || h.cmd.Process == nil {
+		return
+	}
+
+	pgid := h.cmd.Process.Pid
+
+	// Create a channel to signal when Wait() completes
+	done := make(chan error, 1)
+	go func() {
+		done <- h.cmd.Wait()
+	}()
+
+	// First try SIGTERM (more graceful than SIGINT for cleanup)
+	if err := syscall.Kill(-pgid, syscall.SIGTERM); err != nil {
+		h.dspyLogger.Debug(context.Background(), "Failed to send SIGTERM to process group: %v", err)
+	}
+
+	// Wait up to 2 seconds for graceful shutdown
+	select {
+	case <-done:
+		h.dspyLogger.Debug(context.Background(), "Bash MCP server terminated gracefully")
+		return
+	case <-time.After(2 * time.Second):
+		h.dspyLogger.Debug(context.Background(), "Graceful shutdown timed out, sending SIGKILL")
+	}
+
+	// Force kill if still running
+	if err := syscall.Kill(-pgid, syscall.SIGKILL); err != nil {
+		h.dspyLogger.Debug(context.Background(), "Failed to SIGKILL process group: %v", err)
+		// Also try killing just the process directly
+		if h.cmd.Process != nil {
+			_ = h.cmd.Process.Kill()
+		}
+	}
+
+	// Wait for final cleanup (with short timeout)
+	select {
+	case <-done:
+		h.dspyLogger.Debug(context.Background(), "Bash MCP server killed")
+	case <-time.After(1 * time.Second):
+		h.dspyLogger.Debug(context.Background(), "Process cleanup timed out")
+	}
 }

@@ -232,6 +232,39 @@ func estimatetokens(text string) int {
 	return int(float64(words) * 1.3)
 }
 
+// formatGuidelinesForPrompt converts RAG-retrieved guidelines into a formatted string for the prompt.
+func formatGuidelinesForPrompt(guidelines []*Content) string {
+	if len(guidelines) == 0 {
+		return "Follow Go best practices and code review standards"
+	}
+
+	var sb strings.Builder
+	sb.WriteString("Apply these specific guidelines from the Uber Go Style Guide:\n\n")
+
+	for i, g := range guidelines {
+		if i >= 5 {
+			break // Limit to top 5 guidelines to avoid prompt bloat
+		}
+
+		category := g.Metadata["category"]
+		if category == "" {
+			category = "General"
+		}
+
+		sb.WriteString(fmt.Sprintf("### %s\n", category))
+
+		// Truncate long text to keep prompt size reasonable
+		text := g.Text
+		if len(text) > 500 {
+			text = text[:500] + "..."
+		}
+		sb.WriteString(text)
+		sb.WriteString("\n\n")
+	}
+
+	return sb.String()
+}
+
 func parseHunkHeader(line string) (int, error) {
 	// First, verify this is actually a hunk header
 	if !strings.HasPrefix(line, "@@") {
@@ -984,89 +1017,148 @@ func (a *PRReviewAgent) analyzePatterns(ctx context.Context, tasks []PRReviewTas
 		message := fmt.Sprintf("Processing %s (%d chunks)...", filepath.Base(task.FilePath), len(chunks))
 
 		var totalRepoMatches, totalGuidelineMatches int
-		err = console.WithSpinner(ctx, message, func() error {
-			for i, chunk := range chunks {
-
-				console.Spinner().Suffix = fmt.Sprintf(" (chunk %d/%d) of %s", i+1, len(chunks), task.FilePath)
-				//fileEmbedding, err := llm.CreateEmbedding(ctx, chunk)
-
-				// Use unified embedding model consistent with guidelines and code indexing
-				embeddingModel := os.Getenv("MAESTRO_UNIFIED_EMBEDDING_MODEL")
-				if embeddingModel == "" {
-					embeddingModel = getGuidelineEmbeddingModel()
+		logger := logging.GetLogger()
+		
+		// Phase 1: Extract patterns from all chunks upfront for file-level deduplication
+		// This avoids redundant guideline searches for the same patterns across chunks
+		var allFilePatterns []SimpleCodePattern
+		seenPatterns := make(map[string]bool)
+		enhancer := NewGuidelineSearchEnhancer(logger)
+		
+		for _, chunk := range chunks {
+			chunkPatterns := enhancer.ExtractCodePatterns(ctx, chunk)
+			for _, p := range chunkPatterns {
+				if !seenPatterns[p.Name] {
+					seenPatterns[p.Name] = true
+					allFilePatterns = append(allFilePatterns, p)
 				}
-
-				// Track embedding generation performance if debugging enabled
-				embeddingStartTime := time.Now()
-				fileEmbedding, err := llm.CreateEmbedding(ctx, chunk, core.WithModel(embeddingModel))
-				embeddingTime := time.Since(embeddingStartTime)
-
-				if err != nil {
-					return fmt.Errorf("failed to create file embedding: %w", err)
-				}
-
-				// Log embedding generation debug info if enabled
-				if getEnvBool("MAESTRO_LLM_RESPONSE_DEBUG", false) {
-					// Debug: Log embedding generation time and dimensions
-					fmt.Printf("Embedding generated for chunk in %v, dimensions: %d\n", embeddingTime, len(fileEmbedding.Vector))
-				}
-				// Find similar patterns in the repository with debug logging if enabled
-				if getEnvBool("MAESTRO_RAG_DEBUG_ENABLED", false) {
-					patterns, debugInfo, err := a.rag.FindSimilarWithDebug(ctx, fileEmbedding.Vector, 5, "repository")
-					if err != nil {
-						console.FileError(task.FilePath, fmt.Errorf("failed to find similar patterns: %w", err))
-						continue
-					}
-					repoPatterns = append(repoPatterns, patterns...)
-					fmt.Printf("Repository pattern retrieval: found %d matches in %v\n", debugInfo.ResultCount, debugInfo.RetrievalTime)
-				} else {
-					patterns, err := a.rag.FindSimilar(ctx, fileEmbedding.Vector, 5, "repository")
-					if err != nil {
-						console.FileError(task.FilePath, fmt.Errorf("failed to find similar patterns: %w", err))
-						continue
-					}
-					repoPatterns = append(repoPatterns, patterns...)
-				}
-
-				totalRepoMatches += len(repoPatterns)
-
-				// Find guideline matches with debug logging if enabled
-				var guidelineMatch []*Content
-				if getEnvBool("MAESTRO_RAG_DEBUG_ENABLED", false) {
-					var debugInfo DebugInfo
-					var err error
-					guidelineMatch, debugInfo, err = a.rag.FindSimilarWithDebug(ctx, fileEmbedding.Vector, 20, "guideline")
-					if err != nil {
-						console.FileError(task.FilePath, fmt.Errorf("failed to find guideline matches: %w", err))
-						continue
-					}
-					guidelineMatches = append(guidelineMatches, guidelineMatch...)
-					fmt.Printf("Guideline retrieval: found %d matches in %v\n", debugInfo.ResultCount, debugInfo.RetrievalTime)
-
-					// Add comprehensive guideline match analysis for debugging
-					if ragStore, ok := a.rag.(*sqliteRAGStore); ok {
-						ragStore.logGuidelineMatchAnalysis(ctx, task.FilePath, guidelineMatch, debugInfo)
-					}
-
-					// Add similarity analysis debugging for enhanced processing
-					if getEnvBool("MAESTRO_SIMILARITY_LOGGING", false) {
-						fmt.Printf("Similarity scores: %v\n", debugInfo.SimilarityScores)
-					}
-				} else {
-					var err error
-					guidelineMatch, err = a.rag.FindSimilar(ctx, fileEmbedding.Vector, 20, "guideline")
-					if err != nil {
-						console.FileError(task.FilePath, fmt.Errorf("failed to find guideline matches: %w", err))
-						continue
-					}
-					guidelineMatches = append(guidelineMatches, guidelineMatch...)
-				}
-
-				totalGuidelineMatches += len(guidelineMatch)
-
 			}
+		}
+		
+		logger.Debug(ctx, "File %s: extracted %d unique patterns from %d chunks", 
+			filepath.Base(task.FilePath), len(allFilePatterns), len(chunks))
+		
+		// Phase 2: Do single guideline search for all deduplicated patterns
+		var fileGuidelineMatches []*Content
+		if ragStore, ok := a.rag.(*sqliteRAGStore); ok && len(allFilePatterns) > 0 {
+			guidelineResults, err := ragStore.FindRelevantGuidelines(ctx, allFilePatterns, 10)
+			if err != nil {
+				logger.Warn(ctx, "Failed to use pattern-based guideline search: %v", err)
+			} else {
+				fileGuidelineMatches = ConvertToContent(guidelineResults)
+				
+				if getEnvBool("MAESTRO_RAG_DEBUG_ENABLED", false) {
+					logger.Debug(ctx, "File-level pattern search found %d results", len(guidelineResults))
+					for i, result := range guidelineResults {
+						logger.Debug(ctx, "  %d. %s (score: %.3f, pattern: %s)", 
+							i+1, result.Content.ID, result.FinalScore, result.Pattern)
+					}
+				}
+			}
+		}
+
+		err = console.WithSpinner(ctx, message, func() error {
+			// Parallel chunk processing with worker pool
+			numWorkers := runtime.NumCPU()
+			if numWorkers > len(chunks) {
+				numWorkers = len(chunks)
+			}
+			if numWorkers < 1 {
+				numWorkers = 1
+			}
+
+			type chunkWork struct {
+				index int
+				chunk string
+			}
+			type chunkResult struct {
+				patterns []*Content
+				err      error
+			}
+
+			workChan := make(chan chunkWork, len(chunks))
+			resultChan := make(chan chunkResult, len(chunks))
+			var wg sync.WaitGroup
+			
+			// Track progress atomically
+			var processedCount atomic.Int32
+
+			// Use unified embedding model consistent with guidelines and code indexing
+			embeddingModel := os.Getenv("MAESTRO_UNIFIED_EMBEDDING_MODEL")
+			if embeddingModel == "" {
+				embeddingModel = getGuidelineEmbeddingModel()
+			}
+
+			// Start workers
+			for w := 0; w < numWorkers; w++ {
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					for work := range workChan {
+						embeddingStartTime := time.Now()
+						fileEmbedding, err := llm.CreateEmbedding(ctx, work.chunk, core.WithModel(embeddingModel))
+						embeddingTime := time.Since(embeddingStartTime)
+
+						if err != nil {
+							resultChan <- chunkResult{err: fmt.Errorf("failed to create file embedding: %w", err)}
+							continue
+						}
+
+						if getEnvBool("MAESTRO_LLM_RESPONSE_DEBUG", false) {
+							fmt.Printf("Embedding generated for chunk in %v, dimensions: %d\n", embeddingTime, len(fileEmbedding.Vector))
+						}
+
+						var patterns []*Content
+						if getEnvBool("MAESTRO_RAG_DEBUG_ENABLED", false) {
+							patterns, _, err = a.rag.FindSimilarWithDebug(ctx, fileEmbedding.Vector, 5, "repository")
+						} else {
+							patterns, err = a.rag.FindSimilar(ctx, fileEmbedding.Vector, 5, "repository")
+						}
+
+						if err != nil {
+							resultChan <- chunkResult{err: fmt.Errorf("failed to find similar patterns: %w", err)}
+							continue
+						}
+
+						resultChan <- chunkResult{patterns: patterns}
+						
+						// Update spinner progress
+						processed := processedCount.Add(1)
+						console.Spinner().Suffix = fmt.Sprintf(" (chunk %d/%d) of %s", processed, len(chunks), task.FilePath)
+					}
+				}()
+			}
+
+			// Send work
+			for i, chunk := range chunks {
+				workChan <- chunkWork{index: i, chunk: chunk}
+			}
+			close(workChan)
+
+			// Wait for workers to finish and close result channel
+			go func() {
+				wg.Wait()
+				close(resultChan)
+			}()
+
+			// Collect results
+			for result := range resultChan {
+				if result.err != nil {
+					console.FileError(task.FilePath, result.err)
+					continue
+				}
+				repoPatterns = append(repoPatterns, result.patterns...)
+				totalRepoMatches += len(result.patterns)
+			}
+
 			return nil
 		})
+		
+		// Add file-level guideline matches (already deduplicated and searched once)
+		if fileGuidelineMatches != nil {
+			guidelineMatches = append(guidelineMatches, fileGuidelineMatches...)
+			totalGuidelineMatches = len(fileGuidelineMatches)
+		}
 
 		if err != nil {
 			console.FileError(task.FilePath, fmt.Errorf("failed to analyze patterns: %w", err))
@@ -1419,8 +1511,9 @@ func (a *PRReviewAgent) processWithEnhancedAggregation(ctx context.Context, task
 	}
 
 	// Create enhanced context with patterns and guidelines
+	guidelinesText := formatGuidelinesForPrompt(guidelineMatches)
 	taskContext := map[string]interface{}{
-		"guidelines":         "Follow Go best practices and code review standards",
+		"guidelines":         guidelinesText,
 		"repository_context": "Repository-specific patterns and practices",
 		"review_patterns":    repoPatterns,
 		"guideline_matches":  guidelineMatches,

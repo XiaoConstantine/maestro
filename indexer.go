@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -31,6 +32,139 @@ type LanguageStats struct {
 	Language string
 	Count    int
 	Bytes    int64
+}
+
+// Global limit for concurrent embedding requests across the entire process.
+// This prevents overwhelming the local llamacpp server.
+var (
+	maxEmbeddingConcurrency = getMaxEmbeddingConcurrency()
+	embeddingSemaphore      = make(chan struct{}, maxEmbeddingConcurrency)
+)
+
+// getMaxEmbeddingConcurrency reads an env var override, with a safe default.
+func getMaxEmbeddingConcurrency() int {
+	if v := os.Getenv("MAESTRO_EMBEDDING_CONCURRENCY"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
+	}
+	return 8
+}
+
+// acquireEmbeddingSlot blocks until a global slot is available.
+func acquireEmbeddingSlot() func() {
+	embeddingSemaphore <- struct{}{}
+	return func() { <-embeddingSemaphore }
+}
+
+// embedChunksParallel generates embeddings for all chunks of a file in parallel,
+// with a per-file worker pool plus a global concurrency cap.
+func (ri *RepoIndexer) embedChunksParallel(
+	ctx context.Context,
+	filePath string,
+	chunks []ReviewChunk,
+) ([]*Content, error) {
+	if len(chunks) == 0 {
+		return nil, nil
+	}
+
+	logger := ri.logger
+	llm := core.GetTeacherLLM()
+
+	numChunks := len(chunks)
+
+	contents := make([]*Content, numChunks)
+	embeddingTexts := make([]string, numChunks)
+
+	for i, chunk := range chunks {
+		chunkID := fmt.Sprintf("%s:chunk_%d", filePath, i+1)
+		metadata := map[string]string{
+			"file_path":    filePath,
+			"chunk_number": fmt.Sprintf("%d", i+1),
+			"total_chunks": fmt.Sprintf("%d", numChunks),
+			"start_line":   fmt.Sprintf("%d", chunk.startline),
+			"end_line":     fmt.Sprintf("%d", chunk.endline),
+			"content_type": ContentTypeRepository,
+			"description":  chunk.description,
+		}
+
+		embeddingText := chunk.content
+		if desc := metadata["description"]; desc != "" {
+			embeddingText = fmt.Sprintf("%s\n\n# Description:\n%s", chunk.content, desc)
+		}
+
+		preprocessed, err := preprocessForEmbedding(embeddingText)
+		if err != nil {
+			return nil, fmt.Errorf("failed to preprocess chunk %d: %w", i+1, err)
+		}
+		embeddingTexts[i] = preprocessed
+		contents[i] = &Content{
+			ID:       chunkID,
+			Text:     chunk.content,
+			Metadata: metadata,
+		}
+	}
+
+	const maxWorkersPerFile = 4
+	workerCount := maxWorkersPerFile
+	if numChunks < workerCount {
+		workerCount = numChunks
+	}
+
+	jobs := make(chan int, numChunks)
+	for i := 0; i < numChunks; i++ {
+		jobs <- i
+	}
+	close(jobs)
+
+	embedCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	var wg sync.WaitGroup
+	errCh := make(chan error, 1)
+
+	for w := 0; w < workerCount; w++ {
+		wg.Add(1)
+		go func(workerID int) {
+			defer wg.Done()
+
+			for {
+				select {
+				case <-embedCtx.Done():
+					return
+				case i, ok := <-jobs:
+					if !ok {
+						return
+					}
+
+					release := acquireEmbeddingSlot()
+					embedding, err := llm.CreateEmbedding(embedCtx, embeddingTexts[i])
+					release()
+
+					if err != nil {
+						select {
+						case errCh <- fmt.Errorf("failed to create embedding for %s chunk %d: %w", filePath, i+1, err):
+							logger.Error(ctx, "Embedding worker %d failed: %v", workerID, err)
+							cancel()
+						default:
+						}
+						return
+					}
+
+					contents[i].Embedding = embedding.Vector
+				}
+			}
+		}(w)
+	}
+
+	wg.Wait()
+	close(errCh)
+
+	if err, ok := <-errCh; ok {
+		return nil, err
+	}
+
+	return contents, nil
 }
 
 // NewRepoIndexer creates a new repository indexer.
@@ -245,17 +379,20 @@ func (ri *RepoIndexer) performIncrementalIndexSilent(ctx context.Context, lastIn
 // processChangedFileSilent processes a changed file without console output.
 func (ri *RepoIndexer) processChangedFileSilent(ctx context.Context, file *github.CommitFile) error {
 	logger := ri.logger
-	// Get the file content
 	content, err := ri.githubTools.GetFileContent(ctx, file.GetFilename())
 	if err != nil {
+		errMsg := err.Error()
+		if strings.Contains(errMsg, "file too large") ||
+			strings.Contains(errMsg, "binary or large file") ||
+			strings.Contains(errMsg, "encoding: none") {
+			logger.Warn(ctx, "Skipping file %s: %v", file.GetFilename(), err)
+			return nil
+		}
 		logger.Debug(ctx, "failed to get file content: %v", err)
 		return fmt.Errorf("failed to get file content: %w", err)
 	}
 
-	// Configure chunking
-	config, err := NewChunkConfig(
-		WithMaxBytes(9000),
-	)
+	config, err := NewChunkConfig(WithMaxBytes(9000))
 	if err != nil {
 		logger.Debug(ctx, "failed to create chunk config: %v", err)
 		return fmt.Errorf("failed to create chunk config: %w", err)
@@ -265,46 +402,20 @@ func (ri *RepoIndexer) processChangedFileSilent(ctx context.Context, file *githu
 		"file_type": filepath.Ext(file.GetFilename()),
 		"package":   filepath.Base(filepath.Dir(file.GetFilename())),
 	}
-	// Chunk the file content
+
 	chunks, err := chunkfile(ctx, content, file.GetPatch(), config)
 	if err != nil {
 		logger.Debug(ctx, "failed to chunk file: %v", err)
 		return fmt.Errorf("failed to chunk file: %w", err)
 	}
 
-	// Process each chunk
-	for i, chunk := range chunks {
-		chunkID := fmt.Sprintf("%s:chunk_%d", file.GetFilename(), i+1)
-		metadata := map[string]string{
-			"file_path":    file.GetFilename(),
-			"chunk_number": fmt.Sprintf("%d", i+1),
-			"total_chunks": fmt.Sprintf("%d", len(chunks)),
-			"start_line":   fmt.Sprintf("%d", chunk.startline),
-			"end_line":     fmt.Sprintf("%d", chunk.endline),
-			"content_type": ContentTypeRepository,
-			"description":  chunk.description,
-		}
-		embeddingText := chunk.content
-		if description, exists := metadata["description"]; exists {
-			embeddingText = fmt.Sprintf("%s\n\n# Description:\n%s", chunk.content, description)
-		}
-		// Generate embedding for the chunk
-		llm := core.GetTeacherLLM()
-		embedding, err := llm.CreateEmbedding(ctx, embeddingText)
-		if err != nil {
-			return fmt.Errorf("failed to create embedding: %w", err)
-		}
+	contents, err := ri.embedChunksParallel(ctx, file.GetFilename(), chunks)
+	if err != nil {
+		return err
+	}
 
-		// Store the chunk in RAG store
-		err = ri.ragStore.StoreContent(ctx, &Content{
-			ID:        chunkID,
-			Text:      chunk.content,
-			Embedding: embedding.Vector,
-			Metadata:  metadata,
-		})
-		if err != nil {
-			return fmt.Errorf("failed to store content: %w", err)
-		}
+	if err := ri.ragStore.StoreContents(ctx, contents); err != nil {
+		return fmt.Errorf("failed to store contents: %w", err)
 	}
 
 	return nil
@@ -414,13 +525,33 @@ func (ri *RepoIndexer) processFile(ctx context.Context, file *github.RepositoryC
 		return nil
 	}
 	content, err := ri.githubTools.GetFileContent(ctx, file.GetPath())
-
 	if err != nil {
+		errMsg := err.Error()
+		if strings.Contains(errMsg, "file too large") ||
+			strings.Contains(errMsg, "binary or large file") ||
+			strings.Contains(errMsg, "encoding: none") {
+			ri.logger.Warn(ctx, "Skipping file %s: %v", file.GetPath(), err)
+			return nil
+		}
 		return fmt.Errorf("failed to get file content: %w", err)
 	}
 
-	// Configure chunking
-	config, err := NewChunkConfig(WithMaxBytes(9000))
+	ext := filepath.Ext(file.GetPath())
+	var config *ChunkConfig
+
+	if ext == ".md" || ext == ".markdown" {
+		config, err = NewChunkConfig(
+			WithMaxBytes(32000),
+			WithMaxTokens(8000),
+			WithGenerateDescriptions(false),
+		)
+	} else {
+		// Disable LLM descriptions - use AST-based pseudo-descriptions instead
+		config, err = NewChunkConfig(
+			WithMaxBytes(9000),
+			WithGenerateDescriptions(false),
+		)
+	}
 	if err != nil {
 		return fmt.Errorf("failed to create chunk config: %w", err)
 	}
@@ -429,58 +560,25 @@ func (ri *RepoIndexer) processFile(ctx context.Context, file *github.RepositoryC
 	}
 	config.fileMetadata = map[string]interface{}{
 		"file_path": file.GetPath(),
-		"file_type": filepath.Ext(file.GetPath()),
+		"file_type": ext,
 		"package":   filepath.Base(filepath.Dir(file.GetPath())),
 	}
 
-	// Chunk the file content
 	chunks, err := chunkfile(ctx, content, "", config)
 	if err != nil {
 		return fmt.Errorf("failed to chunk file: %w", err)
 	}
 
-	// Process each chunk
-	for i, chunk := range chunks {
-		// Generate unique ID for the chunk
-		chunkID := fmt.Sprintf("%s:chunk_%d", file.GetPath(), i+1)
-
-		// Create metadata
-		metadata := map[string]string{
-			"file_path":    file.GetPath(),
-			"chunk_number": fmt.Sprintf("%d", i+1),
-			"total_chunks": fmt.Sprintf("%d", len(chunks)),
-			"start_line":   fmt.Sprintf("%d", chunk.startline),
-			"end_line":     fmt.Sprintf("%d", chunk.endline),
-			"content_type": ContentTypeRepository,
-		}
-
-		embeddingContent, err := preprocessForEmbedding(chunk.content)
-		if err != nil {
-			return fmt.Errorf("failed to preprocess chunk for embedding: %w", err)
-		}
-		// Generate embedding for the chunk using the default LLM
-		llm := core.GetTeacherLLM()
-		embedding, err := llm.CreateEmbedding(ctx, embeddingContent)
-
-		if err != nil {
-			return fmt.Errorf("failed to create embedding: %w", err)
-		}
-
-		// Store the chunk in RAG store
-		err = ri.ragStore.StoreContent(ctx, &Content{
-			ID:        chunkID,
-			Text:      chunk.content,
-			Embedding: embedding.Vector,
-			Metadata:  metadata,
-		})
-		if err != nil {
-			return fmt.Errorf("failed to store content: %w", err)
-		}
-
-		ri.logger.Debug(ctx, "Indexed chunk %d/%d for file %s",
-			i+1, len(chunks), file.GetPath())
+	contents, err := ri.embedChunksParallel(ctx, file.GetPath(), chunks)
+	if err != nil {
+		return err
 	}
-	ri.logger.Debug(ctx, "Finish index file: %s", file.GetPath())
+
+	if err := ri.ragStore.StoreContents(ctx, contents); err != nil {
+		return fmt.Errorf("failed to store contents: %w", err)
+	}
+
+	ri.logger.Debug(ctx, "Indexed %d chunks for file %s", len(chunks), file.GetPath())
 
 	return nil
 }
@@ -604,69 +702,54 @@ func (ri *RepoIndexer) processChangedFiles(ctx context.Context, changes []*githu
 	return nil
 }
 
-// Add this to indexer.go.
+// processChangedFile processes a single changed file and stores its chunks.
 func (ri *RepoIndexer) processChangedFile(ctx context.Context, file *github.CommitFile, dbPath string) error {
 	logger := logging.GetLogger()
-	// Get the file content
 	content, err := ri.githubTools.GetFileContent(ctx, file.GetFilename())
 	if err != nil {
 		logger.Debug(ctx, "failed to get file content: %v", err)
 		return fmt.Errorf("failed to get file content: %w", err)
 	}
 
-	// Configure chunking
-	config, err := NewChunkConfig(
-		WithMaxBytes(9000),
-	)
+	ext := filepath.Ext(file.GetFilename())
+	var config *ChunkConfig
+
+	if ext == ".md" || ext == ".markdown" {
+		config, err = NewChunkConfig(
+			WithMaxBytes(32000),
+			WithMaxTokens(8000),
+			WithGenerateDescriptions(false),
+		)
+	} else {
+		// Disable LLM descriptions - use AST-based pseudo-descriptions instead
+		config, err = NewChunkConfig(
+			WithMaxBytes(9000),
+			WithGenerateDescriptions(false),
+		)
+	}
 	if err != nil {
 		logger.Debug(ctx, "failed to create chunk config: %v", err)
 		return fmt.Errorf("failed to create chunk config: %w", err)
 	}
 	config.fileMetadata = map[string]interface{}{
 		"file_path": file.GetFilename(),
-		"file_type": filepath.Ext(file.GetFilename()),
+		"file_type": ext,
 		"package":   filepath.Base(filepath.Dir(file.GetFilename())),
 	}
-	// Chunk the file content
+
 	chunks, err := chunkfile(ctx, content, file.GetPatch(), config)
 	if err != nil {
 		logger.Debug(ctx, "failed to chunk file: %v", err)
 		return fmt.Errorf("failed to chunk file: %w", err)
 	}
 
-	// Process each chunk
-	for i, chunk := range chunks {
-		chunkID := fmt.Sprintf("%s:chunk_%d", file.GetFilename(), i+1)
-		metadata := map[string]string{
-			"file_path":    file.GetFilename(),
-			"chunk_number": fmt.Sprintf("%d", i+1),
-			"total_chunks": fmt.Sprintf("%d", len(chunks)),
-			"start_line":   fmt.Sprintf("%d", chunk.startline),
-			"end_line":     fmt.Sprintf("%d", chunk.endline),
-			"content_type": ContentTypeRepository,
-			"description":  chunk.description,
-		}
-		embeddingText := chunk.content
-		if description, exists := metadata["description"]; exists {
-			embeddingText = fmt.Sprintf("%s\n\n# Description:\n%s", chunk.content, description)
-		}
-		// Generate embedding for the chunk
-		llm := core.GetTeacherLLM()
-		embedding, err := llm.CreateEmbedding(ctx, embeddingText)
-		if err != nil {
-			return fmt.Errorf("failed to create embedding: %w", err)
-		}
+	contents, err := ri.embedChunksParallel(ctx, file.GetFilename(), chunks)
+	if err != nil {
+		return err
+	}
 
-		// Store the chunk in RAG store
-		err = ri.ragStore.StoreContent(ctx, &Content{
-			ID:        chunkID,
-			Text:      chunk.content,
-			Embedding: embedding.Vector,
-			Metadata:  metadata,
-		})
-		if err != nil {
-			return fmt.Errorf("failed to store content: %w", err)
-		}
+	if err := ri.ragStore.StoreContents(ctx, contents); err != nil {
+		return fmt.Errorf("failed to store contents: %w", err)
 	}
 
 	return nil

@@ -4,9 +4,12 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/signal"
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
+	"syscall"
 	"time"
 
 	"github.com/AlecAivazis/survey/v2"
@@ -24,11 +27,51 @@ import (
 	"path/filepath"
 
 	sqlite_vec "github.com/asg017/sqlite-vec-go-bindings/cgo"
-	
+
 	"github.com/XiaoConstantine/maestro/terminal"
 
 	_ "github.com/mattn/go-sqlite3"
 )
+
+// cleanupRegistry tracks resources that need cleanup on shutdown.
+var cleanupRegistry = struct {
+	sync.Mutex
+	funcs []func()
+}{}
+
+// registerCleanup adds a cleanup function to be called on shutdown.
+func registerCleanup(fn func()) {
+	cleanupRegistry.Lock()
+	defer cleanupRegistry.Unlock()
+	cleanupRegistry.funcs = append(cleanupRegistry.funcs, fn)
+}
+
+// runCleanup executes all registered cleanup functions.
+func runCleanup() {
+	cleanupRegistry.Lock()
+	defer cleanupRegistry.Unlock()
+	for _, fn := range cleanupRegistry.funcs {
+		fn()
+	}
+	cleanupRegistry.funcs = nil
+}
+
+// setupSignalHandler sets up graceful shutdown on SIGINT/SIGTERM.
+func setupSignalHandler() {
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+
+	go func() {
+		sig := <-sigChan
+		logger := logging.GetLogger()
+		logger.Info(context.Background(), "Received signal %v, shutting down...", sig)
+
+		// Run all cleanup functions
+		runCleanup()
+
+		os.Exit(0)
+	}()
+}
 
 type config struct {
 	apiKey        string
@@ -619,6 +662,9 @@ func main() {
 	cfg := &config{}
 	sqlite_vec.Auto()
 
+	// Set up signal handler for graceful shutdown
+	setupSignalHandler()
+
 	// Initialize enhanced DSPy-Go features
 	InitializeEnhancedFeatures()
 	// Create root command
@@ -769,7 +815,11 @@ func runCLIWithoutBanner(cfg *config) error {
 		mcpHelper = nil
 	} else {
 		mcpHelper = helper
-		// Ensure cleanup on exit
+		// Register for cleanup on signal (Ctrl+C) and defer for normal exit
+		registerCleanup(func() {
+			logger.Debug(context.Background(), "Signal handler: cleaning up MCP bash helper")
+			mcpHelper.Close()
+		})
 		defer mcpHelper.Close()
 		logger.Debug(ctx, "MCP bash helper initialized successfully")
 	}
@@ -1103,7 +1153,10 @@ Examples:
 		mcpHelper = nil
 	} else {
 		mcpHelper = helper
-		// Ensure cleanup on exit
+		// Register for cleanup on signal (Ctrl+C) and defer for normal exit
+		registerCleanup(func() {
+			mcpHelper.Close()
+		})
 		defer mcpHelper.Close()
 	}
 

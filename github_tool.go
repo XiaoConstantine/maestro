@@ -356,6 +356,17 @@ func (g *GitHubTools) GetFileContent(ctx context.Context, filePath string) (stri
 		return "", fmt.Errorf("no content available for %s", filePath)
 	}
 
+	// Check file size - GitHub Contents API has 1MB limit for base64 content
+	// Files larger than this will have encoding "none" and fail to decode
+	if content.Size != nil && *content.Size > 1024*1024 {
+		return "", fmt.Errorf("file too large (%d bytes), skipping binary file: %s", *content.Size, filePath)
+	}
+
+	// Check encoding - "none" indicates a large/binary file that can't be decoded
+	if content.Encoding != nil && *content.Encoding == "none" {
+		return "", fmt.Errorf("binary or large file (encoding: none), skipping: %s", filePath)
+	}
+
 	// Decode the content
 	fileContent, err := content.GetContent()
 	if err != nil {
@@ -758,6 +769,8 @@ func shouldSkipFile(filename string) bool {
 	}
 
 	// 4. Check regex patterns (slower but handles complex cases)
+	// Note: Binary/large file detection is handled at the API level in GetFileContent()
+	// by checking file size (>1MB) and encoding ("none")
 	for _, pattern := range rules.regexPatterns {
 		if pattern.MatchString(filename) {
 			return true

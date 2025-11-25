@@ -93,17 +93,22 @@ func (mve *MultiVectorEmbedding) ProcessMultiVectorContent(ctx context.Context, 
 
 // createDocumentEmbedding creates a document-level embedding with full context.
 func (mve *MultiVectorEmbedding) createDocumentEmbedding(ctx context.Context, text string) ([]float32, error) {
-	// For now, return a dummy embedding vector
-	// TODO: Implement actual embedding generation when API is available
-	mve.log.Debug(ctx, "Creating dummy document embedding for text length: %d", len(text))
-
-	// Return a 768-dimension dummy embedding (typical for text-embedding models)
-	embedding := make([]float32, 768)
-	for i := range embedding {
-		embedding[i] = 0.1 // Small positive values
+	router := GetEmbeddingRouter()
+	
+	// Truncate text to embedding model token limit (typically 8192 tokens ≈ 32k chars)
+	truncated := mve.truncateText(text, 30000)
+	if truncated == "" {
+		truncated = text
 	}
-
-	return embedding, nil
+	
+	mve.log.Debug(ctx, "Creating document embedding for text length: %d (truncated to %d)", len(text), len(truncated))
+	
+	embedding, err := router.CreateEmbedding(ctx, truncated, WithBatch(true), WithModel(mve.model))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create document embedding: %w", err)
+	}
+	
+	return embedding.Vector, nil
 }
 
 // createChunkEmbeddings creates chunk-level embeddings with overlapping windows.
@@ -112,23 +117,23 @@ func (mve *MultiVectorEmbedding) createChunkEmbeddings(ctx context.Context, text
 	chunks := mve.createOverlappingChunks(text, mve.chunkSize, mve.chunkSize/4) // 25% overlap
 
 	var chunkEmbeddings []ChunkLevel
+	router := GetEmbeddingRouter()
 
 	for i, chunk := range chunks {
-		// Create dummy embedding for each chunk
-		// TODO: Implement actual embedding generation when API is available
-		mve.log.Debug(ctx, "Creating dummy embedding for chunk %d", i)
+		mve.log.Debug(ctx, "Creating embedding for chunk %d/%d", i+1, len(chunks))
 
-		// Create a dummy embedding with slight variation per chunk
-		embedding := make([]float32, 768)
-		for j := range embedding {
-			embedding[j] = 0.1 + float32(i)*0.01 // Slight variation per chunk
+		// Create real embedding for each chunk (batch operation)
+		embedding, err := router.CreateEmbedding(ctx, chunk.Text, WithBatch(true), WithModel(mve.model))
+		if err != nil {
+			mve.log.Warn(ctx, "Failed to create embedding for chunk %d: %v", i, err)
+			continue
 		}
 
 		chunkLevel := ChunkLevel{
 			Text:      chunk.Text,
 			StartPos:  chunk.StartPos,
 			EndPos:    chunk.EndPos,
-			Embedding: embedding,
+			Embedding: embedding.Vector,
 			Tokens:    []TokenLevel{}, // Could be enhanced with token-level if needed
 		}
 

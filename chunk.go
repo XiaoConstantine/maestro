@@ -10,8 +10,10 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/XiaoConstantine/dspy-go/pkg/core"
+	"github.com/XiaoConstantine/dspy-go/pkg/llms"
 	"github.com/XiaoConstantine/dspy-go/pkg/logging"
 )
 
@@ -135,6 +137,15 @@ func WithMaxBytes(bytes int) ChunkConfigOption {
 func WithGenerateDescriptions(generate bool) ChunkConfigOption {
 	return func(c *ChunkConfig) {
 		c.GenerateDescriptions = generate
+	}
+}
+
+func WithFilePath(path string) ChunkConfigOption {
+	return func(c *ChunkConfig) {
+		if c.fileMetadata == nil {
+			c.fileMetadata = make(map[string]interface{})
+		}
+		c.fileMetadata["file_path"] = path
 	}
 }
 
@@ -270,15 +281,51 @@ func chunkfile(ctx context.Context, content string, changes string, config *Chun
 	// Extract relevant changes
 	for i := range finalChunks {
 		finalChunks[i].changes = ExtractRelevantChanges(changes, finalChunks[i].startline, finalChunks[i].endline)
-		if config.GenerateDescriptions {
+	}
+
+	// Generate LLM descriptions in parallel if explicitly enabled via env var
+	// By default, we use zero-cost AST-based pseudo-descriptions instead (set in chunkByFunction/chunkBySize)
+	// Set MAESTRO_LLM_CHUNK_DESCRIPTIONS=true to enable expensive LLM-based descriptions
+	if config.GenerateDescriptions && isLLMChunkDescriptionsEnabled() {
+		type descResult struct {
+			idx  int
+			desc string
+			err  error
+		}
+
+		var wg sync.WaitGroup
+		descChan := make(chan descResult, len(finalChunks))
+		semaphore := make(chan struct{}, 8) // Max 8 concurrent descriptions
+
+		for i := range finalChunks {
 			if estimatetokens(finalChunks[i].content) < 1000 {
-				description, err := generateChunkDescription(ctx, finalChunks[i].content)
-				if err != nil {
-					logger.Warn(ctx, "Failed to generate description: %v", err)
-				} else {
-					logger.Debug(ctx, "Generated description: %v for chunk: %d", description, i)
-					finalChunks[i].description = description
-				}
+				wg.Add(1)
+				go func(idx int, content string) {
+					defer wg.Done()
+
+					// Acquire semaphore
+					semaphore <- struct{}{}
+					defer func() { <-semaphore }()
+
+					description, err := generateChunkDescription(ctx, content)
+					descChan <- descResult{idx: idx, desc: description, err: err}
+				}(i, finalChunks[i].content)
+			}
+		}
+
+		// Close channel when all goroutines complete
+		go func() {
+			wg.Wait()
+			close(descChan)
+		}()
+
+		// Collect results
+		for result := range descChan {
+			if result.err != nil {
+				logger.Warn(ctx, "Failed to generate description: %v", result.err)
+			} else {
+				logger.Debug(ctx, "Generated description: %v for chunk: %d", result.desc, result.idx)
+				finalChunks[result.idx].description = result.desc
 			}
 		}
 	}
@@ -288,6 +335,7 @@ func chunkfile(ctx context.Context, content string, changes string, config *Chun
 }
 
 // chunkByFunction splits code at function boundaries using AST parsing.
+// It also generates AST-based pseudo-descriptions for each chunk (zero LLM cost).
 func chunkByFunction(content string, config *ChunkConfig) ([]ReviewChunk, error) {
 	// Create a file set and parse the content
 	fset := token.NewFileSet()
@@ -298,6 +346,11 @@ func chunkByFunction(content string, config *ChunkConfig) ([]ReviewChunk, error)
 		return chunkBySize(content, config)
 	}
 	var chunks []ReviewChunk
+
+	// Extract file metadata for pseudo-descriptions
+	filePath, _ := config.fileMetadata["file_path"].(string)
+	pkgName := file.Name.Name
+	baseName := filepath.Base(filePath)
 
 	// Process function declarations with their associated comments
 	for _, decl := range file.Decls {
@@ -324,10 +377,13 @@ func chunkByFunction(content string, config *ChunkConfig) ([]ReviewChunk, error)
 				endPos.Line,
 				content,
 				config,
-				config.fileMetadata["file_path"].(string),
+				filePath,
 				0, // Will be updated later
 				"",
 			)
+
+			// Generate AST-based pseudo-description (zero LLM cost)
+			chunk.description = buildFuncPseudoDescription(baseName, pkgName, d)
 			chunks = append(chunks, chunk)
 
 		case *ast.GenDecl:
@@ -359,10 +415,13 @@ func chunkByFunction(content string, config *ChunkConfig) ([]ReviewChunk, error)
 							endPos.Line,
 							content,
 							config,
-							config.fileMetadata["file_path"].(string),
+							filePath,
 							0,
 							"",
 						)
+
+						// Generate AST-based pseudo-description for types
+						chunk.description = buildTypePseudoDescription(baseName, pkgName, ts, d.Doc)
 						chunks = append(chunks, chunk)
 					}
 				}
@@ -374,6 +433,197 @@ func chunkByFunction(content string, config *ChunkConfig) ([]ReviewChunk, error)
 	}
 
 	return chunks, nil
+}
+
+// buildFuncPseudoDescription creates a pseudo-description from AST function info.
+// This provides semantic context for embeddings without any LLM calls.
+func buildFuncPseudoDescription(fileName, pkgName string, fn *ast.FuncDecl) string {
+	var b strings.Builder
+
+	b.WriteString("Go function ")
+
+	// Add receiver if present (method vs function)
+	if fn.Recv != nil && len(fn.Recv.List) > 0 {
+		recv := fn.Recv.List[0]
+		recvType := formatExprType(recv.Type)
+		b.WriteString("(")
+		b.WriteString(recvType)
+		b.WriteString(").")
+	}
+
+	b.WriteString(fn.Name.Name)
+	b.WriteString(" in package ")
+	b.WriteString(pkgName)
+	b.WriteString(" (")
+	b.WriteString(fileName)
+	b.WriteString(")")
+
+	// Add parameter hints
+	if fn.Type.Params != nil && len(fn.Type.Params.List) > 0 {
+		b.WriteString(". Parameters: ")
+		var params []string
+		for _, p := range fn.Type.Params.List {
+			typeName := formatExprType(p.Type)
+			for _, name := range p.Names {
+				params = append(params, name.Name+" "+typeName)
+			}
+			if len(p.Names) == 0 {
+				params = append(params, typeName)
+			}
+		}
+		b.WriteString(strings.Join(params, ", "))
+	}
+
+	// Add return type hints
+	if fn.Type.Results != nil && len(fn.Type.Results.List) > 0 {
+		b.WriteString(". Returns: ")
+		var results []string
+		for _, r := range fn.Type.Results.List {
+			results = append(results, formatExprType(r.Type))
+		}
+		b.WriteString(strings.Join(results, ", "))
+	}
+
+	// Add doc comment snippet if present
+	if fn.Doc != nil {
+		doc := strings.TrimSpace(fn.Doc.Text())
+		if doc != "" {
+			// Truncate long comments
+			if len(doc) > 200 {
+				doc = doc[:200] + "..."
+			}
+			b.WriteString(". ")
+			b.WriteString(doc)
+		}
+	}
+
+	return b.String()
+}
+
+// buildTypePseudoDescription creates a pseudo-description from AST type info.
+func buildTypePseudoDescription(fileName, pkgName string, ts *ast.TypeSpec, doc *ast.CommentGroup) string {
+	var b strings.Builder
+
+	// Determine type kind
+	var kind string
+	switch ts.Type.(type) {
+	case *ast.StructType:
+		kind = "struct"
+	case *ast.InterfaceType:
+		kind = "interface"
+	case *ast.ArrayType:
+		kind = "array type"
+	case *ast.MapType:
+		kind = "map type"
+	case *ast.FuncType:
+		kind = "function type"
+	default:
+		kind = "type"
+	}
+
+	b.WriteString("Go ")
+	b.WriteString(kind)
+	b.WriteString(" ")
+	b.WriteString(ts.Name.Name)
+	b.WriteString(" in package ")
+	b.WriteString(pkgName)
+	b.WriteString(" (")
+	b.WriteString(fileName)
+	b.WriteString(")")
+
+	// Add doc comment snippet
+	docGroup := ts.Doc
+	if docGroup == nil {
+		docGroup = doc
+	}
+	if docGroup != nil {
+		docText := strings.TrimSpace(docGroup.Text())
+		if docText != "" {
+			if len(docText) > 200 {
+				docText = docText[:200] + "..."
+			}
+			b.WriteString(". ")
+			b.WriteString(docText)
+		}
+	}
+
+	return b.String()
+}
+
+// formatExprType converts an AST expression to a readable type string.
+func formatExprType(expr ast.Expr) string {
+	switch t := expr.(type) {
+	case *ast.Ident:
+		return t.Name
+	case *ast.StarExpr:
+		return "*" + formatExprType(t.X)
+	case *ast.SelectorExpr:
+		return formatExprType(t.X) + "." + t.Sel.Name
+	case *ast.ArrayType:
+		return "[]" + formatExprType(t.Elt)
+	case *ast.MapType:
+		return "map[" + formatExprType(t.Key) + "]" + formatExprType(t.Value)
+	case *ast.InterfaceType:
+		return "interface{}"
+	case *ast.FuncType:
+		return "func"
+	case *ast.ChanType:
+		return "chan " + formatExprType(t.Value)
+	case *ast.Ellipsis:
+		return "..." + formatExprType(t.Elt)
+	default:
+		return "any"
+	}
+}
+
+// buildSizeBasedPseudoDescription creates a simple pseudo-description for non-AST chunks.
+// Uses regex to detect type/func declarations within the chunk.
+func buildSizeBasedPseudoDescription(filePath string, startLine, endLine int, content string) string {
+	baseName := filepath.Base(filePath)
+
+	// Try to detect what's in the chunk using simple patterns
+	var hints []string
+
+	// Look for function declarations
+	if strings.Contains(content, "func ") {
+		// Count functions
+		funcCount := strings.Count(content, "\nfunc ") + strings.Count(content, "func ")
+		if funcCount > 0 {
+			hints = append(hints, fmt.Sprintf("%d function(s)", funcCount))
+		}
+	}
+
+	// Look for type declarations
+	if strings.Contains(content, "type ") {
+		if strings.Contains(content, "struct {") || strings.Contains(content, "struct{") {
+			hints = append(hints, "struct definition(s)")
+		}
+		if strings.Contains(content, "interface {") || strings.Contains(content, "interface{") {
+			hints = append(hints, "interface definition(s)")
+		}
+	}
+
+	// Look for constants
+	if strings.Contains(content, "const ") || strings.Contains(content, "const(") {
+		hints = append(hints, "constants")
+	}
+
+	// Look for imports
+	if strings.Contains(content, "import ") || strings.Contains(content, "import(") {
+		hints = append(hints, "imports")
+	}
+
+	var b strings.Builder
+	b.WriteString("Go code from ")
+	b.WriteString(baseName)
+	b.WriteString(fmt.Sprintf(" (lines %d-%d)", startLine, endLine))
+
+	if len(hints) > 0 {
+		b.WriteString(". Contains: ")
+		b.WriteString(strings.Join(hints, ", "))
+	}
+
+	return b.String()
 }
 
 // chunkByLogic attempts to split at logical boundaries like classes, blocks, imports.
@@ -488,6 +738,9 @@ func chunkBySize(content string, config *ChunkConfig) ([]ReviewChunk, error) {
 	currentBytes := 0
 	chunkStartLine := 1
 
+	// Determine if this is a Go file for pseudo-descriptions
+	isGoFile := strings.HasSuffix(filepath, ".go")
+
 	for i, line := range lines {
 		lineTokens := estimatetokens(line)
 		lineBytes := len(line)
@@ -506,6 +759,12 @@ func chunkBySize(content string, config *ChunkConfig) ([]ReviewChunk, error) {
 				estimatedChunks,
 				changes,
 			)
+
+			// Add pseudo-description for Go files (zero LLM cost)
+			if isGoFile {
+				chunk.description = buildSizeBasedPseudoDescription(filepath, chunkStartLine, i, chunkContent)
+			}
+
 			chunks = append(chunks, chunk)
 
 			// Start new chunk
@@ -532,6 +791,12 @@ func chunkBySize(content string, config *ChunkConfig) ([]ReviewChunk, error) {
 			estimatedChunks,
 			changes,
 		)
+
+		// Add pseudo-description for Go files (zero LLM cost)
+		if isGoFile {
+			chunk.description = buildSizeBasedPseudoDescription(filepath, chunkStartLine, len(lines), chunkContent)
+		}
+
 		chunks = append(chunks, chunk)
 	}
 	logging.GetLogger().Debug(context.Background(), "for file: %s, created: %d chunks", filepath, len(chunks))
@@ -619,7 +884,22 @@ func createCompleteChunk(
 
 // generateChunkDescription creates a natural language description of a code chunk.
 func generateChunkDescription(ctx context.Context, chunk string) (string, error) {
-	llm := core.GetDefaultLLM()
+	logger := logging.GetLogger()
+
+	var llm core.LLM
+
+	if isDescriptionLocalEnabled() {
+		cachedLLM, err := getDescriptionLLM(ctx)
+		if err != nil || cachedLLM == nil {
+			logger.Debug(ctx, "Local description LLM unavailable, using cloud model")
+			llm = core.GetDefaultLLM()
+		} else {
+			llm = cachedLLM
+		}
+	} else {
+		llm = core.GetDefaultLLM()
+	}
+
 	prompt := fmt.Sprintf(`Generate a concise natural language description of what this Go code does:
 
 %s
@@ -627,13 +907,96 @@ func generateChunkDescription(ctx context.Context, chunk string) (string, error)
 Description:`, chunk)
 
 	resp, err := llm.Generate(ctx, prompt, core.WithMaxTokens(100),
-		core.WithTemperature(0.6))
+		core.WithTemperature(0.3))
 
 	if err != nil {
 		return "", fmt.Errorf("failed to generate description: %w", err)
 	}
 
 	return strings.TrimSpace(resp.Content), nil
+}
+
+// isDescriptionLocalEnabled checks if local description generation is enabled.
+func isDescriptionLocalEnabled() bool {
+	enabled := os.Getenv("MAESTRO_LOCAL_DESCRIPTION_ENABLED")
+	return enabled == "true" || enabled == "1"
+}
+
+// isLLMChunkDescriptionsEnabled checks if LLM-based chunk descriptions are enabled.
+// By default, this is OFF - we use zero-cost AST-based pseudo-descriptions instead.
+// Set MAESTRO_LLM_CHUNK_DESCRIPTIONS=true to enable expensive LLM-based descriptions.
+func isLLMChunkDescriptionsEnabled() bool {
+	enabled := os.Getenv("MAESTRO_LLM_CHUNK_DESCRIPTIONS")
+	return enabled == "true" || enabled == "1"
+}
+
+var (
+	descriptionLLMOnce     sync.Once
+	cachedDescriptionLLM   core.LLM
+	descriptionLLMInitErr  error
+)
+
+// getDescriptionLLM returns a cached LLM instance for description generation.
+// Uses sync.Once to ensure initialization happens only once.
+func getDescriptionLLM(ctx context.Context) (core.LLM, error) {
+	descriptionLLMOnce.Do(func() {
+		logger := logging.GetLogger()
+		cachedDescriptionLLM = initializeDescriptionLLM(ctx, logger)
+		if cachedDescriptionLLM == nil {
+			descriptionLLMInitErr = fmt.Errorf("failed to initialize description LLM")
+		}
+	})
+	return cachedDescriptionLLM, descriptionLLMInitErr
+}
+
+// initializeDescriptionLLM creates a local small LLM for description generation.
+// Returns nil if local descriptions are disabled or unavailable.
+func initializeDescriptionLLM(ctx context.Context, logger *logging.Logger) core.LLM {
+	model := os.Getenv("MAESTRO_LOCAL_DESCRIPTION_MODEL")
+	if model == "" {
+		model = "qwen2.5:1.5b"
+	}
+
+	provider := os.Getenv("MAESTRO_LOCAL_DESCRIPTION_PROVIDER")
+	if provider == "" {
+		provider = "ollama"
+	}
+
+	endpoint := os.Getenv("MAESTRO_LOCAL_DESCRIPTION_ENDPOINT")
+	if endpoint == "" {
+		endpoint = "http://localhost:11434"
+	}
+
+	logger.Info(ctx, "Initializing cached description LLM (once): model=%s, provider=%s, endpoint=%s",
+		model, provider, endpoint)
+
+	var llm core.LLM
+	var err error
+
+	switch provider {
+	case "ollama":
+		llm, err = llms.NewOllamaLLM(
+			core.ModelID(model),
+			llms.WithBaseURL(endpoint),
+		)
+		if err != nil {
+			logger.Warn(ctx, "Failed to initialize Ollama LLM: %v", err)
+			return nil
+		}
+		logger.Info(ctx, "Successfully initialized Ollama description LLM at %s with model %s", endpoint, model)
+		return llm
+	case "llamacpp":
+		llm, err = llms.NewLlamacppLLM(endpoint)
+		if err != nil {
+			logger.Warn(ctx, "Failed to initialize llamacpp LLM: %v", err)
+			return nil
+		}
+		logger.Info(ctx, "Successfully initialized llamacpp description LLM at %s", endpoint)
+		return llm
+	default:
+		logger.Warn(ctx, "Unknown description LLM provider: %s", provider)
+		return nil
+	}
 }
 
 // getChunkContextLines returns the number of context lines from environment variable or default.

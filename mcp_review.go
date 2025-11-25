@@ -153,11 +153,9 @@ func parseDiffOutput(diffOutput string) map[string]FileDiffInfo {
 				}
 			}
 
-			// Extract filename from diff --git a/file b/file
-			parts := strings.Fields(line)
-			if len(parts) >= 4 {
-				currentFile = strings.TrimPrefix(parts[3], "b/")
-			}
+			// Extract filename from "diff --git a/path b/path"
+			// Find the " b/" marker which separates the two paths
+			currentFile = extractFilenameFromDiffLine(line)
 			currentPatch.Reset()
 			additions, deletions = 0, 0
 			status = "modified"
@@ -189,32 +187,50 @@ func parseDiffOutput(diffOutput string) map[string]FileDiffInfo {
 	return fileDiffs
 }
 
+// extractFilenameFromDiffLine extracts the destination filename from a diff --git line.
+// Format: "diff --git a/path/to/file b/path/to/file"
+// For renames: "diff --git a/old/path b/new/path"
+// We want the "b/" path (destination file).
+func extractFilenameFromDiffLine(line string) string {
+	// Find " b/" which marks the start of the destination path
+	bMarker := " b/"
+	idx := strings.LastIndex(line, bMarker)
+	if idx != -1 {
+		return line[idx+len(bMarker):]
+	}
+
+	// Fallback: try splitting on spaces (original logic)
+	parts := strings.Fields(line)
+	if len(parts) >= 4 {
+		return strings.TrimPrefix(parts[3], "b/")
+	}
+
+	return ""
+}
+
 // getFileContentWithMCP fetches file content from GitHub at a specific ref using gh api.
+// Uses --template to extract only the content field, avoiding JSON parsing issues
+// where the MCP transport may mangle newlines inside JSON strings.
 func getFileContentWithMCP(ctx context.Context, bashHelper *MCPBashHelper, owner, repo, ref, filename string) (string, error) {
-	// Build gh api path; filename should retain slashes, only ref needs query escaping
 	refEscaped := url.QueryEscape(ref)
 	apiPath := fmt.Sprintf("repos/%s/%s/contents/%s?ref=%s", owner, repo, filename, refEscaped)
-	resp, err := bashHelper.ExecuteGHCommand(ctx, "api", apiPath)
+
+	resp, err := bashHelper.ExecuteGHCommand(ctx, "api", apiPath, "--template", "{{.content}}")
 	if err != nil {
 		return "", fmt.Errorf("gh api failed for %s: %w", filename, err)
 	}
 
-	var payload struct {
-		Content  string `json:"content"`
-		Encoding string `json:"encoding"`
-	}
-	if err := json.Unmarshal([]byte(resp), &payload); err != nil {
-		return "", fmt.Errorf("failed to parse gh api response for %s: %w", filename, err)
-	}
-	if strings.TrimSpace(payload.Content) == "" {
+	trimmed := strings.TrimSpace(resp)
+	if trimmed == "" {
 		return "", fmt.Errorf("empty content for %s at ref %s", filename, ref)
 	}
-	// GitHub returns base64 with newlines; strip and decode
-	cleaned := strings.ReplaceAll(payload.Content, "\n", "")
+
+	cleaned := strings.ReplaceAll(trimmed, "\n", "")
 	decoded, err := base64.StdEncoding.DecodeString(cleaned)
 	if err != nil {
 		return "", fmt.Errorf("failed to decode content for %s: %w", filename, err)
 	}
+
 	return string(decoded), nil
 }
 

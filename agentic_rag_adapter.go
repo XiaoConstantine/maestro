@@ -328,6 +328,14 @@ func (ara *AgenticRAGAdapter) StoreContent(ctx context.Context, content *Content
 	return nil
 }
 
+func (ara *AgenticRAGAdapter) StoreContents(ctx context.Context, contents []*Content) error {
+	// In agentic search, we don't store content - it's searched dynamically from files
+	if len(contents) > 0 {
+		ara.logger.Debug(ctx, "StoreContents called (no-op in agentic search): %d items", len(contents))
+	}
+	return nil
+}
+
 func (ara *AgenticRAGAdapter) UpdateContent(ctx context.Context, content *Content) error {
 	return ara.StoreContent(ctx, content) // Same as store in our system
 }

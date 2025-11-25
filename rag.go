@@ -16,7 +16,6 @@ import (
 
 	_ "github.com/mattn/go-sqlite3"
 
-	"github.com/XiaoConstantine/dspy-go/pkg/core"
 	"github.com/XiaoConstantine/dspy-go/pkg/logging"
 )
 
@@ -57,6 +56,9 @@ type RAGStore interface {
 	// StoreContent saves a content piece with its embedding
 	StoreContent(ctx context.Context, content *Content) error
 
+	// StoreContents saves multiple content pieces in a single transaction for better performance
+	StoreContents(ctx context.Context, contents []*Content) error
+
 	// FindSimilar finds the most similar content pieces to the given embedding
 	FindSimilar(ctx context.Context, embedding []float32, limit int, contentTypes ...string) ([]*Content, error)
 
@@ -93,6 +95,10 @@ type sqliteRAGStore struct {
 	log    *logging.Logger
 	mu     sync.RWMutex
 	closed bool
+
+	// Pattern-level cache for guideline search results to avoid redundant queries
+	patternCacheMu sync.RWMutex
+	patternCache   map[string][]GuidelineSearchResult // key: pattern name, value: search results
 }
 
 func (s *sqliteRAGStore) init() error {
@@ -161,9 +167,10 @@ func (s *sqliteRAGStore) init() error {
 // NewSQLiteRAGStore creates a new SQLite-backed RAG store.
 func NewSQLiteRAGStore(db *sql.DB, logger *logging.Logger) (RAGStore, error) {
 	store := &sqliteRAGStore{
-		db:     db,
-		log:    logger,
-		closed: false,
+		db:           db,
+		log:          logger,
+		closed:       false,
+		patternCache: make(map[string][]GuidelineSearchResult),
 	}
 
 	if err := store.init(); err != nil {
@@ -248,6 +255,88 @@ func (s *sqliteRAGStore) StoreContent(ctx context.Context, content *Content) err
 	return nil
 }
 
+// StoreContents saves multiple content pieces in a single transaction for better performance.
+func (s *sqliteRAGStore) StoreContents(ctx context.Context, contents []*Content) error {
+	if len(contents) == 0 {
+		return nil
+	}
+
+	s.log.Debug(ctx, "Starting batch StoreContents for %d items", len(contents))
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.closed {
+		return fmt.Errorf("store is closed")
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("failed to start transaction: %w", err)
+	}
+	defer func() {
+		if err := tx.Rollback(); err != nil && err != sql.ErrTxDone {
+			s.log.Error(context.Background(), "failed to rollback transaction: %v", err)
+		}
+	}()
+
+	contentStmt, err := tx.PrepareContext(ctx,
+		`INSERT OR REPLACE INTO contents (id, text, metadata, content_type) VALUES (?, ?, ?, ?)`)
+	if err != nil {
+		return fmt.Errorf("failed to prepare content statement: %w", err)
+	}
+	defer contentStmt.Close()
+
+	vecStmt, err := tx.PrepareContext(ctx,
+		`INSERT OR REPLACE INTO vec_items (embedding, content_id) VALUES (vec_quantize_int8(vec_f32(?), 'unit'), ?)`)
+	if err != nil {
+		return fmt.Errorf("failed to prepare vector statement: %w", err)
+	}
+	defer vecStmt.Close()
+
+	for _, content := range contents {
+		contentType, exists := content.Metadata["content_type"]
+		if !exists {
+			return fmt.Errorf("content_type must be specified in metadata for ID: %s", content.ID)
+		}
+
+		if contentType != ContentTypeRepository && contentType != ContentTypeGuideline {
+			return fmt.Errorf("invalid content_type: %s for ID: %s", contentType, content.ID)
+		}
+
+		metadata, err := json.Marshal(content.Metadata)
+		if err != nil {
+			return fmt.Errorf("failed to marshal metadata for ID %s: %w", content.ID, err)
+		}
+
+		compressedText, err := compressText(content.Text)
+		if err != nil {
+			return fmt.Errorf("failed to compress content for ID %s: %w", content.ID, err)
+		}
+
+		_, err = contentStmt.ExecContext(ctx, content.ID, compressedText, string(metadata), contentType)
+		if err != nil {
+			return fmt.Errorf("failed to store content metadata for ID %s: %w", content.ID, err)
+		}
+
+		blob, err := sqlite_vec.SerializeFloat32(content.Embedding)
+		if err != nil {
+			return fmt.Errorf("failed to serialize embedding for ID %s: %w", content.ID, err)
+		}
+
+		_, err = vecStmt.ExecContext(ctx, blob, content.ID)
+		if err != nil {
+			return fmt.Errorf("failed to store vector for ID %s: %w", content.ID, err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("failed to commit batch transaction: %w", err)
+	}
+
+	s.log.Debug(ctx, "Successfully stored %d content items in batch", len(contents))
+	return nil
+}
+
 // populate guidelines during database initialization.
 func (s *sqliteRAGStore) PopulateGuidelines(ctx context.Context, language string) error {
 
@@ -271,17 +360,6 @@ func (s *sqliteRAGStore) PopulateGuidelines(ctx context.Context, language string
 	}
 
 	console.StartSpinner("Processing guidelines...")
-	// Enhanced chunking config for guidelines with larger chunks to preserve context
-	chunkConfig, err := NewChunkConfig(
-		WithStrategy(ChunkBySize),
-		WithMaxTokens(getGuidelineChunkSize()), // Configurable chunk size for guidelines
-		WithContextLines(10),                   // More context for better understanding
-		WithOverlapLines(3),                    // More overlap to preserve semantic continuity
-	)
-	if err != nil {
-		return fmt.Errorf("failed to create chunking strategy: %w", err)
-	}
-
 	s.log.Debug(ctx, "Fetched %d guidelines", len(guidelines))
 
 	totalChunks := 0
@@ -301,15 +379,28 @@ func (s *sqliteRAGStore) PopulateGuidelines(ctx context.Context, language string
 		}
 
 		content := FormatRuleContent(rule[0])
+
+		guidelineFilePath := fmt.Sprintf("guidelines/%s/%s.md", rule[0].Dimension, guideline.Category)
+		chunkConfig, err := NewChunkConfig(
+			WithStrategy(ChunkBySize),
+			WithMaxTokens(getGuidelineChunkSize()),
+			WithContextLines(5),
+			WithOverlapLines(2),
+			WithFilePath(guidelineFilePath),
+		)
+		if err != nil {
+			s.log.Warn(ctx, "Failed to create chunk config for guideline %s: %v", guideline.ID, err)
+			continue
+		}
+
 		chunks, err := chunkfile(ctx, content, "", chunkConfig)
 		if err != nil {
-			s.log.Debug(ctx, "Failed to chunk guideline: %v, storing as single unit", err)
-			// Fall back to original approach if chunking fails
+			s.log.Debug(ctx, "Failed to chunk guideline %s: %v, storing as single unit", guideline.ID, err)
 			chunks = []ReviewChunk{{
 				content:     content,
 				startline:   1,
 				endline:     len(strings.Split(content, "\n")),
-				filePath:    fmt.Sprintf("guideline_%s.md", guideline.ID),
+				filePath:    guidelineFilePath,
 				totalChunks: 1,
 			}}
 		}
@@ -331,11 +422,11 @@ func (s *sqliteRAGStore) PopulateGuidelines(ctx context.Context, language string
 			// Enhanced embedding text with context for better semantic matching
 			embeddingText := s.createEnhancedGuidelineEmbedding(ctx, chunk.content, rule[0], guideline)
 
-			// Generate embedding using unified model
+			// Generate embedding using unified model with smart router
 			embeddingModel := getGuidelineEmbeddingModel()
 			s.log.Debug(ctx, "Using unified embedding model '%s' for guideline: %s", embeddingModel, guideline.ID)
-			llm := core.GetTeacherLLM()
-			embedding, err := llm.CreateEmbedding(ctx, embeddingText, core.WithModel(embeddingModel))
+			router := GetEmbeddingRouter()
+			embedding, err := router.CreateEmbedding(ctx, embeddingText, WithBatch(true), WithModel(embeddingModel))
 			if err != nil {
 				s.log.Warn(ctx, "Failed to create embedding: %v", err)
 				continue
@@ -426,6 +517,151 @@ func (s *sqliteRAGStore) FindSimilarWithLateInteraction(ctx context.Context, emb
 	return selected, refinementResult, nil
 }
 
+// FindRelevantGuidelines performs pattern-based multi-vector search for guidelines.
+// This method extracts code patterns from the file and searches guidelines accordingly,
+// returning only high-confidence matches with specific relevance scoring.
+func (s *sqliteRAGStore) FindRelevantGuidelines(
+	ctx context.Context,
+	patterns []SimpleCodePattern,
+	limit int,
+) ([]GuidelineSearchResult, error) {
+	s.log.Debug(ctx, "Starting pattern-based guideline search for %d patterns", len(patterns))
+
+	if len(patterns) == 0 {
+		s.log.Warn(ctx, "No patterns provided for guideline search")
+		return []GuidelineSearchResult{}, nil
+	}
+
+	enhancer := NewGuidelineSearchEnhancer(s.log)
+	allResults := make(map[string]*GuidelineSearchResult)
+
+	// First, check cache for each pattern and identify which need fresh searches
+	var uncachedPatterns []SimpleCodePattern
+	cachedCount := 0
+
+	s.patternCacheMu.RLock()
+	for _, pattern := range patterns {
+		if cached, exists := s.patternCache[pattern.Name]; exists {
+			cachedCount++
+			s.log.Debug(ctx, "Cache hit for pattern: %s (%d results)", pattern.Name, len(cached))
+			// Merge cached results
+			for _, result := range cached {
+				if existing, exists := allResults[result.Content.ID]; exists {
+					existing.FinalScore = (existing.FinalScore + result.FinalScore) / 2.0
+					existing.Pattern = existing.Pattern + ", " + result.Pattern
+				} else {
+					resultCopy := result
+					allResults[result.Content.ID] = &resultCopy
+				}
+			}
+		} else {
+			uncachedPatterns = append(uncachedPatterns, pattern)
+		}
+	}
+	s.patternCacheMu.RUnlock()
+
+	if cachedCount > 0 {
+		s.log.Debug(ctx, "Pattern cache: %d hits, %d misses", cachedCount, len(uncachedPatterns))
+	}
+
+	// Process uncached patterns
+	if len(uncachedPatterns) > 0 {
+		patternEmbeddings, err := enhancer.EnhanceGuidelineQuery(ctx, uncachedPatterns)
+		if err != nil {
+			return nil, fmt.Errorf("failed to enhance query: %w", err)
+		}
+
+		if len(patternEmbeddings) == 0 && cachedCount == 0 {
+			s.log.Warn(ctx, "Failed to create pattern embeddings and no cached results")
+			return []GuidelineSearchResult{}, nil
+		}
+
+		// Search guidelines for each uncached pattern
+		for pattern, embedding := range patternEmbeddings {
+			s.log.Debug(ctx, "Searching guidelines for pattern: %s", pattern)
+
+			searchLimit := limit * 3
+			results, _, err := s.FindSimilarWithDebug(
+				ctx, embedding, searchLimit, ContentTypeGuideline,
+			)
+			if err != nil {
+				s.log.Warn(ctx, "Failed to find guidelines for pattern %s: %v", pattern, err)
+				continue
+			}
+
+			// Build results for this pattern (for caching)
+			var patternResults []GuidelineSearchResult
+
+			for _, result := range results {
+				var docEmbed []float32
+				var chunkEmbeds [][]float32
+				docEmbed = embedding
+				chunkEmbeds = append(chunkEmbeds, embedding)
+
+				score := ScoreGuideline(embedding, result, docEmbed, chunkEmbeds)
+
+				searchResult := GuidelineSearchResult{
+					Content:           result,
+					DocumentScore:     score,
+					BestChunkScore:    score,
+					AverageChunkScore: score,
+					FinalScore:        score,
+					Pattern:           pattern,
+					ContextDescription: fmt.Sprintf(
+						"Relevant to %s pattern detected in your code",
+						pattern,
+					),
+				}
+
+				patternResults = append(patternResults, searchResult)
+
+				// Merge into all results
+				if existing, exists := allResults[result.ID]; exists {
+					existing.FinalScore = (existing.FinalScore + score) / 2.0
+					existing.Pattern = existing.Pattern + ", " + pattern
+				} else {
+					allResults[result.ID] = &searchResult
+				}
+			}
+
+			// Cache results for this pattern
+			if len(patternResults) > 0 {
+				s.patternCacheMu.Lock()
+				s.patternCache[pattern] = patternResults
+				s.patternCacheMu.Unlock()
+				s.log.Debug(ctx, "Cached %d results for pattern: %s", len(patternResults), pattern)
+			}
+		}
+	}
+
+	// Convert map to slice
+	var results []GuidelineSearchResult
+	for _, res := range allResults {
+		results = append(results, *res)
+	}
+
+	// Deduplicate and sort
+	results = DeduplicateResults(results)
+
+	// Filter by confidence threshold (0.65)
+	results = FilterByConfidence(results, 0.65)
+
+	// Return top N
+	if len(results) > limit {
+		results = results[:limit]
+	}
+
+	s.log.Debug(ctx, "Found %d relevant guidelines with confidence >= 0.65", len(results))
+	return results, nil
+}
+
+// ClearPatternCache clears the pattern cache, useful for new review sessions.
+func (s *sqliteRAGStore) ClearPatternCache() {
+	s.patternCacheMu.Lock()
+	defer s.patternCacheMu.Unlock()
+	s.patternCache = make(map[string][]GuidelineSearchResult)
+}
+
 // FindSimilarWithDebug implements RAGStore interface with comprehensive debugging.
 func (s *sqliteRAGStore) FindSimilarWithDebug(ctx context.Context, embedding []float32, limit int, contentTypes ...string) ([]*Content, DebugInfo, error) {
 	startTime := time.Now()
@@ -463,7 +699,7 @@ func (s *sqliteRAGStore) FindSimilarWithDebug(ctx context.Context, embedding []f
 
 	// Add content type filter if specified
 	var whereClauses []string
-	args := []interface{}{blob, limit} // Maintain parameter order
+	args := []interface{}{blob} // Start with just the embedding blob
 
 	if len(contentTypes) > 0 {
 		placeholders := make([]string, len(contentTypes))
@@ -475,7 +711,7 @@ func (s *sqliteRAGStore) FindSimilarWithDebug(ctx context.Context, embedding []f
 			fmt.Sprintf("c.content_type IN (%s)", strings.Join(placeholders, ",")))
 	}
 
-	// Add final k=? constraint
+	// Add final k=? constraint for vector search result limit
 	whereClauses = append(whereClauses, "k = ?")
 	args = append(args, limit)
 
@@ -1151,55 +1387,6 @@ func (s *sqliteRAGStore) calculateQualityMetrics(similarities []float64) Quality
 	metrics.AverageScore = totalScore / float64(len(similarities))
 	return metrics
 }
-
-// logGuidelineMatchAnalysis provides detailed analysis of guideline matching for specific code patterns.
-func (s *sqliteRAGStore) logGuidelineMatchAnalysis(ctx context.Context, codePattern string, matches []*Content, debugInfo DebugInfo) {
-	if !isRAGDebugEnabled() {
-		return
-	}
-
-	s.log.Debug(ctx, "🎯 === GUIDELINE MATCH ANALYSIS ===")
-	s.log.Debug(ctx, "📝 Code Pattern: %s", truncateString(codePattern, 80))
-
-	if len(matches) == 0 {
-		s.log.Warn(ctx, "❌ No guidelines matched this code pattern")
-		s.log.Debug(ctx, "🎯 === GUIDELINE MATCH ANALYSIS END ===")
-		return
-	}
-
-	s.log.Debug(ctx, "📊 Match Analysis:")
-	categoryCount := make(map[string]int)
-	dimensionCount := make(map[string]int)
-
-	for i, match := range matches {
-		if i >= 5 { // Limit detailed analysis to top 5
-			break
-		}
-
-		category := match.Metadata["category"]
-		dimension := match.Metadata["dimension"]
-		ruleName := match.Metadata["rule_name"]
-		similarity := debugInfo.SimilarityScores[i]
-
-		categoryCount[category]++
-		dimensionCount[dimension]++
-
-		s.log.Debug(ctx, "  Match #%d:", i+1)
-		s.log.Debug(ctx, "    • Rule: %s", ruleName)
-		s.log.Debug(ctx, "    • Category: %s", category)
-		s.log.Debug(ctx, "    • Dimension: %s", dimension)
-		s.log.Debug(ctx, "    • Similarity: %.4f", similarity)
-		s.log.Debug(ctx, "    • Content Preview: %s", truncateString(match.Text, 60))
-	}
-
-	s.log.Debug(ctx, "📈 Pattern Summary:")
-	s.log.Debug(ctx, "  • Categories: %v", categoryCount)
-	s.log.Debug(ctx, "  • Dimensions: %v", dimensionCount)
-	s.log.Debug(ctx, "  • Best Match Quality: %.4f", debugInfo.QualityMetrics.BestScore)
-
-	s.log.Debug(ctx, "🎯 === GUIDELINE MATCH ANALYSIS END ===")
-}
-
 // truncateString truncates a string to maxLen characters, adding "..." if truncated.
 func truncateString(s string, maxLen int) string {
 	if len(s) <= maxLen {
