@@ -927,21 +927,37 @@ func runFullPRReview(ctx context.Context, prNumber int, cfg *config, console Con
 		return fmt.Errorf("failed to review PR: %w", err)
 	}
 	if len(comments) != 0 {
+		// Check if interactive TUI mode is enabled
+		useInteractiveTUI := os.Getenv("MAESTRO_INTERACTIVE_TUI") == "true"
 
-		shouldPost, err := githubTools.PreviewReview(ctx, console, prNumber, comments, agent.Metrics(ctx))
-		if err != nil {
-			logger.Error(ctx, "Failed to preview review: %v", err)
-			return fmt.Errorf("failed to preview review: %w", err)
-		}
-
-		console.ShowReviewMetrics(agent.Metrics(ctx), comments)
-
-		if shouldPost {
-			logger.Info(ctx, "Posting review comments to GitHub")
-			err = githubTools.CreateReviewComments(ctx, prNumber, comments)
+		if useInteractiveTUI && console.IsInteractive() {
+			// Use the new lazygit-style TUI for reviewing comments
+			onPost := func(selectedComments []PRReviewComment) error {
+				logger.Info(ctx, "Posting %d review comments to GitHub", len(selectedComments))
+				return githubTools.CreateReviewComments(ctx, prNumber, selectedComments)
+			}
+			if err := console.ShowCommentsInteractive(comments, onPost); err != nil {
+				logger.Error(ctx, "Interactive TUI error: %v", err)
+				// Fall back to standard preview
+				_, _ = githubTools.PreviewReview(ctx, console, prNumber, comments, agent.Metrics(ctx))
+			}
+		} else {
+			// Standard preview flow
+			shouldPost, err := githubTools.PreviewReview(ctx, console, prNumber, comments, agent.Metrics(ctx))
 			if err != nil {
-				logger.Error(ctx, "Failed to post review comments: %v", err)
-				return fmt.Errorf("failed to post review comments: %w", err)
+				logger.Error(ctx, "Failed to preview review: %v", err)
+				return fmt.Errorf("failed to preview review: %w", err)
+			}
+
+			console.ShowReviewMetrics(agent.Metrics(ctx), comments)
+
+			if shouldPost {
+				logger.Info(ctx, "Posting review comments to GitHub")
+				err = githubTools.CreateReviewComments(ctx, prNumber, comments)
+				if err != nil {
+					logger.Error(ctx, "Failed to post review comments: %v", err)
+					return fmt.Errorf("failed to post review comments: %w", err)
+				}
 			}
 		}
 	}
