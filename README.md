@@ -113,6 +113,7 @@ graph TB
 - SQLite with sqlite-vec extension
 - GitHub API access token
 - Supported LLM backend (Claude, Gemini, or local model)
+- For local models: llama.cpp installed (can be automated with `make setup`)
 
 ### **Installation**
 
@@ -129,6 +130,27 @@ go build -o maestro
 
 # Set up GitHub token
 export MAESTRO_GITHUB_TOKEN=your_github_token
+```
+
+### **Local Model Setup (Optional)**
+
+For using local LLM models with llama.cpp:
+
+```bash
+# One-time setup: Install llama.cpp and download models
+# Creates ~/.maestro/models and downloads:
+# - nomic-embed-text-v1.5.Q8_0.gguf (embedding model)
+# - Qwen3-1.7B-Q8_0.gguf (inference model)
+make setup
+
+# Start both llama servers in separate tmux sessions
+# Embedding server runs on port 8080
+# LLM server runs on port 8081
+make local
+
+# View server logs
+tmux attach -t embedding  # Embedding server logs
+tmux attach -t llm        # LLM server logs
 ```
 
 ### **Quick Start**
