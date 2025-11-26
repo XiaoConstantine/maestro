@@ -2,12 +2,14 @@ package terminal
 
 import (
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/muesli/termenv"
 )
 
 // ReviewComment represents a single review comment for the TUI.
@@ -281,7 +283,10 @@ func groupCommentsByFile(comments []ReviewComment) []FileGroup {
 
 // Init initializes the review model.
 func (m *ReviewModel) Init() tea.Cmd {
-	return tea.EnterAltScreen
+	return tea.Batch(
+		tea.EnterAltScreen,
+		tea.WindowSize(), // Request initial window size
+	)
 }
 
 // Update handles messages for the review model.
@@ -964,6 +969,14 @@ func (m *ReviewModel) SetOnQuit(fn func()) {
 	m.onQuit = fn
 }
 
+// SetSize sets the dimensions and marks the model as ready.
+func (m *ReviewModel) SetSize(width, height int) {
+	m.width = width
+	m.height = height
+	m.ready = true
+	m.updateViewportSizes()
+}
+
 func truncateString(s string, maxLen int) string {
 	if len(s) <= maxLen {
 		return s
@@ -1013,8 +1026,26 @@ func RunReviewTUI(comments []ReviewComment, onPost func([]ReviewComment) error) 
 	model := NewReviewModel(comments, theme)
 	model.SetOnPost(onPost)
 
-	p := tea.NewProgram(model, tea.WithAltScreen())
-	_, err := p.Run()
+	// Open /dev/tty directly for both input and output to bypass any
+	// terminal state issues from go-prompt or redirected stdout/stdin
+	tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
+	if err != nil {
+		return fmt.Errorf("failed to open /dev/tty: %w", err)
+	}
+	defer tty.Close()
+
+	// Force lipgloss to use ANSI256 colors since we're writing to a custom TTY
+	// that lipgloss doesn't automatically detect as color-capable
+	lipgloss.SetColorProfile(termenv.ANSI256)
+
+	p := tea.NewProgram(
+		model,
+		tea.WithAltScreen(),
+		tea.WithInput(tty),        // Read input directly from TTY
+		tea.WithOutput(tty),       // Write output directly to TTY
+		tea.WithMouseCellMotion(), // Enables terminal size tracking and mouse support
+	)
+	_, err = p.Run()
 	return err
 }
 
