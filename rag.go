@@ -422,9 +422,8 @@ func (s *sqliteRAGStore) PopulateGuidelines(ctx context.Context, language string
 			// Enhanced embedding text with context for better semantic matching
 			embeddingText := s.createEnhancedGuidelineEmbedding(ctx, chunk.content, rule[0], guideline)
 
-			// Generate embedding using unified model with smart router
+			// Generate embedding using smart router (local sgrep or cloud fallback)
 			embeddingModel := getGuidelineEmbeddingModel()
-			s.log.Debug(ctx, "Using unified embedding model '%s' for guideline: %s", embeddingModel, guideline.ID)
 			router := GetEmbeddingRouter()
 			embedding, err := router.CreateEmbedding(ctx, embeddingText, WithBatch(true), WithModel(embeddingModel))
 			if err != nil {

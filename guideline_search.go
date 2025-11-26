@@ -34,9 +34,8 @@ type GuidelineSearchResult struct {
 	BestChunkScore     float64 // Best chunk similarity (0-1)
 	AverageChunkScore  float64 // Average chunk similarity (0-1)
 	FinalScore         float64 // Weighted score (0-1)
-	RelevantChunk      *ChunkLevel
-	Pattern            string // Which pattern triggered this match
-	ContextDescription string // Why this guideline is relevant
+	Pattern            string  // Which pattern triggered this match
+	ContextDescription string  // Why this guideline is relevant
 }
 
 // ExtractCodePatterns detects code patterns in the given file content.
@@ -211,39 +210,6 @@ func ScoreGuideline(
 	}
 
 	return finalScore
-}
-
-// FindBestChunkForPattern finds the most relevant chunk for a pattern embedding.
-func FindBestChunkForPattern(
-	patternEmbedding []float32,
-	chunkEmbeddings [][]float32,
-	chunks []*ChunkLevel,
-) (*ChunkLevel, float64) {
-	if len(chunkEmbeddings) == 0 {
-		return nil, 0.0
-	}
-
-	bestIdx := 0
-	bestScore := 0.0
-
-	for i, chunkEmbed := range chunkEmbeddings {
-		if len(chunkEmbed) > 0 {
-			score := cosineSimilarity(patternEmbedding, chunkEmbed)
-			if score > bestScore {
-				bestScore = score
-				bestIdx = i
-			}
-		}
-	}
-
-	if bestScore < 0 {
-		bestScore = 0
-	}
-
-	if bestIdx < len(chunks) {
-		return chunks[bestIdx], bestScore
-	}
-	return nil, bestScore
 }
 
 // DeduplicateResults removes duplicate guidelines from search results, keeping highest score.

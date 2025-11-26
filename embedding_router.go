@@ -71,9 +71,11 @@ func (r *EmbeddingRouter) CreateEmbedding(ctx context.Context, input string, opt
 	var source string
 
 	shouldUseLocal := config.ShouldUseLocal()
+	r.logger.Debug(ctx, "Embedding routing: shouldUseLocal=%v, localAvailable=%v, batch=%v", shouldUseLocal, r.local != nil, config.Batch)
 
 	if shouldUseLocal && r.local != nil {
 		// Try local first
+		r.logger.Debug(ctx, "Using local embedding (sgrep)")
 		result, err = r.createWithTiming(ctx, r.local, input, config, "local")
 		if err == nil {
 			source = "local"

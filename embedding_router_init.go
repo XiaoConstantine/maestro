@@ -56,7 +56,7 @@ func isLocalEmbeddingEnabled() bool {
 	return enabled == "true" || enabled == "1"
 }
 
-// initializeLocalLLM creates the local embedding model (ollama/llamacpp).
+// initializeLocalLLM creates the local embedding model (ollama/llamacpp/sgrep).
 func initializeLocalLLM(ctx context.Context, logger *logging.Logger) core.LLM {
 	provider := os.Getenv("MAESTRO_LOCAL_EMBEDDING_PROVIDER")
 	if provider == "" {
@@ -99,6 +99,14 @@ func initializeLocalLLM(ctx context.Context, logger *logging.Logger) core.LLM {
 			return nil
 		}
 		logger.Info(ctx, "Successfully initialized llamacpp LLM at %s", endpoint)
+	case "sgrep":
+		// Use sgrep's local embedding server (auto-starts llama-server)
+		llm, err = NewSgrepEmbeddingLLM()
+		if err != nil {
+			logger.Warn(ctx, "Failed to initialize sgrep embedder: %v - will use cloud fallback", err)
+			return nil
+		}
+		logger.Info(ctx, "Successfully initialized sgrep local embedding (nomic-embed-text)")
 	default:
 		logger.Warn(ctx, "Unknown local embedding provider: %s - will use cloud only", provider)
 		return nil
