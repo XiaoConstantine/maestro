@@ -6,6 +6,7 @@ require (
 	github.com/AlecAivazis/survey/v2 v2.3.7
 	github.com/XiaoConstantine/dspy-go v0.64.0
 	github.com/XiaoConstantine/mcp-go v0.3.1
+	github.com/XiaoConstantine/sgrep v0.1.0
 	github.com/asg017/sqlite-vec-go-bindings v0.1.6
 	github.com/briandowns/spinner v1.23.2
 	github.com/c-bata/go-prompt v0.2.6
@@ -25,7 +26,6 @@ require (
 )
 
 require (
-	github.com/XiaoConstantine/sgrep v0.1.0 // indirect
 	github.com/alecthomas/chroma/v2 v2.14.0 // indirect
 	github.com/atotto/clipboard v0.1.4 // indirect
 	github.com/aymanbagabas/go-osc52/v2 v2.0.1 // indirect
@@ -85,5 +85,3 @@ require (
 	golang.org/x/sys v0.38.0 // indirect
 	golang.org/x/term v0.30.0
 )
-
-replace github.com/XiaoConstantine/sgrep => ../sgrep
