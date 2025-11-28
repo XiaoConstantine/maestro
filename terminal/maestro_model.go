@@ -614,9 +614,9 @@ func RunMaestro(cfg *MaestroConfig, backend MaestroBackend) error {
 	defer func() {
 		if r := recover(); r != nil {
 			// Restore terminal state by writing escape sequences
-			tty.WriteString("\033[?1049l") // Exit alternate screen
-			tty.WriteString("\033[?25h")   // Show cursor
-			tty.WriteString("\033[0m")     // Reset colors
+			_, _ = tty.WriteString("\033[?1049l") // Exit alternate screen
+			_, _ = tty.WriteString("\033[?25h")   // Show cursor
+			_, _ = tty.WriteString("\033[0m")     // Reset colors
 			panic(r)                       // Re-panic after cleanup
 		}
 	}()

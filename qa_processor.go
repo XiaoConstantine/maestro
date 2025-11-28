@@ -458,13 +458,7 @@ func (p *RepoQAProcessor) searchWithSgrep(ctx context.Context, query string, lim
 	// Convert SgrepSearchResult to sgrepResult for backward compatibility
 	sgrepResults := make([]sgrepResult, len(results))
 	for i, r := range results {
-		sgrepResults[i] = sgrepResult{
-			FilePath:  r.FilePath,
-			StartLine: r.StartLine,
-			EndLine:   r.EndLine,
-			Content:   r.Content,
-			Score:     r.Score,
-		}
+		sgrepResults[i] = sgrepResult(r)
 	}
 
 	logger.Debug(ctx, "sgrep returned %d semantic matches for query: %s", len(sgrepResults), query)
