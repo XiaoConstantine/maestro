@@ -19,6 +19,7 @@ type CLIToolType int
 const (
 	ClaudeCode CLIToolType = iota
 	GeminiCLI
+	SgrepCLI
 )
 
 // CLIToolConfig holds configuration for CLI tools.
@@ -78,6 +79,18 @@ func (m *CLIToolManager) registerTools() {
 		Description: "Google's open-source AI terminal agent",
 		RequiresAPI: true, // Actually does need API key for reliable usage
 		APIEnvVar:   "GOOGLE_API_KEY",
+	}
+
+	// sgrep - Semantic code search
+	m.tools[SgrepCLI] = &CLIToolConfig{
+		Type:        SgrepCLI,
+		Name:        "sgrep",
+		Command:     "sgrep",
+		InstallCmd:  "go install github.com/XiaoConstantine/sgrep@latest",
+		CheckCmd:    "sgrep --version",
+		Description: "Fast semantic code search with local embeddings and tree-sitter chunking",
+		RequiresAPI: false, // Uses local llama.cpp, no API needed
+		APIEnvVar:   "",
 	}
 }
 

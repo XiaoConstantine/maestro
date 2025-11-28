@@ -134,6 +134,30 @@ func (h *MCPBashHelper) ExecuteGHCommand(ctx context.Context, args ...string) (s
 	return h.ExecuteCommand(ctx, command)
 }
 
+// ExecuteSgrepCommand executes an sgrep CLI command for semantic code search.
+// sgrep provides fast local semantic search using embeddings and tree-sitter chunking.
+func (h *MCPBashHelper) ExecuteSgrepCommand(ctx context.Context, args ...string) (string, error) {
+	// Build the sgrep command
+	command := "sgrep"
+	for _, arg := range args {
+		command += " " + arg
+	}
+
+	return h.ExecuteCommand(ctx, command)
+}
+
+// SgrepSearch performs semantic code search using sgrep.
+// Returns JSON results with file paths, line numbers, content, and relevance scores.
+func (h *MCPBashHelper) SgrepSearch(ctx context.Context, query string, limit int) (string, error) {
+	// sgrep "query" -n <limit> --json
+	return h.ExecuteSgrepCommand(ctx, fmt.Sprintf("%q", query), "-n", fmt.Sprintf("%d", limit), "--json")
+}
+
+// SgrepIndex indexes a directory for semantic search.
+func (h *MCPBashHelper) SgrepIndex(ctx context.Context, path string) (string, error) {
+	return h.ExecuteSgrepCommand(ctx, "index", path)
+}
+
 // Close closes the MCP connection and terminates the server.
 func (h *MCPBashHelper) Close() error {
 	var errors []error

@@ -86,9 +86,29 @@ func hashSignature(sig core.Signature) string {
 	return hex.EncodeToString(hasher.Sum(nil))
 }
 
+// getParallelWorkers returns the number of parallel workers to use for chunk processing.
+// It checks MAESTRO_PARALLEL_WORKERS env var, then falls back to CPU count with a reasonable cap.
+func getParallelWorkers() int {
+	if envWorkers := os.Getenv("MAESTRO_PARALLEL_WORKERS"); envWorkers != "" {
+		if workers, err := strconv.Atoi(envWorkers); err == nil && workers > 0 {
+			return workers
+		}
+	}
+	// Default to CPU count, capped at 16 to avoid overwhelming the LLM backend
+	workers := runtime.NumCPU()
+	if workers > 16 {
+		workers = 16
+	}
+	if workers < 2 {
+		workers = 2
+	}
+	return workers
+}
+
 // getOrCreateModules retrieves cached modules or creates new ones if not found.
 func getOrCreateModules(signature core.Signature) *ModuleCacheEntry {
 	signatureHash := hashSignature(signature)
+	maxWorkers := getParallelWorkers()
 
 	// Try to get from cache first
 	if cached, ok := moduleCache.Load(signatureHash); ok {
@@ -120,9 +140,10 @@ func getOrCreateModules(signature core.Signature) *ModuleCacheEntry {
 	// Skip creating refinement module here - will be created fresh in constructor
 
 	// Create parallel processor for concurrent chunk processing (use basePredict to avoid recursion)
+	// Use configurable workers instead of hard-coded 4
 	parallelProcessor := modules.NewParallel(
 		basePredict,
-		modules.WithMaxWorkers(4),
+		modules.WithMaxWorkers(maxWorkers),
 		modules.WithReturnFailures(true),
 	).WithName("ParallelCodeReview")
 
@@ -529,6 +550,53 @@ func (p *EnhancedCodeReviewProcessor) Process(ctx context.Context, task agents.T
 	return enhancedResult, nil
 }
 
+// isChunkWorthReviewing checks if a chunk contains meaningful code changes worth sending to LLM.
+// This pre-filtering can significantly reduce LLM calls for trivial chunks.
+func isChunkWorthReviewing(task agents.Task) bool {
+	changes, _ := task.Metadata["changes"].(string)
+	fileContent, _ := task.Metadata["file_content"].(string)
+
+	// Skip if no changes (shouldn't happen, but safety check)
+	if strings.TrimSpace(changes) == "" {
+		return false
+	}
+
+	// Skip very small chunks with no actual code
+	if len(strings.TrimSpace(fileContent)) < 20 {
+		return false
+	}
+
+	// Check if changes are only whitespace/formatting
+	lines := strings.Split(changes, "\n")
+	meaningfulChanges := 0
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		// Skip empty lines and diff headers
+		if trimmed == "" || strings.HasPrefix(trimmed, "@@") {
+			continue
+		}
+		// Check for actual additions/deletions
+		if strings.HasPrefix(line, "+") || strings.HasPrefix(line, "-") {
+			content := strings.TrimPrefix(strings.TrimPrefix(line, "+"), "-")
+			content = strings.TrimSpace(content)
+			// Skip if the line is just whitespace, a comment, or import-only
+			if content != "" && !strings.HasPrefix(content, "//") && !strings.HasPrefix(content, "/*") {
+				meaningfulChanges++
+			}
+		}
+	}
+
+	// If env var is set, use it as threshold; otherwise default to 1
+	threshold := 1
+	if t := os.Getenv("MAESTRO_MIN_MEANINGFUL_CHANGES"); t != "" {
+		if parsed, err := strconv.Atoi(t); err == nil && parsed > 0 {
+			threshold = parsed
+		}
+	}
+
+	return meaningfulChanges >= threshold
+}
+
 // ProcessMultipleChunks processes multiple code chunks in parallel with consensus for critical issues.
 func (p *EnhancedCodeReviewProcessor) ProcessMultipleChunks(ctx context.Context, tasks []agents.Task, taskContext map[string]interface{}) ([]interface{}, error) {
 	if !isEnhancedProcessingEnabled() {
@@ -545,11 +613,37 @@ func (p *EnhancedCodeReviewProcessor) ProcessMultipleChunks(ctx context.Context,
 		return results, nil
 	}
 
+	// Pre-filter chunks to skip trivial ones (huge performance win)
+	filteredTasks := make([]agents.Task, 0, len(tasks))
+	skippedIndices := make(map[int]bool)
+
+	if os.Getenv("MAESTRO_SKIP_CHUNK_FILTER") != "true" {
+		for i, task := range tasks {
+			if isChunkWorthReviewing(task) {
+				filteredTasks = append(filteredTasks, task)
+			} else {
+				skippedIndices[i] = true
+			}
+		}
+		if len(skippedIndices) > 0 {
+			p.logger.Info(ctx, "Pre-filtered %d trivial chunks (processing %d of %d)",
+				len(skippedIndices), len(filteredTasks), len(tasks))
+		}
+	} else {
+		filteredTasks = tasks
+	}
+
+	// If all chunks were filtered, return empty results
+	if len(filteredTasks) == 0 {
+		p.logger.Info(ctx, "All %d chunks were filtered as trivial, skipping LLM calls", len(tasks))
+		return make([]interface{}, len(tasks)), nil
+	}
+
 	// Processing chunks in parallel
 
 	// Prepare inputs for all tasks with enhanced context
-	inputsBatch := make([]map[string]interface{}, len(tasks))
-	for i, task := range tasks {
+	inputsBatch := make([]map[string]interface{}, len(filteredTasks))
+	for i, task := range filteredTasks {
 		fileContent, _ := task.Metadata["file_content"].(string)
 		changes, _ := task.Metadata["changes"].(string)
 		filePath, _ := task.Metadata["file_path"].(string)
@@ -641,8 +735,8 @@ func (p *EnhancedCodeReviewProcessor) ProcessMultipleChunks(ctx context.Context,
 
 	for i, resultMap := range results {
 		filePath := ""
-		if i < len(tasks) {
-			filePath, _ = tasks[i].Metadata["file_path"].(string)
+		if i < len(filteredTasks) {
+			filePath, _ = filteredTasks[i].Metadata["file_path"].(string)
 		}
 
 		// Log raw LLM response for each chunk if debugging enabled
@@ -675,11 +769,11 @@ func (p *EnhancedCodeReviewProcessor) ProcessMultipleChunks(ctx context.Context,
 
 	// Log overall chunk processing statistics
 	if isLLMResponseDebugEnabled() {
-		p.logChunkProcessingStats(ctx, issueGenerationStats, len(tasks))
+		p.logChunkProcessingStats(ctx, issueGenerationStats, len(filteredTasks))
 	}
 
 	processingTime := getCurrentTimeMs() - startTime
-	p.logger.Info(ctx, "Parallel processing completed for %d chunks in %.2f ms", len(tasks), processingTime)
+	p.logger.Info(ctx, "Parallel processing completed for %d chunks in %.2f ms", len(filteredTasks), processingTime)
 
 	// Check if file-level aggregation is enabled
 	if isFileAggregationEnabled() {

@@ -17,7 +17,9 @@ import (
 	"github.com/XiaoConstantine/dspy-go/pkg/core"
 	"github.com/XiaoConstantine/dspy-go/pkg/llms"
 	"github.com/XiaoConstantine/dspy-go/pkg/logging"
+	"github.com/briandowns/spinner"
 	"github.com/c-bata/go-prompt"
+	"github.com/google/go-github/v68/github"
 	"github.com/logrusorgru/aurora"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
@@ -113,6 +115,7 @@ func commandCompleter(d prompt.Document) []prompt.Suggest {
 		{Text: "/claude", Description: "Interact with Claude Code CLI"},
 		{Text: "/gemini", Description: "Interact with Gemini CLI"},
 		{Text: "/tools", Description: "Manage CLI tools (setup, status)"},
+		{Text: "/status", Description: "Show indexing and system status"},
 		{Text: "/sessions", Description: "Manage Claude sessions"},
 		{Text: "/dashboard", Description: "Show Claude sessions dashboard"},
 		{Text: "/coordinate", Description: "Coordinate multi-session tasks"},
@@ -452,6 +455,59 @@ func createInteractiveCommands(cfg *config, console ConsoleInterface, agent Revi
 		},
 	}
 	rootCmd.AddCommand(toolsCmd)
+
+	// Status command - shows indexing status
+	statusCmd := &cobra.Command{
+		Use:   "status",
+		Short: "Show indexing and system status",
+		Run: func(cmd *cobra.Command, args []string) {
+			console.Println(aurora.Bold("📊 Maestro Status"))
+			console.Println(strings.Repeat("─", 40))
+
+			// Indexing status
+			indexStatus := agent.GetIndexingStatus()
+			if indexStatus != nil {
+				isIndexing, progress, lastErr := indexStatus.GetStatus()
+				if isIndexing {
+					console.Printf("🔄 Indexing: %s (%.1f%% complete)\n",
+						aurora.Yellow("in progress"), progress*100)
+				} else if indexStatus.IsReady() {
+					console.Printf("✅ Indexing: %s\n", aurora.Green("complete"))
+				} else if lastErr != nil {
+					console.Printf("❌ Indexing: %s (%v)\n", aurora.Red("failed"), lastErr)
+				} else {
+					console.Printf("⏳ Indexing: %s\n", aurora.Gray(12, "not started"))
+				}
+			}
+
+			// Clone status
+			clonePath := agent.ClonedRepoPath()
+			if clonePath != "" {
+				console.Printf("📁 Cloned repo: %s\n", aurora.Cyan(clonePath))
+			} else {
+				console.Printf("📁 Cloned repo: %s\n", aurora.Gray(12, "not available"))
+			}
+
+			// Sgrep status
+			sgrepTool := NewSgrepTool(logging.GetLogger(), clonePath)
+			if sgrepTool.isAvailable(ctx) {
+				if clonePath != "" && sgrepTool.IsIndexed(ctx) {
+					console.Printf("🔍 Sgrep: %s\n", aurora.Green("indexed"))
+				} else if clonePath != "" {
+					console.Printf("🔍 Sgrep: %s\n", aurora.Yellow("available (not indexed)"))
+				} else {
+					console.Printf("🔍 Sgrep: %s\n", aurora.Yellow("available"))
+				}
+			} else {
+				console.Printf("🔍 Sgrep: %s\n", aurora.Red("not installed"))
+			}
+
+			// Repository info
+			console.Println(strings.Repeat("─", 40))
+			console.Printf("📦 Repository: %s/%s\n", cfg.owner, cfg.repo)
+		},
+	}
+	rootCmd.AddCommand(statusCmd)
 
 	// Claude session management commands
 	sessionsCmd := &cobra.Command{
@@ -874,7 +930,14 @@ func runFullPRReview(ctx context.Context, prNumber int, cfg *config, console Con
 	// Use MCP if available, otherwise fall back to GitHub API
 	if mcpHelper != nil {
 		logger.Debug(ctx, "Using MCP bash helper to fetch PR changes")
-		changes, err = GetPullRequestChangesWithMCP(ctx, cfg.owner, cfg.repo, prNumber, mcpHelper)
+		// Wait for clone to complete (up to 5 minutes for large repos)
+		clonePath := agent.WaitForClone(ctx, 5*time.Minute)
+		if clonePath == "" {
+			logger.Warn(ctx, "Clone not available, falling back to GitHub API")
+			changes, err = githubTools.GetPullRequestChanges(ctx, prNumber)
+		} else {
+			changes, err = GetPullRequestChangesWithMCP(ctx, cfg.owner, cfg.repo, prNumber, mcpHelper, clonePath)
+		}
 	} else {
 		logger.Debug(ctx, "Using GitHub API to fetch PR changes")
 		changes, err = githubTools.GetPullRequestChanges(ctx, prNumber)
@@ -1280,17 +1343,227 @@ Examples:
 	return nil
 }
 
+// TUIBackendAdapter adapts ReviewAgent to terminal.MaestroBackend.
+type TUIBackendAdapter struct {
+	agent       ReviewAgent
+	githubTools GitHubInterface
+	owner       string
+	repo        string
+}
+
+// NewTUIBackendAdapter creates a new backend adapter.
+func NewTUIBackendAdapter(agent ReviewAgent, githubTools GitHubInterface, owner, repo string) *TUIBackendAdapter {
+	return &TUIBackendAdapter{
+		agent:       agent,
+		githubTools: githubTools,
+		owner:       owner,
+		repo:        repo,
+	}
+}
+
+// ReviewPR implements terminal.MaestroBackend.
+func (a *TUIBackendAdapter) ReviewPR(ctx context.Context, prNumber int, onProgress func(status string)) ([]terminal.ReviewComment, error) {
+	if a.agent == nil {
+		return nil, fmt.Errorf("agent not initialized")
+	}
+
+	// Create a progress console adapter
+	progressConsole := &tuiProgressConsole{onProgress: onProgress}
+
+	// Fetch PR changes (like runFullPRReview does)
+	if onProgress != nil {
+		onProgress("Fetching PR changes...")
+	}
+	changes, err := a.githubTools.GetPullRequestChanges(ctx, prNumber)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get PR changes: %w", err)
+	}
+
+	// Create review tasks from the changes
+	tasks := make([]PRReviewTask, 0, len(changes.Files))
+	for _, file := range changes.Files {
+		tasks = append(tasks, PRReviewTask{
+			FilePath:    file.FilePath,
+			FileContent: file.FileContent,
+			Changes:     file.Patch,
+		})
+	}
+
+	if onProgress != nil {
+		onProgress(fmt.Sprintf("Reviewing %d files...", len(tasks)))
+	}
+
+	// Call ReviewPRWithChanges with tasks and preloaded changes
+	comments, err := a.agent.ReviewPRWithChanges(ctx, prNumber, tasks, progressConsole, changes)
+	if err != nil {
+		return nil, err
+	}
+
+	result := make([]terminal.ReviewComment, 0, len(comments))
+	for _, c := range comments {
+		result = append(result, terminal.ReviewComment{
+			FilePath:   c.FilePath,
+			LineNumber: c.LineNumber,
+			Content:    c.Content,
+			Severity:   c.Severity,
+			Suggestion: c.Suggestion,
+			Category:   c.Category,
+		})
+	}
+
+	return result, nil
+}
+
+// AskQuestion implements terminal.MaestroBackend.
+func (a *TUIBackendAdapter) AskQuestion(ctx context.Context, question string) (string, error) {
+	return "Question answering coming soon. Use /review <PR#> to review a pull request.", nil
+}
+
+// GetRepoInfo implements terminal.MaestroBackend.
+func (a *TUIBackendAdapter) GetRepoInfo() terminal.RepoInfo {
+	return terminal.RepoInfo{
+		Owner:  a.owner,
+		Repo:   a.repo,
+		Branch: "main",
+	}
+}
+
+// IsReady implements terminal.MaestroBackend.
+func (a *TUIBackendAdapter) IsReady() bool {
+	return a.agent != nil
+}
+
+// tuiProgressConsole adapts progress callbacks to ConsoleInterface.
+type tuiProgressConsole struct {
+	onProgress func(status string)
+}
+
+func (c *tuiProgressConsole) StartSpinner(message string) {
+	if c.onProgress != nil {
+		c.onProgress(message)
+	}
+}
+func (c *tuiProgressConsole) StopSpinner() {}
+func (c *tuiProgressConsole) WithSpinner(ctx context.Context, message string, fn func() error) error {
+	return fn()
+}
+func (c *tuiProgressConsole) ShowComments(comments []PRReviewComment, metric MetricsCollector)                    {}
+func (c *tuiProgressConsole) ShowCommentsInteractive(comments []PRReviewComment, onPost func([]PRReviewComment) error) error {
+	return nil
+}
+func (c *tuiProgressConsole) ShowSummary(comments []PRReviewComment, metric MetricsCollector) {}
+func (c *tuiProgressConsole) StartReview(pr *github.PullRequest) {
+	if c.onProgress != nil && pr != nil {
+		c.onProgress(fmt.Sprintf("Starting review: %s", pr.GetTitle()))
+	}
+}
+func (c *tuiProgressConsole) ReviewingFile(file string, current, total int) {
+	if c.onProgress != nil {
+		c.onProgress(fmt.Sprintf("Reviewing %s (%d/%d)", file, current, total))
+	}
+}
+func (c *tuiProgressConsole) ConfirmReviewPost(commentCount int) (bool, error) { return false, nil }
+func (c *tuiProgressConsole) ReviewComplete() {
+	if c.onProgress != nil {
+		c.onProgress("Review complete")
+	}
+}
+func (c *tuiProgressConsole) UpdateSpinnerText(text string) {
+	if c.onProgress != nil {
+		c.onProgress(text)
+	}
+}
+func (c *tuiProgressConsole) ShowReviewMetrics(metrics MetricsCollector, comments []PRReviewComment) {}
+func (c *tuiProgressConsole) CollectAllFeedback(comments []PRReviewComment, metric MetricsCollector) error {
+	return nil
+}
+func (c *tuiProgressConsole) Confirm(opts PromptOptions) (bool, error) { return false, nil }
+func (c *tuiProgressConsole) FileError(filepath string, err error) {
+	if c.onProgress != nil {
+		c.onProgress(fmt.Sprintf("Error in %s: %v", filepath, err))
+	}
+}
+func (c *tuiProgressConsole) Printf(format string, a ...interface{})    {}
+func (c *tuiProgressConsole) Println(a ...interface{})                  {}
+func (c *tuiProgressConsole) PrintHeader(text string)                   {}
+func (c *tuiProgressConsole) NoIssuesFound(file string, chunkNumber, totalChunks int) {}
+func (c *tuiProgressConsole) SeverityIcon(severity string) string { return "" }
+func (c *tuiProgressConsole) Color() bool                          { return false }
+func (c *tuiProgressConsole) Spinner() *spinner.Spinner            { return nil }
+func (c *tuiProgressConsole) IsInteractive() bool                  { return false }
+
 func runModernUI(cfg *config) error {
 	printMaestroBanner()
-	
+	ctx := core.WithExecutionState(context.Background())
+
 	// Simple validation - just check if GitHub token is provided
 	if cfg.githubToken == "" {
 		fmt.Fprintln(os.Stderr, "GitHub token required via --github-token or MAESTRO_GITHUB_TOKEN")
 		return fmt.Errorf("GitHub token required")
 	}
-	
-	// Start the modern terminal UI
-	return terminal.RunModernUI()
+
+	// Configure logger to write to file only (not console) to avoid corrupting TUI
+	logLevel := logging.INFO
+	if cfg.verbose {
+		logLevel = logging.DEBUG
+	}
+	fileOutput, _ := logging.NewFileOutput(
+		filepath.Join(".", "dspy.log"),
+		logging.WithRotation(100*1024*1024, 5),
+		logging.WithJSONFormat(true),
+	)
+	logger := logging.NewLogger(logging.Config{
+		Severity: logLevel,
+		Outputs:  []logging.Output{fileOutput}, // File only, no console output
+	})
+	logging.SetLogger(logger)
+
+	// Validate model config and setup LLM
+	if err := validateModelConfig(cfg); err != nil {
+		return fmt.Errorf("model config is incorrect: %w", err)
+	}
+	llms.EnsureFactory()
+	modelID := constructModelID(cfg)
+	if err := core.ConfigureDefaultLLM(cfg.apiKey, modelID); err != nil {
+		return fmt.Errorf("failed to configure LLM: %w", err)
+	}
+
+	// Initialize GitHub tools and agent for real functionality
+	githubTools := NewGitHubTools(cfg.githubToken, cfg.owner, cfg.repo)
+	dbPath, err := CreateStoragePath(ctx, cfg.owner, cfg.repo)
+	if err != nil {
+		return fmt.Errorf("failed to create storage path: %w", err)
+	}
+
+	// Create agent to enable real reviews
+	agent, err := NewPRReviewAgent(ctx, githubTools, dbPath, &AgentConfig{
+		IndexWorkers:  cfg.indexWorkers,
+		ReviewWorkers: cfg.reviewWorkers,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to initialize agent: %w", err)
+	}
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		agent.Stop(shutdownCtx)
+	}()
+
+	// Create TUI config
+	tuiConfig := &terminal.MaestroConfig{
+		Owner:         cfg.owner,
+		Repo:          cfg.repo,
+		GitHubToken:   cfg.githubToken,
+		Verbose:       cfg.verbose,
+		IndexWorkers:  cfg.indexWorkers,
+		ReviewWorkers: cfg.reviewWorkers,
+	}
+
+	// Create real backend adapter wrapping the agent
+	backend := NewTUIBackendAdapter(agent, githubTools, cfg.owner, cfg.repo)
+
+	// Start the unified Maestro TUI
+	return terminal.RunMaestro(tuiConfig, backend)
 }
 
 func showHelpMessage(c ConsoleInterface) {
@@ -1304,6 +1577,7 @@ func showHelpMessage(c ConsoleInterface) {
 		{"/review <PR>", "Review a pull request"},
 		{"/sessions", "Manage sessions"},
 		{"/tools", "Manage CLI tools"},
+		{"/status", "Show indexing status"},
 		{"/exit", "Exit"},
 	}
 

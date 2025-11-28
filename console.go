@@ -47,10 +47,11 @@ type ConsoleInterface interface {
 
 // Console handles user-facing output separate from logging.
 type Console struct {
-	w       io.Writer
-	logger  *logging.Logger // For debug logs
-	spinner *spinner.Spinner
-	color   bool
+	w             io.Writer
+	logger        *logging.Logger // For debug logs
+	spinner       *spinner.Spinner
+	color         bool
+	isInteractive bool // Cached terminal interactivity state
 
 	mu sync.Mutex
 }
@@ -111,11 +112,23 @@ func NewConsole(w io.Writer, logger *logging.Logger, cfg *SpinnerConfig) Console
 		color = isatty.IsTerminal(f.Fd())
 	}
 
+	// Detect if terminal is interactive (cache at creation time before go-prompt modifies terminal)
+	// Check both stdout and stdin for more robust detection
+	isInteractive := false
+	if f, ok := w.(*os.File); ok {
+		isInteractive = isatty.IsTerminal(f.Fd())
+	}
+	// Fallback: also check stdin (more reliable when other libs modify stdout)
+	if !isInteractive {
+		isInteractive = isatty.IsTerminal(os.Stdin.Fd())
+	}
+
 	return &Console{
-		w:       w,
-		logger:  logger,
-		color:   color,
-		spinner: s,
+		w:             w,
+		logger:        logger,
+		color:         color,
+		spinner:       s,
+		isInteractive: isInteractive,
 	}
 }
 
@@ -671,11 +684,10 @@ func indent(s string, spaces int) string {
 }
 
 // IsInteractive returns whether the console is running in an interactive terminal.
+// The value is cached at Console creation time to avoid issues with go-prompt
+// modifying terminal state during interactive sessions.
 func (c *Console) IsInteractive() bool {
-	if f, ok := c.w.(*os.File); ok {
-		return isatty.IsTerminal(f.Fd())
-	}
-	return false
+	return c.isInteractive
 }
 
 // ShowCommentsInteractive launches the interactive TUI for reviewing comments.

@@ -1,4 +1,4 @@
-.PHONY: build clean run test deps setup local stop-local
+.PHONY: build clean run test deps setup local stop-local kill
 
 # Build maestro with suppressed SQLite warnings
 build:
@@ -69,6 +69,10 @@ stop-local:
 	@echo "Stopping local LLM servers..."
 	@tmux kill-session -t embedding 2>/dev/null && echo "Stopped embedding server" || echo "Embedding server not running"
 	@tmux kill-session -t llm 2>/dev/null && echo "Stopped LLM server" || echo "LLM server not running"
+
+# Kill running maestro process
+kill:
+	@pkill -f "./maestro" 2>/dev/null && echo "Killed maestro process" || echo "No maestro process running"
 
 # Default target
 all: build

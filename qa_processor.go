@@ -105,6 +105,14 @@ func (p *RepoQAProcessor) Process(ctx context.Context, task agents.Task, context
 		return nil, fmt.Errorf("task %s: %w", task.ID, err)
 	}
 
+	logger := logging.GetLogger()
+
+	// Try sgrep semantic search first (if available and indexed)
+	sgrepResults := p.searchWithSgrep(ctx, metadata.Question, 5)
+	if len(sgrepResults) > 0 {
+		logger.Info(ctx, "sgrep semantic search found %d results for: %s", len(sgrepResults), metadata.Question)
+	}
+
 	// Check if we have agentic search available
 	if agenticAdapter, ok := p.ragStore.(*AgenticRAGAdapter); ok {
 		// Use direct agentic search with the text query
@@ -115,6 +123,12 @@ func (p *RepoQAProcessor) Process(ctx context.Context, task agents.Task, context
 
 		// Convert agentic results to traditional format for compatibility
 		similar := p.convertAgenticResultToContent(result)
+
+		// Merge sgrep results with agentic results
+		if len(sgrepResults) > 0 {
+			similar = p.mergeSgrepResults(similar, sgrepResults)
+		}
+
 		return p.processResults(ctx, signature, metadata, similar)
 	}
 
@@ -128,6 +142,11 @@ func (p *RepoQAProcessor) Process(ctx context.Context, task agents.Task, context
 	similar, err := p.ragStore.FindSimilar(ctx, questionEmbedding.Vector, 10)
 	if err != nil {
 		return nil, fmt.Errorf("failed to find similar content: %w", err)
+	}
+
+	// Merge sgrep results with RAG results
+	if len(sgrepResults) > 0 {
+		similar = p.mergeSgrepResults(similar, sgrepResults)
 	}
 
 	return p.processResults(ctx, signature, metadata, similar)
@@ -400,4 +419,100 @@ func (p *RepoQAProcessor) convertAgenticResultToContent(result *SynthesizedResul
 	}
 
 	return contents
+}
+
+// sgrepResult represents a single sgrep search result.
+type sgrepResult struct {
+	FilePath  string  `json:"file_path"`
+	StartLine int     `json:"start_line"`
+	EndLine   int     `json:"end_line"`
+	Content   string  `json:"content"`
+	Score     float64 `json:"score"`
+}
+
+// searchWithSgrep performs semantic code search using SgrepTool.
+// Returns empty slice if sgrep is not available or not indexed.
+func (p *RepoQAProcessor) searchWithSgrep(ctx context.Context, query string, limit int) []sgrepResult {
+	logger := logging.GetLogger()
+
+	// Use SgrepTool for search
+	sgrepTool := NewSgrepTool(logger, "")
+
+	// Check if sgrep is available
+	if !sgrepTool.isAvailable(ctx) {
+		logger.Debug(ctx, "sgrep not installed, skipping semantic search")
+		return nil
+	}
+
+	// Execute search using SgrepTool
+	results, err := sgrepTool.Search(ctx, query, limit)
+	if err != nil {
+		if strings.Contains(err.Error(), "not indexed") {
+			logger.Debug(ctx, "Repository not indexed for sgrep, skipping semantic search")
+		} else {
+			logger.Debug(ctx, "sgrep search failed: %v", err)
+		}
+		return nil
+	}
+
+	// Convert SgrepSearchResult to sgrepResult for backward compatibility
+	sgrepResults := make([]sgrepResult, len(results))
+	for i, r := range results {
+		sgrepResults[i] = sgrepResult{
+			FilePath:  r.FilePath,
+			StartLine: r.StartLine,
+			EndLine:   r.EndLine,
+			Content:   r.Content,
+			Score:     r.Score,
+		}
+	}
+
+	logger.Debug(ctx, "sgrep returned %d semantic matches for query: %s", len(sgrepResults), query)
+	return sgrepResults
+}
+
+// mergeSgrepResults merges sgrep semantic results with existing Content results.
+// sgrep results are prepended as they're semantically relevant.
+func (p *RepoQAProcessor) mergeSgrepResults(existing []*Content, sgrepResults []sgrepResult) []*Content {
+	merged := make([]*Content, 0, len(existing)+len(sgrepResults))
+
+	// Add sgrep results first (semantically relevant)
+	for i, r := range sgrepResults {
+		// Convert distance score to relevance (lower distance = higher relevance)
+		relevance := 1.0 - r.Score
+		if relevance < 0 {
+			relevance = 0
+		}
+
+		content := &Content{
+			ID:   fmt.Sprintf("sgrep-semantic-%d", i),
+			Text: r.Content,
+			Metadata: map[string]string{
+				"file_path":    r.FilePath,
+				"start_line":   fmt.Sprintf("%d", r.StartLine),
+				"end_line":     fmt.Sprintf("%d", r.EndLine),
+				"content_type": ContentTypeRepository,
+				"source":       "sgrep_semantic",
+				"relevance":    fmt.Sprintf("%.2f", relevance),
+			},
+		}
+		merged = append(merged, content)
+	}
+
+	// Add existing results, avoiding duplicates
+	seenFiles := make(map[string]bool)
+	for _, r := range sgrepResults {
+		seenFiles[r.FilePath] = true
+	}
+
+	for _, c := range existing {
+		filePath := c.Metadata["file_path"]
+		// Skip if we already have this file from sgrep
+		if seenFiles[filePath] {
+			continue
+		}
+		merged = append(merged, c)
+	}
+
+	return merged
 }

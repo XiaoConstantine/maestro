@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"os/exec"
 	"strings"
 	"sync"
 	"time"
@@ -576,10 +578,13 @@ func NewUnifiedReActAgent(id string, searchTool *SimpleSearchTool, logger *loggi
 			"AVAILABLE TOOLS:\n" +
 			"- search_files: Find files by pattern (parameter: 'pattern')\n" +
 			"- search_content: Search text in files (parameters: 'query', optional 'path')\n" +
+			"- semantic_search: Find conceptually similar code using sgrep (parameter: 'query'). Best for natural language queries like 'error handling' or 'database connection'.\n" +
+			"- sgrep_index: Index repository for semantic search (parameter: 'path', defaults to '.'). Run this first if semantic_search says 'not indexed'.\n" +
+			"- sgrep_status: Check if repository is indexed for semantic search. Use to verify before semantic_search.\n" +
 			"- read_file: Read file contents (parameter: 'file_path')\n" +
 			"- Finish: Complete the search (no parameters)\n\n" +
-			"Tool calls are automatically formatted in XML by the system. " +
-			"Focus on selecting appropriate tools and parameters for the task.\n" +
+			"Tool calls are automatically formatted in XML by the system.\n" +
+			"For conceptual queries, prefer semantic_search over search_content.\n" +
 			"This instruction will be dynamically updated based on query analysis.",
 	)
 
@@ -817,6 +822,108 @@ func (ura *UnifiedReActAgent) registerSearchToolsWithXML() error {
 		},
 	}
 
+	// Semantic search tool using sgrep (when available)
+	semanticSearchTool := &SearchTool{
+		name:        "semantic_search",
+		description: "Perform semantic code search using embeddings to find conceptually similar code. Unlike text search, this understands meaning - search for 'error handling' to find try/catch, recover(), or error returns. Use 'query' parameter with natural language description of what you're looking for.",
+		searchTool:  ura.searchTool,
+		execute: func(ctx context.Context, params map[string]interface{}) (core.ToolResult, error) {
+			// Use XML-enabled parameter extraction
+			validatedParams, err := ura.extractXMLParameters(ctx, "semantic_search", params)
+			if err != nil {
+				return core.ToolResult{}, fmt.Errorf("XML parameter extraction failed: %w", err)
+			}
+
+			query, ok := validatedParams["query"].(string)
+			if !ok || query == "" {
+				if q, exists := validatedParams["search"].(string); exists && q != "" {
+					query = q
+				} else {
+					return core.ToolResult{}, fmt.Errorf("query parameter required - describe what code you're looking for")
+				}
+			}
+
+			limit := 10
+			if l, exists := validatedParams["limit"]; exists {
+				if lInt, ok := l.(int); ok {
+					limit = lInt
+				}
+			}
+
+			// Execute sgrep search via CLI
+			results, err := ura.executeSgrepSearch(ctx, query, limit)
+			if err != nil {
+				// Fallback to content search if sgrep not available
+				ura.logger.Debug(ctx, "sgrep semantic search unavailable, falling back to content search: %v", err)
+				grepResults, grepErr := ura.searchTool.GrepSearch(ctx, query, "**/*", 2)
+				if grepErr != nil {
+					return core.ToolResult{}, fmt.Errorf("both semantic and text search failed: %w", grepErr)
+				}
+				return core.ToolResult{
+					Data: ura.formatSearchResults(grepResults),
+					Metadata: map[string]interface{}{
+						"tool":         "semantic_search",
+						"fallback":     "content_search",
+						"query":        query,
+						"result_count": len(grepResults),
+					},
+				}, nil
+			}
+
+			return core.ToolResult{
+				Data: results,
+				Metadata: map[string]interface{}{
+					"tool":         "semantic_search",
+					"query":        query,
+					"limit":        limit,
+					"xml_enabled":  true,
+				},
+			}, nil
+		},
+	}
+
+	// sgrep index tool - allows agents to trigger indexing
+	sgrepIndexTool := &SearchTool{
+		name:        "sgrep_index",
+		description: "Index a directory for semantic code search. Run this before using semantic_search if the repository hasn't been indexed yet. Use 'path' parameter (defaults to current directory).",
+		searchTool:  ura.searchTool,
+		execute: func(ctx context.Context, params map[string]interface{}) (core.ToolResult, error) {
+			path := "."
+			if p, exists := params["path"].(string); exists && p != "" {
+				path = p
+			}
+
+			sgrepTool := NewSgrepTool(ura.logger, ura.searchTool.rootPath)
+			result, err := sgrepTool.Execute(ctx, map[string]interface{}{
+				"action": "index",
+				"path":   path,
+			})
+			if err != nil {
+				return core.ToolResult{}, fmt.Errorf("sgrep index failed: %w", err)
+			}
+
+			return result, nil
+		},
+	}
+
+	// sgrep status tool - check if repository is indexed
+	sgrepStatusTool := &SearchTool{
+		name:        "sgrep_status",
+		description: "Check if the current repository is indexed for semantic search. Use this to determine if you need to run sgrep_index before semantic_search.",
+		searchTool:  ura.searchTool,
+		execute: func(ctx context.Context, params map[string]interface{}) (core.ToolResult, error) {
+			sgrepTool := NewSgrepTool(ura.logger, ura.searchTool.rootPath)
+			result, err := sgrepTool.Execute(ctx, map[string]interface{}{
+				"action": "status",
+			})
+			if err != nil {
+				return core.ToolResult{}, fmt.Errorf("sgrep status failed: %w", err)
+			}
+
+			return result, nil
+		},
+	}
+
 	// Register all tools with the ReAct agent
 	if err := ura.reactAgent.RegisterTool(fileSearchTool); err != nil {
 		return fmt.Errorf("failed to register file search tool: %w", err)
@@ -828,6 +935,18 @@ func (ura *UnifiedReActAgent) registerSearchToolsWithXML() error {
 
 	if err := ura.reactAgent.RegisterTool(readFileTool); err != nil {
 		return fmt.Errorf("failed to register read file tool: %w", err)
+	}
+
+	if err := ura.reactAgent.RegisterTool(semanticSearchTool); err != nil {
+		return fmt.Errorf("failed to register semantic search tool: %w", err)
+	}
+
+	if err := ura.reactAgent.RegisterTool(sgrepIndexTool); err != nil {
+		return fmt.Errorf("failed to register sgrep index tool: %w", err)
+	}
+
+	if err := ura.reactAgent.RegisterTool(sgrepStatusTool); err != nil {
+		return fmt.Errorf("failed to register sgrep status tool: %w", err)
 	}
 
 	return nil
@@ -1358,9 +1477,11 @@ QUALITY: Balanced approach to code discovery and analysis
 
 search_files - Find files by pattern (provide 'pattern' parameter)
 search_content - Search text in files (provide 'query' parameter, optional 'path')
+semantic_search - Find conceptually similar code using embeddings (provide 'query' parameter)
 read_file - Read a specific file (provide 'file_path' parameter)
 Finish - Complete the search (no parameters needed)
 
+Use semantic_search for natural language queries like 'error handling' or 'database connection'.
 Tool parameters will be automatically formatted in XML by the system.
 Focus on selecting the right tool and parameters for the task.
 
@@ -1481,6 +1602,86 @@ func (ura *UnifiedReActAgent) formatSearchResults(results []*SearchResult) strin
 			result.FilePath, result.LineNumber, result.Line, result.Score))
 	}
 	return strings.Join(formatted, "\n---\n")
+}
+
+// executeSgrepSearch runs sgrep CLI for semantic code search.
+// Returns formatted results or error if sgrep is not available.
+func (ura *UnifiedReActAgent) executeSgrepSearch(ctx context.Context, query string, limit int) (string, error) {
+	// Check if sgrep is installed
+	checkCmd := exec.CommandContext(ctx, "which", "sgrep")
+	if err := checkCmd.Run(); err != nil {
+		return "", fmt.Errorf("sgrep not installed: %w", err)
+	}
+
+	// Execute sgrep search command
+	// sgrep "query" -n <limit> --json
+	cmd := exec.CommandContext(ctx, "sgrep", query, "-n", fmt.Sprintf("%d", limit), "--json")
+	cmd.Dir = ura.searchTool.rootPath
+
+	ura.logger.Debug(ctx, "Executing sgrep: %s in %s", query, ura.searchTool.rootPath)
+
+	output, err := cmd.Output()
+	if err != nil {
+		// Check if it's an exit error with stderr
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			stderr := string(exitErr.Stderr)
+			// Check if it's just "not indexed" - that's expected for unindexed repos
+			if strings.Contains(stderr, "not indexed") {
+				return "", fmt.Errorf("repository not indexed - run 'sgrep index .' first")
+			}
+			return "", fmt.Errorf("sgrep search failed: %s", stderr)
+		}
+		return "", fmt.Errorf("sgrep search failed: %w", err)
+	}
+
+	// Parse JSON output and format nicely
+	return ura.formatSgrepResults(string(output))
+}
+
+// formatSgrepResults formats sgrep JSON output for display.
+func (ura *UnifiedReActAgent) formatSgrepResults(jsonOutput string) (string, error) {
+	// Parse sgrep JSON results
+	var results []struct {
+		FilePath  string  `json:"file_path"`
+		StartLine int     `json:"start_line"`
+		EndLine   int     `json:"end_line"`
+		Content   string  `json:"content"`
+		Score     float64 `json:"score"`
+	}
+
+	if err := json.Unmarshal([]byte(jsonOutput), &results); err != nil {
+		// If not JSON, return raw output
+		return jsonOutput, nil
+	}
+
+	if len(results) == 0 {
+		return "No semantic matches found.", nil
+	}
+
+	var formatted []string
+	for i, r := range results {
+		if i >= 10 {
+			formatted = append(formatted, fmt.Sprintf("... and %d more results", len(results)-i))
+			break
+		}
+
+		// Truncate content if too long
+		content := r.Content
+		if len(content) > 500 {
+			content = content[:500] + "..."
+		}
+
+		// Convert distance score to relevance (lower distance = higher relevance)
+		relevance := 1.0 - r.Score
+		if relevance < 0 {
+			relevance = 0
+		}
+
+		formatted = append(formatted, fmt.Sprintf("🔍 %s:%d-%d (relevance: %.2f)\n```\n%s\n```",
+			r.FilePath, r.StartLine, r.EndLine, relevance, content))
+	}
+
+	return strings.Join(formatted, "\n\n"), nil
 }
 
 // formatContentResults is now handled by formatSearchResults

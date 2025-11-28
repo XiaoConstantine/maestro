@@ -105,6 +105,7 @@ func (ara *AgenticRAGAdapter) FindSimilarWithLateInteraction(ctx context.Context
 // Enhanced methods that provide better agentic search interface
 
 // SearchCode performs code-specific agentic search.
+// The ReAct agent can use the semantic_search tool (via sgrep CLI) when installed.
 func (ara *AgenticRAGAdapter) SearchCode(ctx context.Context, query string, codeContext string) (*SynthesizedResult, error) {
 	codeQuery := fmt.Sprintf("code analysis: %s", query)
 	return ara.orchestrator.ExecuteSearch(ctx, codeQuery, codeContext)

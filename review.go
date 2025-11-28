@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -108,6 +109,9 @@ type ReviewAgent interface {
 	Stop(ctx context.Context)
 	Metrics(ctx context.Context) MetricsCollector
 	Orchestrator(ctx context.Context) *agents.FlexibleOrchestrator
+	ClonedRepoPath() string
+	WaitForClone(ctx context.Context, timeout time.Duration) string
+	GetIndexingStatus() *IndexingStatus
 	Close() error
 }
 
@@ -195,6 +199,8 @@ type PRReviewAgent struct {
 	workers             *AgentConfig
 	indexStatus         *IndexingStatus // Track background indexing progress
 	hadExistingComments bool            // Track if any comments/reviews exist (including bots)
+	clonedRepoPath      string          // Path to cloned repo in /tmp for sgrep indexing
+	sgrepTool           *SgrepTool      // Sgrep tool for semantic search
 }
 
 type ThreadTracker struct {
@@ -704,11 +710,23 @@ func (a *PRReviewAgent) startBackgroundIndexing(ctx context.Context, githubTool 
 	a.indexStatus.isIndexing = true
 	a.indexStatus.mu.Unlock()
 
-	// Silent background indexing - no console output
-	indexer := NewRepoIndexer(githubTool, store, workers)
+	// Get repo info for cloning
+	repoInfo := githubTool.GetRepositoryInfo(ctx)
+	repoFullName := fmt.Sprintf("%s/%s", repoInfo.Owner, repoInfo.Name)
 
-	// Use background indexing mode (no console/spinners)
-	err := indexer.IndexRepositoryBackground(ctx, "", dbPath)
+	logger.Debug(ctx, "Starting background indexing for %s using sgrep", repoFullName)
+
+	// Clone repo to /tmp and index with sgrep
+	err := a.cloneAndIndexWithSgrep(ctx, repoFullName, "")
+
+	// Fall back to legacy indexing if sgrep fails
+	if err != nil {
+		logger.Debug(ctx, "sgrep indexing failed (%v), falling back to legacy indexer", err)
+
+		// Silent background indexing - no console output
+		indexer := NewRepoIndexer(githubTool, store, workers)
+		err = indexer.IndexRepositoryBackground(ctx, "", dbPath)
+	}
 
 	a.indexStatus.mu.Lock()
 	defer a.indexStatus.mu.Unlock()
@@ -726,6 +744,81 @@ func (a *PRReviewAgent) startBackgroundIndexing(ctx context.Context, githubTool 
 	}
 
 	a.indexStatus.isIndexing = false
+}
+
+// cloneAndIndexWithSgrep clones a repo to /tmp and indexes it with sgrep.
+func (a *PRReviewAgent) cloneAndIndexWithSgrep(ctx context.Context, repoFullName, branch string) error {
+	logger := logging.GetLogger()
+
+	// Check if sgrep is available
+	sgrepTool := NewSgrepTool(logger, "")
+	if !sgrepTool.isAvailable(ctx) {
+		return fmt.Errorf("sgrep not installed")
+	}
+
+	// Update progress: starting clone
+	a.indexStatus.mu.Lock()
+	a.indexStatus.progress = 0.1
+	a.indexStatus.mu.Unlock()
+
+	// Create temp directory for the repo
+	tmpDir, err := os.MkdirTemp("", "maestro-repo-*")
+	if err != nil {
+		return fmt.Errorf("failed to create temp directory: %w", err)
+	}
+
+	logger.Info(ctx, "📦 Cloning %s to %s", repoFullName, tmpDir)
+
+	// Clone using gh CLI
+	args := []string{"repo", "clone", repoFullName, tmpDir}
+	if branch != "" {
+		args = append(args, "--", "-b", branch)
+	}
+
+	cmd := exec.CommandContext(ctx, "gh", args...)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		os.RemoveAll(tmpDir)
+		return fmt.Errorf("failed to clone repo: %w (output: %s)", err, string(output))
+	}
+
+	// Only set clonedRepoPath AFTER clone completes successfully
+	// This ensures ClonedRepoPath() returns empty until files are available
+	a.clonedRepoPath = tmpDir
+
+	// Update progress: clone complete, starting index
+	a.indexStatus.mu.Lock()
+	a.indexStatus.progress = 0.3
+	a.indexStatus.mu.Unlock()
+
+	logger.Info(ctx, "✅ Clone complete, indexing with sgrep...")
+
+	// Update sgrep tool with the cloned path
+	a.sgrepTool = NewSgrepTool(logger, tmpDir)
+
+	// Index with sgrep (this takes the most time)
+	// Run sgrep index and capture output for progress
+	indexCmd := exec.CommandContext(ctx, "sgrep", "index", ".")
+	indexCmd.Dir = tmpDir
+
+	// Capture output to show progress
+	output, err := indexCmd.CombinedOutput()
+	if err != nil {
+		os.RemoveAll(tmpDir)
+		return fmt.Errorf("sgrep indexing failed: %w (output: %s)", err, string(output))
+	}
+
+	// Log sgrep output
+	if len(output) > 0 {
+		logger.Info(ctx, "sgrep: %s", strings.TrimSpace(string(output)))
+	}
+
+	// Update progress: indexing complete
+	a.indexStatus.mu.Lock()
+	a.indexStatus.progress = 0.9
+	a.indexStatus.mu.Unlock()
+
+	logger.Info(ctx, "🔍 sgrep indexing completed for %s", repoFullName)
+	return nil
 }
 
 func (a *PRReviewAgent) GetIndexingStatus() *IndexingStatus {
@@ -752,12 +845,57 @@ func (a *PRReviewAgent) Metrics(ctx context.Context) MetricsCollector {
 
 }
 
+// ClonedRepoPath returns the path to the cloned repository on disk.
+// Returns empty string if clone hasn't completed yet.
+func (a *PRReviewAgent) ClonedRepoPath() string {
+	return a.clonedRepoPath
+}
+
+// WaitForClone waits for the repository clone to complete, with a timeout.
+// Returns the cloned repo path, or empty string if timeout or clone failed.
+func (a *PRReviewAgent) WaitForClone(ctx context.Context, timeout time.Duration) string {
+	logger := logging.GetLogger()
+
+	deadline := time.Now().Add(timeout)
+	checkInterval := 500 * time.Millisecond
+
+	for time.Now().Before(deadline) {
+		if a.clonedRepoPath != "" {
+			return a.clonedRepoPath
+		}
+
+		// Check if indexing failed
+		a.indexStatus.mu.RLock()
+		lastErr := a.indexStatus.lastError
+		a.indexStatus.mu.RUnlock()
+
+		if lastErr != nil {
+			logger.Debug(ctx, "Clone/indexing failed: %v", lastErr)
+			return ""
+		}
+
+		select {
+		case <-ctx.Done():
+			return ""
+		case <-time.After(checkInterval):
+			// Continue waiting
+		}
+	}
+
+	logger.Debug(ctx, "Timeout waiting for clone to complete")
+	return ""
+}
+
 func (a *PRReviewAgent) Close() error {
+	// Clean up cloned repo directory
+	if a.clonedRepoPath != "" {
+		os.RemoveAll(a.clonedRepoPath)
+	}
+
 	if a.rag != nil {
 		return a.rag.Close()
 	}
 	return nil
-
 }
 
 // ReviewPR reviews a complete pull request.
@@ -1009,6 +1147,10 @@ func (a *PRReviewAgent) analyzePatterns(ctx context.Context, tasks []PRReviewTas
 
 		// Create embedding for the entire file to find similar patterns
 		llm := core.GetTeacherLLM()
+		if llm == nil {
+			// Skip pattern analysis if teacher LLM is not configured
+			continue
+		}
 
 		chunks, err := splitContentForEmbedding(task.FileContent, 1024) // Keep under 10KB limit
 		if err != nil {
@@ -1124,7 +1266,9 @@ func (a *PRReviewAgent) analyzePatterns(ctx context.Context, tasks []PRReviewTas
 						
 						// Update spinner progress
 						processed := processedCount.Add(1)
-						console.Spinner().Suffix = fmt.Sprintf(" (chunk %d/%d) of %s", processed, len(chunks), task.FilePath)
+						if s := console.Spinner(); s != nil {
+							s.Suffix = fmt.Sprintf(" (chunk %d/%d) of %s", processed, len(chunks), task.FilePath)
+						}
 					}
 				}()
 			}
@@ -2548,7 +2692,8 @@ func (a *PRReviewAgent) processComment(ctx context.Context, comment *github.Pull
 func (a *PRReviewAgent) generateResponse(ctx context.Context, thread *ThreadTracker, console ConsoleInterface) (*PRReviewComment, error) {
 	logger := logging.GetLogger()
 	console.Println(aurora.Cyan("Generating response..."))
-	if thread.FileContent == "" {
+	// Only try to refresh file content if there's a file path (skip PR-level comments)
+	if thread.FileContent == "" && thread.LastComment.FilePath != "" {
 		if err := a.refreshThreadContent(ctx, thread); err != nil {
 			logger.Warn(ctx, "Could not refresh file content for %s: %v",
 				thread.LastComment.FilePath, err)
