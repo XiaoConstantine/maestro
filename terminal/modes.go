@@ -12,6 +12,16 @@ const (
 	ModeDashboard
 )
 
+// InputFocus represents which area has keyboard focus in input mode.
+type InputFocus int
+
+const (
+	// FocusInput means the input area has focus.
+	FocusInput InputFocus = iota
+	// FocusReviewList means the review results list has focus.
+	FocusReviewList
+)
+
 // String returns a human-readable name for the mode.
 func (m MaestroMode) String() string {
 	switch m {
