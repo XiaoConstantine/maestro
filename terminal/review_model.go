@@ -48,8 +48,10 @@ type ReviewModel struct {
 	fileGroups     []FileGroup
 	filteredGroups []FileGroup
 
-	selectedIdx int // Global index in flattened list
-	filterMode  FilterMode
+	selectedIdx      int // Global index in flattened list
+	selectedFileIdx  int // Currently selected file group index
+	selectedInFile   int // Index within current file group
+	filterMode       FilterMode
 
 	listViewport   viewport.Model
 	detailViewport viewport.Model
@@ -75,10 +77,11 @@ type ReviewStyles struct {
 	SectionLine  lipgloss.Style
 
 	// List items
-	FileItem     lipgloss.Style
-	FileActive   lipgloss.Style
-	CommentItem  lipgloss.Style
-	CommentActive lipgloss.Style
+	FileItem         lipgloss.Style
+	FileActive       lipgloss.Style
+	CommentItem      lipgloss.Style
+	CommentActive    lipgloss.Style
+	CommentHighlight lipgloss.Style
 
 	// Severity badges
 	SeverityCritical   lipgloss.Style
@@ -152,6 +155,11 @@ func createCrushReviewStyles(theme *Theme) *ReviewStyles {
 
 		CommentActive: lipgloss.NewStyle().
 			Foreground(theme.TextPrimary),
+
+		CommentHighlight: lipgloss.NewStyle().
+			Background(lipgloss.Color("#3A3C55")).
+			Foreground(theme.TextPrimary).
+			Bold(true),
 
 		// Severity - simple colored dots
 		SeverityCritical: lipgloss.NewStyle().
@@ -263,6 +271,9 @@ func (m *ReviewModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.showDetail = false
 			}
 
+		case "tab", " ":
+			m.toggleCurrentFileGroup()
+
 		case "1":
 			m.setFilter(FilterCritical)
 
@@ -343,15 +354,66 @@ func (m *ReviewModel) updateViewportSizes() {
 }
 
 func (m *ReviewModel) moveDown() {
-	total := m.getTotalComments()
+	total := m.getTotalVisibleItems()
 	if m.selectedIdx < total-1 {
 		m.selectedIdx++
 	}
+	m.updateFileIndexFromSelected()
 }
 
 func (m *ReviewModel) moveUp() {
 	if m.selectedIdx > 0 {
 		m.selectedIdx--
+	}
+	m.updateFileIndexFromSelected()
+}
+
+func (m *ReviewModel) updateFileIndexFromSelected() {
+	idx := 0
+	for i, g := range m.filteredGroups {
+		if !g.Expanded {
+			if idx == m.selectedIdx {
+				m.selectedFileIdx = i
+				m.selectedInFile = -1
+				return
+			}
+			idx++
+		} else {
+			for j := range g.Comments {
+				if idx == m.selectedIdx {
+					m.selectedFileIdx = i
+					m.selectedInFile = j
+					return
+				}
+				idx++
+			}
+		}
+	}
+}
+
+func (m *ReviewModel) toggleCurrentFileGroup() {
+	if m.selectedFileIdx >= 0 && m.selectedFileIdx < len(m.filteredGroups) {
+		m.filteredGroups[m.selectedFileIdx].Expanded = !m.filteredGroups[m.selectedFileIdx].Expanded
+		m.recalculateSelectedIdx()
+	}
+}
+
+func (m *ReviewModel) recalculateSelectedIdx() {
+	idx := 0
+	for i, g := range m.filteredGroups {
+		if i == m.selectedFileIdx {
+			if !g.Expanded || m.selectedInFile < 0 {
+				m.selectedIdx = idx
+			} else {
+				m.selectedIdx = idx + m.selectedInFile
+			}
+			return
+		}
+		if g.Expanded {
+			idx += len(g.Comments)
+		} else {
+			idx++
+		}
 	}
 }
 
@@ -359,6 +421,18 @@ func (m *ReviewModel) getTotalComments() int {
 	total := 0
 	for _, g := range m.filteredGroups {
 		total += len(g.Comments)
+	}
+	return total
+}
+
+func (m *ReviewModel) getTotalVisibleItems() int {
+	total := 0
+	for _, g := range m.filteredGroups {
+		if g.Expanded {
+			total += len(g.Comments)
+		} else {
+			total++
+		}
 	}
 	return total
 }
@@ -423,6 +497,10 @@ func (m *ReviewModel) getFilteredComments() []ReviewComment {
 func (m *ReviewModel) getSelectedComment() *ReviewComment {
 	idx := 0
 	for _, g := range m.filteredGroups {
+		if !g.Expanded {
+			idx++
+			continue
+		}
 		for i := range g.Comments {
 			if idx == m.selectedIdx {
 				return &g.Comments[i]
@@ -574,14 +652,34 @@ func (m *ReviewModel) renderList() string {
 	currentIdx := 0
 	contentWidth := m.listViewport.Width() - 2
 
-	for _, group := range m.filteredGroups {
+	for fileIdx, group := range m.filteredGroups {
+		isFileSelected := fileIdx == m.selectedFileIdx && m.selectedInFile < 0
+
+		// Expand/collapse arrow
+		var arrow string
+		if group.Expanded {
+			arrow = "▼ "
+		} else {
+			arrow = "▶ "
+		}
+
 		// File header - Crush style section
-		fileName := truncatePath(group.Path, contentWidth-10)
+		fileName := truncatePath(group.Path, contentWidth-15)
 		countStr := fmt.Sprintf("(%d)", len(group.Comments))
 
-		fileHeader := lipgloss.NewStyle().
-			Foreground(m.theme.TextMuted).
-			Render(fileName + " " + countStr)
+		// Style based on whether file header is selected
+		var fileHeader string
+		if isFileSelected {
+			fileHeader = lipgloss.NewStyle().
+				Background(lipgloss.Color("#3A3C55")).
+				Foreground(m.theme.TextPrimary).
+				Bold(true).
+				Render(arrow + fileName + " " + countStr)
+		} else {
+			fileHeader = lipgloss.NewStyle().
+				Foreground(m.theme.TextMuted).
+				Render(arrow + fileName + " " + countStr)
+		}
 
 		// Add separator line
 		lineWidth := contentWidth - lipgloss.Width(fileHeader) - 1
@@ -590,6 +688,12 @@ func (m *ReviewModel) renderList() string {
 		}
 
 		lines = append(lines, fileHeader)
+
+		if !group.Expanded {
+			currentIdx++
+			lines = append(lines, "") // Space between files
+			continue
+		}
 
 		// Comments under this file
 		for i, comment := range group.Comments {
@@ -641,9 +745,7 @@ func (m *ReviewModel) renderCommentLine(comment ReviewComment, selected bool, ma
 
 	// Style based on selection
 	if selected {
-		preview = lipgloss.NewStyle().
-			Foreground(m.theme.TextPrimary).
-			Render(preview)
+		preview = m.styles.CommentHighlight.Render(preview)
 	} else {
 		preview = m.styles.StatusInfo.Render(preview)
 	}
@@ -657,11 +759,13 @@ func (m *ReviewModel) renderCommentLine(comment ReviewComment, selected bool, ma
 
 	line := strings.Join(parts, " ")
 
-	// Add selection indicator
+	// Add selection indicator with highlight background
 	if selected {
-		line = lipgloss.NewStyle().
-			Foreground(m.theme.StatusHighlight).
-			Render("▸ ") + line
+		indicator := lipgloss.NewStyle().
+			Foreground(m.theme.Accent).
+			Bold(true).
+			Render("▸ ")
+		line = indicator + m.styles.CommentHighlight.Render(line)
 	} else {
 		line = "  " + line
 	}
@@ -742,10 +846,9 @@ func (m *ReviewModel) renderStatusBar() string {
 	// Crush-style hints at bottom
 	hints := []string{
 		"j/k navigate",
-		"enter view",
-		"0-3 filter",
-		"p post",
-		"q quit",
+		"enter view details",
+		"tab focus input",
+		"esc close",
 	}
 
 	hintStr := strings.Join(hints, " • ")

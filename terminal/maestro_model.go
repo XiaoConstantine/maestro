@@ -35,10 +35,13 @@ type MaestroModel struct {
 	viewport viewport.Model
 
 	// Inline review results (Crush-style - results shown in conversation)
-	reviewResults     []ReviewComment
-	selectedReviewIdx int
-	showReviewDetail  bool
-	inputFocus        InputFocus
+	reviewResults       []ReviewComment
+	selectedReviewIdx   int
+	showReviewDetail    bool
+	inputFocus          InputFocus
+	reviewFileExpanded  map[string]bool // Track expanded/collapsed file groups
+	selectedFileIdx     int             // Currently selected file group index
+	selectedCommentIdx  int             // Index within current file group (-1 if file header selected)
 
 	// Dimensions
 	width  int
@@ -135,6 +138,14 @@ func (m *MaestroModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, cmd)
 		}
 
+	case tea.MouseWheelMsg:
+		// Handle mouse wheel scrolling in the viewport
+		if msg.Button == tea.MouseWheelUp {
+			m.viewport.ScrollUp(3)
+		} else if msg.Button == tea.MouseWheelDown {
+			m.viewport.ScrollDown(3)
+		}
+
 	case tea.KeyPressMsg:
 		// Global key handling
 		switch msg.String() {
@@ -185,16 +196,16 @@ func (m *MaestroModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if len(m.reviewResults) > 0 && m.inputFocus == FocusReviewList && !m.commandPalette.IsVisible() {
 			switch msg.String() {
 			case "j", "down":
-				if m.selectedReviewIdx < len(m.reviewResults)-1 {
-					m.selectedReviewIdx++
-					m.renderMessages()
-				}
+				m.moveReviewDown()
+				m.renderMessages()
 				return m, nil
 			case "k", "up":
-				if m.selectedReviewIdx > 0 {
-					m.selectedReviewIdx--
-					m.renderMessages()
-				}
+				m.moveReviewUp()
+				m.renderMessages()
+				return m, nil
+			case " ":
+				m.toggleCurrentFileExpand()
+				m.renderMessages()
 				return m, nil
 			case "enter", "l", "right":
 				m.showReviewDetail = !m.showReviewDetail
@@ -242,7 +253,11 @@ func (m *MaestroModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Store review results for inline display (Crush-style)
 		m.reviewResults = msg.Comments
 		m.selectedReviewIdx = 0
+		m.selectedFileIdx = 0
+		m.selectedCommentIdx = 0
 		m.showReviewDetail = false
+		m.reviewFileExpanded = make(map[string]bool) // Reset expanded state
+		m.initReviewFileExpanded()
 		// Focus on review list when results arrive
 		m.inputFocus = FocusReviewList
 		m.inputModel.Blur()
@@ -290,6 +305,7 @@ func (m *MaestroModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m *MaestroModel) View() tea.View {
 	var view tea.View
 	view.AltScreen = true
+	view.MouseMode = tea.MouseModeCellMotion // Enable mouse wheel scrolling
 
 	if !m.ready {
 		view.SetContent("Initializing...")
@@ -708,7 +724,7 @@ func (m *MaestroModel) renderInlineReview() string {
 	fileGroups := groupCommentsByFile(m.reviewResults)
 
 	// Render in two columns if showing detail, otherwise full width list
-	if m.showReviewDetail && m.selectedReviewIdx < len(m.reviewResults) {
+	if m.showReviewDetail && m.getSelectedReviewComment() != nil {
 		// Split layout: 40% list, 60% detail
 		listWidth := contentWidth * 2 / 5
 		detailWidth := contentWidth - listWidth - 3
@@ -747,7 +763,7 @@ func (m *MaestroModel) renderInlineReview() string {
 	var hint string
 	if m.inputFocus == FocusReviewList {
 		hint = lipgloss.NewStyle().Foreground(m.theme.TextMuted).
-			Render("j/k navigate • enter view details • tab focus input • esc close")
+			Render("j/k navigate • space expand/collapse • enter view details • tab focus input • esc close")
 	} else {
 		hint = lipgloss.NewStyle().Foreground(m.theme.TextMuted).
 			Render("tab focus review list")
@@ -759,15 +775,38 @@ func (m *MaestroModel) renderInlineReview() string {
 
 // renderReviewList renders the list of review comments.
 func (m *MaestroModel) renderReviewList(width int, fileGroups []FileGroup) string {
+	m.initReviewFileExpanded()
 	var lines []string
 	currentIdx := 0
+	isFocused := m.inputFocus == FocusReviewList
 
-	for _, group := range fileGroups {
+	for fileIdx, group := range fileGroups {
+		isExpanded := m.isFileExpanded(group.Path)
+		isFileSelected := isFocused && fileIdx == m.selectedFileIdx && m.selectedCommentIdx < 0
+
+		// Expand/collapse arrow (using simpler characters for compatibility)
+		var arrow string
+		if isExpanded {
+			arrow = "[-] "
+		} else {
+			arrow = "[+] "
+		}
+
 		// File header with separator line
-		fileName := truncatePath(group.Path, width-10)
+		fileName := truncatePath(group.Path, width-15)
 		countStr := fmt.Sprintf("(%d)", len(group.Comments))
-		header := lipgloss.NewStyle().Foreground(m.theme.TextMuted).
-			Render(fileName + " " + countStr)
+
+		var header string
+		if isFileSelected {
+			header = lipgloss.NewStyle().
+				Background(lipgloss.Color("#3A3C55")).
+				Foreground(m.theme.TextPrimary).
+				Bold(true).
+				Render(arrow + fileName + " " + countStr)
+		} else {
+			header = lipgloss.NewStyle().Foreground(m.theme.TextMuted).
+				Render(arrow + fileName + " " + countStr)
+		}
 
 		lineWidth := width - lipgloss.Width(header) - 1
 		if lineWidth > 0 {
@@ -776,9 +815,15 @@ func (m *MaestroModel) renderReviewList(width int, fileGroups []FileGroup) strin
 		}
 		lines = append(lines, header)
 
+		if !isExpanded {
+			currentIdx++
+			lines = append(lines, "")
+			continue
+		}
+
 		// Comments
 		for _, comment := range group.Comments {
-			isSelected := currentIdx == m.selectedReviewIdx
+			isSelected := isFocused && currentIdx == m.selectedReviewIdx
 			line := m.renderCommentLine(comment, isSelected, width-2)
 			lines = append(lines, "  "+line)
 			currentIdx++
@@ -813,44 +858,66 @@ func (m *MaestroModel) renderCommentLine(comment ReviewComment, selected bool, m
 	if category != "" {
 		previewWidth -= lipgloss.Width(category) + 1
 	}
+	if previewWidth < 5 {
+		previewWidth = 5
+	}
 
 	preview := comment.Content
-	if len(preview) > previewWidth {
+	if len(preview) > previewWidth && previewWidth > 1 {
 		preview = preview[:previewWidth-1] + "…"
 	}
 
-	if selected {
-		preview = lipgloss.NewStyle().Foreground(m.theme.TextPrimary).Render(preview)
-	} else {
-		preview = lipgloss.NewStyle().Foreground(m.theme.TextSecondary).Render(preview)
-	}
-
-	// Build line
+	// Build line parts
 	parts := []string{icon, lineNum}
 	if category != "" {
 		parts = append(parts, category)
 	}
-	parts = append(parts, preview)
 
-	line := strings.Join(parts, " ")
-
-	// Selection indicator
+	// Style content based on selection
 	if selected {
-		line = lipgloss.NewStyle().Foreground(m.theme.StatusHighlight).Render("▸ ") + line
-	} else {
-		line = "  " + line
+		// Highlight style for selected comment
+		highlightStyle := lipgloss.NewStyle().
+			Background(lipgloss.Color("#3A3C55")).
+			Foreground(m.theme.TextPrimary).
+			Bold(true)
+
+		preview = highlightStyle.Render(preview)
+		parts = append(parts, preview)
+		line := strings.Join(parts, " ")
+
+		// Selection indicator with accent color
+		indicator := lipgloss.NewStyle().
+			Foreground(m.theme.Accent).
+			Bold(true).
+			Render("▸ ")
+		return indicator + highlightStyle.Render(line)
 	}
 
-	return line
+	preview = lipgloss.NewStyle().Foreground(m.theme.TextSecondary).Render(preview)
+	parts = append(parts, preview)
+	line := strings.Join(parts, " ")
+	return "  " + line
+}
+
+// getSelectedReviewComment returns the currently selected review comment.
+func (m *MaestroModel) getSelectedReviewComment() *ReviewComment {
+	fileGroups := groupCommentsByFile(m.reviewResults)
+	if m.selectedFileIdx < 0 || m.selectedFileIdx >= len(fileGroups) {
+		return nil
+	}
+	group := fileGroups[m.selectedFileIdx]
+	if m.selectedCommentIdx < 0 || m.selectedCommentIdx >= len(group.Comments) {
+		return nil
+	}
+	return &group.Comments[m.selectedCommentIdx]
 }
 
 // renderReviewDetail renders the detail view for the selected comment.
 func (m *MaestroModel) renderReviewDetail(width int) string {
-	if m.selectedReviewIdx >= len(m.reviewResults) {
-		return ""
+	comment := m.getSelectedReviewComment()
+	if comment == nil {
+		return lipgloss.NewStyle().Foreground(m.theme.TextMuted).Render("Select a comment to view details")
 	}
-
-	comment := m.reviewResults[m.selectedReviewIdx]
 	var lines []string
 
 	// Header
@@ -927,6 +994,96 @@ func (m *MaestroModel) changeFocus() {
 	case FocusInput:
 		m.inputFocus = FocusReviewList
 		m.inputModel.Blur()
+	}
+}
+
+// initReviewFileExpanded initializes the expanded state for all file groups.
+func (m *MaestroModel) initReviewFileExpanded() {
+	if m.reviewFileExpanded == nil {
+		m.reviewFileExpanded = make(map[string]bool)
+	}
+	fileGroups := groupCommentsByFile(m.reviewResults)
+	for _, g := range fileGroups {
+		if _, exists := m.reviewFileExpanded[g.Path]; !exists {
+			m.reviewFileExpanded[g.Path] = true // Default expanded
+		}
+	}
+}
+
+// isFileExpanded returns whether a file group is expanded.
+func (m *MaestroModel) isFileExpanded(path string) bool {
+	if m.reviewFileExpanded == nil {
+		return true
+	}
+	expanded, exists := m.reviewFileExpanded[path]
+	return !exists || expanded
+}
+
+// toggleCurrentFileExpand toggles the expand/collapse state of the current file group.
+func (m *MaestroModel) toggleCurrentFileExpand() {
+	m.initReviewFileExpanded()
+	fileGroups := groupCommentsByFile(m.reviewResults)
+	if m.selectedFileIdx >= 0 && m.selectedFileIdx < len(fileGroups) {
+		path := fileGroups[m.selectedFileIdx].Path
+		m.reviewFileExpanded[path] = !m.isFileExpanded(path)
+	}
+}
+
+// getTotalVisibleReviewItems returns the total number of visible items in review list.
+func (m *MaestroModel) getTotalVisibleReviewItems() int {
+	m.initReviewFileExpanded()
+	fileGroups := groupCommentsByFile(m.reviewResults)
+	total := 0
+	for _, g := range fileGroups {
+		if m.isFileExpanded(g.Path) {
+			total += len(g.Comments)
+		} else {
+			total++ // Collapsed file header counts as one item
+		}
+	}
+	return total
+}
+
+// moveReviewDown moves selection down in the review list.
+func (m *MaestroModel) moveReviewDown() {
+	total := m.getTotalVisibleReviewItems()
+	if m.selectedReviewIdx < total-1 {
+		m.selectedReviewIdx++
+	}
+	m.updateFileIndexFromReviewIdx()
+}
+
+// moveReviewUp moves selection up in the review list.
+func (m *MaestroModel) moveReviewUp() {
+	if m.selectedReviewIdx > 0 {
+		m.selectedReviewIdx--
+	}
+	m.updateFileIndexFromReviewIdx()
+}
+
+// updateFileIndexFromReviewIdx updates selectedFileIdx and selectedCommentIdx from selectedReviewIdx.
+func (m *MaestroModel) updateFileIndexFromReviewIdx() {
+	m.initReviewFileExpanded()
+	fileGroups := groupCommentsByFile(m.reviewResults)
+	idx := 0
+	for i, g := range fileGroups {
+		if !m.isFileExpanded(g.Path) {
+			if idx == m.selectedReviewIdx {
+				m.selectedFileIdx = i
+				m.selectedCommentIdx = -1
+				return
+			}
+			idx++
+		} else {
+			for j := range g.Comments {
+				if idx == m.selectedReviewIdx {
+					m.selectedFileIdx = i
+					m.selectedCommentIdx = j
+					return
+				}
+				idx++
+			}
+		}
 	}
 }
 
