@@ -3,7 +3,7 @@ package terminal
 import (
 	"strings"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 )
 
 // PanePosition represents the position of a pane.
@@ -62,7 +62,7 @@ func (sp *SplitPaneModel) Update(msg tea.Msg) (SplitPaneModel, tea.Cmd) {
 		sp.width = msg.Width
 		sp.height = msg.Height
 
-	case tea.KeyMsg:
+	case tea.KeyPressMsg:
 		switch msg.String() {
 		case "tab":
 			// Cycle through panes

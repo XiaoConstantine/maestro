@@ -12,7 +12,7 @@ clean:
 
 # Run maestro in interactive mode
 run:
-	@go run . --owner=XiaoConstantine --repo=dspy-go --model=google:gemini-2.5-flash 2>&1 | tee dev.log
+	@go run . --ui --owner=XiaoConstantine --repo=dspy-go --model=google:gemini-2.5-flash 2>&1 | tee dev.log
 
 # Run tests
 test:

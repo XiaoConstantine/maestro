@@ -7,8 +7,8 @@ import (
 	"sort"
 	"strings"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 )
 
 // FileNode represents a node in the file tree.
@@ -78,7 +78,7 @@ func (ft *FileTreeModel) Update(msg tea.Msg) (FileTreeModel, tea.Cmd) {
 		ft.width = msg.Width / 3   // File tree takes 1/3 of width
 		ft.height = msg.Height - 3 // Account for borders and status
 
-	case tea.KeyMsg:
+	case tea.KeyPressMsg:
 		if ft.focused {
 			switch msg.String() {
 			case "j", "down":

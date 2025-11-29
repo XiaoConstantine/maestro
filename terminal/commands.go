@@ -5,9 +5,9 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/charmbracelet/bubbles/textinput"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/bubbles/v2/textinput"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 )
 
 // Command represents a command that can be executed.
@@ -52,7 +52,7 @@ func NewCommandPalette(theme *Theme) *CommandPaletteModel {
 	ti := textinput.New()
 	ti.Placeholder = "Type a command or search..."
 	ti.CharLimit = 256
-	ti.Width = 60
+	ti.SetWidth(60)
 
 	cp := &CommandPaletteModel{
 		commands:   []Command{},
@@ -190,9 +190,9 @@ func (cp *CommandPaletteModel) Update(msg tea.Msg) (CommandPaletteModel, tea.Cmd
 	case tea.WindowSizeMsg:
 		cp.width = min(80, msg.Width-10)
 		cp.height = min(cp.maxHeight, msg.Height/2)
-		cp.input.Width = cp.width - 4
+		cp.input.SetWidth(cp.width - 4)
 
-	case tea.KeyMsg:
+	case tea.KeyPressMsg:
 		switch msg.String() {
 		case "esc", "ctrl+c":
 			cp.Hide()
@@ -534,7 +534,7 @@ func (cp *CommandPaletteModel) Show() {
 	cp.selected = 0
 	// Ensure sensible defaults before WindowSize is delivered
 	if cp.width <= 0 {
-		cp.width = cp.input.Width + 4
+		cp.width = cp.input.Width() + 4
 	}
 	if cp.height <= 0 {
 		cp.height = cp.maxHeight

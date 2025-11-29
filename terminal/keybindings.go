@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 )
 
 // Mode represents the current input mode (Vim-style).
@@ -181,7 +181,7 @@ func (kh *KeyHandler) setupDefaultBindings() {
 }
 
 // HandleKey processes a key event and returns the corresponding action.
-func (kh *KeyHandler) HandleKey(msg tea.KeyMsg) (ActionType, string) {
+func (kh *KeyHandler) HandleKey(msg tea.KeyPressMsg) (ActionType, string) {
 	key := msg.String()
 
 	// Handle leader key combinations
