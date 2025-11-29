@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 )
 
 // ReviewActionType represents actions specific to the review TUI.
@@ -101,7 +101,7 @@ func getDefaultReviewBindings() []ReviewKeyBinding {
 }
 
 // HandleKey processes a key event and returns the corresponding action.
-func (h *ReviewKeyHandler) HandleKey(msg tea.KeyMsg) ReviewActionType {
+func (h *ReviewKeyHandler) HandleKey(msg tea.KeyPressMsg) ReviewActionType {
 	key := msg.String()
 
 	if h.searchMode {

@@ -5,8 +5,8 @@ import (
 	"strings"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 )
 
 // ToolStatus represents the status of a running tool.
@@ -60,239 +60,50 @@ func (sb *StatusBarModel) Update(msg tea.Msg) (StatusBarModel, tea.Cmd) {
 	return *sb, nil
 }
 
-// View renders the status bar.
+// View renders the status bar with Crush-style keyboard hints.
 func (sb *StatusBarModel) View() string {
 	if sb.width <= 0 {
 		return ""
 	}
 
-	// Build status bar segments
-
-	// Left side: Mode and branch
-	leftSegments := []string{}
-
-	// Mode indicator
-	modeStyle := sb.getModeStyle()
-	modeIndicator := modeStyle.Render(fmt.Sprintf(" %s ", sb.mode))
-	leftSegments = append(leftSegments, modeIndicator)
-
-	// Git branch
-	if sb.branch != "" {
-		branchIndicator := sb.styles.StatusValue.Render(fmt.Sprintf(" ⎇ %s ", sb.branch))
-		leftSegments = append(leftSegments, branchIndicator)
-	}
-
-	// Center: Tool status or message
-	centerContent := ""
-	if len(sb.tools) > 0 {
-		// Show running tools
-		runningTools := sb.getRunningTools()
-		if len(runningTools) > 0 {
-			tool := runningTools[0] // Show first running tool
-			centerContent = sb.renderToolStatus(tool)
-		}
-	} else if sb.message != "" {
-		centerContent = sb.styles.StatusText.Render(sb.message)
-	}
-
-	// Right side: Help hints
-	rightSegments := []string{}
-	if sb.showHelp {
-		helpHints := sb.getHelpHints()
-		rightSegments = append(rightSegments, sb.styles.StatusKey.Render(helpHints))
-	}
-
-	// Calculate spacing
-	left := strings.Join(leftSegments, " ")
-	right := strings.Join(rightSegments, " ")
-
-	leftLen := lipgloss.Width(left)
-	rightLen := lipgloss.Width(right)
-	centerLen := lipgloss.Width(centerContent)
-
-	availableSpace := sb.width - leftLen - rightLen - 4 // Account for spacing
-
-	// Build the final status bar
-	var statusLine string
-
-	if availableSpace >= centerLen {
-		// Center the middle content
-		leftPadding := (availableSpace - centerLen) / 2
-		rightPadding := availableSpace - centerLen - leftPadding
-
-		statusLine = fmt.Sprintf("%s%s%s%s%s",
-			left,
-			strings.Repeat(" ", leftPadding),
-			centerContent,
-			strings.Repeat(" ", rightPadding),
-			right,
-		)
-	} else {
-		// Just space evenly
-		spacing := max(1, (sb.width-leftLen-centerLen-rightLen)/3)
-		statusLine = fmt.Sprintf("%s%s%s%s%s",
-			left,
-			strings.Repeat(" ", spacing),
-			centerContent,
-			strings.Repeat(" ", spacing),
-			right,
-		)
-	}
-
-	// Ensure it fits the width
-	if lipgloss.Width(statusLine) > sb.width {
-		statusLine = statusLine[:sb.width-3] + "..."
-	} else if lipgloss.Width(statusLine) < sb.width {
-		statusLine += strings.Repeat(" ", sb.width-lipgloss.Width(statusLine))
-	}
-
-	return sb.styles.StatusBar.
-		Width(sb.width).
-		Render(statusLine)
+	// Always show Crush-style keyboard hints at the bottom
+	return sb.renderDefaultBar()
 }
 
-// getModeStyle returns the appropriate style for the current mode.
-func (sb *StatusBarModel) getModeStyle() lipgloss.Style {
-	baseStyle := lipgloss.NewStyle().Bold(true).Padding(0, 1)
+// renderDefaultBar renders the Crush-style help hints bar.
+func (sb *StatusBarModel) renderDefaultBar() string {
+	// Crush-style: show keyboard shortcuts at bottom
+	// Like: "ctrl+p commands • ctrl+l models • ctrl+j newline • ctrl+c quit • ctrl+g more"
 
-	switch sb.mode {
-	case "NORMAL":
-		return baseStyle.
-			Background(sb.theme.Accent).
-			Foreground(sb.theme.Background)
-	case "INSERT":
-		return baseStyle.
-			Background(lipgloss.Color("#7FE9DE")).
-			Foreground(sb.theme.Background)
-	case "VISUAL":
-		return baseStyle.
-			Background(lipgloss.Color("#B185F7")).
-			Foreground(sb.theme.Background)
-	case "COMMAND":
-		return baseStyle.
-			Background(lipgloss.Color("#FFA500")).
-			Foreground(sb.theme.Background)
-	default:
-		return baseStyle.
-			Background(sb.theme.TextMuted).
-			Foreground(sb.theme.Background)
-	}
-}
+	hints := sb.getCrushStyleHints()
+	hintStyle := lipgloss.NewStyle().
+		Foreground(sb.theme.TextMuted)
 
-// renderToolStatus renders a tool status with progress.
-func (sb *StatusBarModel) renderToolStatus(tool ToolStatus) string {
-	// Icon based on status
-	icon := "◉"
-	if !tool.IsRunning {
-		icon = "✓"
-	}
+	separator := lipgloss.NewStyle().
+		Foreground(sb.theme.TextMuted).
+		Render(" • ")
 
-	// Progress bar
-	progressBar := ""
-	if tool.Progress > 0 {
-		progressBar = sb.renderProgressBar(tool.Progress)
-	}
-
-	// Elapsed time
-	elapsed := ""
-	if !tool.StartTime.IsZero() {
-		duration := time.Since(tool.StartTime)
-		elapsed = fmt.Sprintf("[%s]", formatDuration(duration))
-	}
-
-	// Build status string
-	parts := []string{
-		sb.styles.StatusValue.Render(icon),
-		sb.styles.StatusKey.Render(tool.Name),
-	}
-
-	if tool.Message != "" {
-		parts = append(parts, sb.styles.StatusText.Render(tool.Message))
-	}
-
-	if progressBar != "" {
-		parts = append(parts, progressBar)
-	}
-
-	if elapsed != "" {
-		parts = append(parts, sb.styles.StatusText.Render(elapsed))
-	}
-
-	return strings.Join(parts, " ")
-}
-
-// renderProgressBar renders a progress bar.
-func (sb *StatusBarModel) renderProgressBar(percent int) string {
-	width := 20
-	filled := (percent * width) / 100
-
-	fillChar := "█"
-	emptyChar := "░"
-
-	// Apply styles
-	filledPart := sb.styles.ProgressFill.Render(strings.Repeat(fillChar, filled))
-	emptyPart := sb.styles.StatusText.Render(strings.Repeat(emptyChar, width-filled))
-
-	return fmt.Sprintf("%s%s %d%%", filledPart, emptyPart, percent)
-}
-
-// getHelpHints returns contextual help hints.
-func (sb *StatusBarModel) getHelpHints() string {
-	hints := []string{}
-
-	switch sb.mode {
-	case "NORMAL":
-		hints = []string{
-			"Tab: Switch Panel",
-			"/: Search",
-			"?: Help",
-			"Ctrl+C: Exit",
-		}
-	case "INSERT":
-		hints = []string{
-			"Esc: Normal Mode",
-			"Ctrl+C: Cancel",
-		}
-	case "VISUAL":
-		hints = []string{
-			"y: Yank",
-			"d: Delete",
-			"Esc: Normal Mode",
-		}
-	case "COMMAND":
-		hints = []string{
-			"Enter: Execute",
-			"Esc: Cancel",
-		}
-	}
-
-	// Return first few hints that fit
-	result := []string{}
-	totalWidth := 0
-	maxWidth := 60 // Maximum width for hints
-
+	var parts []string
 	for _, hint := range hints {
-		hintWidth := len(hint) + 4 // Account for spacing
-		if totalWidth+hintWidth <= maxWidth {
-			result = append(result, hint)
-			totalWidth += hintWidth
-		} else {
-			break
-		}
+		parts = append(parts, hintStyle.Render(hint))
 	}
 
-	return strings.Join(result, "  ")
+	content := strings.Join(parts, separator)
+
+	// Center the content
+	contentWidth := lipgloss.Width(content)
+	leftPad := max(0, (sb.width-contentWidth)/2)
+
+	return strings.Repeat(" ", leftPad) + content
 }
 
-// getRunningTools returns list of currently running tools.
-func (sb *StatusBarModel) getRunningTools() []ToolStatus {
-	running := []ToolStatus{}
-	for _, tool := range sb.tools {
-		if tool.IsRunning {
-			running = append(running, tool)
-		}
+// getCrushStyleHints returns keyboard shortcut hints like Crush.
+func (sb *StatusBarModel) getCrushStyleHints() []string {
+	return []string{
+		"ctrl+p commands",
+		"/help for help",
+		"ctrl+c quit",
 	}
-	return running
 }
 
 // Public methods for external updates
@@ -355,17 +166,4 @@ func (sb *StatusBarModel) RemoveTool(name string) {
 // ClearTools clears all tool statuses.
 func (sb *StatusBarModel) ClearTools() {
 	sb.tools = []ToolStatus{}
-}
-
-// Helper functions
-
-func formatDuration(d time.Duration) string {
-	if d < time.Second {
-		return fmt.Sprintf("%dms", d.Milliseconds())
-	} else if d < time.Minute {
-		return fmt.Sprintf("%ds", int(d.Seconds()))
-	} else if d < time.Hour {
-		return fmt.Sprintf("%dm%ds", int(d.Minutes()), int(d.Seconds())%60)
-	}
-	return fmt.Sprintf("%dh%dm", int(d.Hours()), int(d.Minutes())%60)
 }

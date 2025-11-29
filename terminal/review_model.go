@@ -6,10 +6,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/charmbracelet/bubbles/viewport"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
-	"github.com/muesli/termenv"
+	"charm.land/bubbles/v2/viewport"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 )
 
 // ReviewComment represents a single review comment for the TUI.
@@ -26,10 +26,10 @@ type ReviewComment struct {
 
 // FileGroup groups comments by file path.
 type FileGroup struct {
-	Path      string
-	Comments  []ReviewComment
-	Expanded  bool
-	StartIdx  int
+	Path     string
+	Comments []ReviewComment
+	Expanded bool
+	StartIdx int
 }
 
 // FilterMode represents the current filter state.
@@ -40,46 +40,28 @@ const (
 	FilterCritical
 	FilterWarning
 	FilterSuggestion
-	FilterByFile
-	FilterByCategory
 )
 
-// ReviewPane represents which pane is focused.
-type ReviewPane int
-
-const (
-	PaneFileList ReviewPane = iota
-	PaneCommentList
-	PaneCommentDetail
-)
-
-// ReviewModel is the main TUI model for displaying review comments.
+// ReviewModel is the main TUI model for displaying review comments (Crush-style).
 type ReviewModel struct {
 	comments       []ReviewComment
 	fileGroups     []FileGroup
 	filteredGroups []FileGroup
 
-	selectedFileIdx    int
-	selectedCommentIdx int
-	expandedCommentIdx int
-
-	focusedPane ReviewPane
+	selectedIdx int // Global index in flattened list
 	filterMode  FilterMode
 
-	fileListViewport    viewport.Model
-	commentListViewport viewport.Model
-	detailViewport      viewport.Model
+	listViewport   viewport.Model
+	detailViewport viewport.Model
 
 	width  int
 	height int
 	ready  bool
 
-	theme      *Theme
-	styles     *ReviewStyles
-	compStyles *ComponentStyles
+	theme  *Theme
+	styles *ReviewStyles
 
-	showHelp    bool
-	showMetrics bool
+	showDetail  bool
 	confirmPost bool
 
 	onPost func([]ReviewComment) error
@@ -88,104 +70,106 @@ type ReviewModel struct {
 
 // ReviewStyles holds styles specific to review display.
 type ReviewStyles struct {
-	FileHeader       lipgloss.Style
-	FileHeaderActive lipgloss.Style
-	CommentItem      lipgloss.Style
-	CommentActive    lipgloss.Style
-	CommentExpanded  lipgloss.Style
+	// Section headers
+	SectionTitle lipgloss.Style
+	SectionLine  lipgloss.Style
 
-	SeverityCritical lipgloss.Style
-	SeverityWarning  lipgloss.Style
+	// List items
+	FileItem     lipgloss.Style
+	FileActive   lipgloss.Style
+	CommentItem  lipgloss.Style
+	CommentActive lipgloss.Style
+
+	// Severity badges
+	SeverityCritical   lipgloss.Style
+	SeverityWarning    lipgloss.Style
 	SeveritySuggestion lipgloss.Style
 
-	CodeBlock    lipgloss.Style
-	DiffAdded    lipgloss.Style
-	DiffRemoved  lipgloss.Style
-	DiffContext  lipgloss.Style
+	// Detail view
+	DetailTitle    lipgloss.Style
+	DetailContent  lipgloss.Style
+	CodeBlock      lipgloss.Style
+	DiffAdded      lipgloss.Style
+	DiffRemoved    lipgloss.Style
+	Suggestion     lipgloss.Style
 
-	CategoryBadge lipgloss.Style
-	LineNumber    lipgloss.Style
-	Suggestion    lipgloss.Style
-
-	FilterBar     lipgloss.Style
-	FilterActive  lipgloss.Style
-	SearchInput   lipgloss.Style
-
-	HelpKey   lipgloss.Style
-	HelpDesc  lipgloss.Style
-	HelpPanel lipgloss.Style
-
-	PaneBorder       lipgloss.Style
-	PaneBorderActive lipgloss.Style
+	// Status elements
+	StatusMuted lipgloss.Style
+	StatusInfo  lipgloss.Style
 }
 
-// NewReviewModel creates a new review TUI model.
+// NewReviewModel creates a new review TUI model with Crush-style layout.
 func NewReviewModel(comments []ReviewComment, theme *Theme) *ReviewModel {
-	styles := createReviewStyles(theme)
-	compStyles := theme.CreateComponentStyles()
+	styles := createCrushReviewStyles(theme)
+
+	listVP := viewport.New()
+	listVP.SetWidth(60)
+	listVP.SetHeight(20)
+	listVP.KeyMap = viewport.KeyMap{}
+
+	detailVP := viewport.New()
+	detailVP.SetWidth(60)
+	detailVP.SetHeight(20)
+	detailVP.KeyMap = viewport.KeyMap{}
 
 	m := &ReviewModel{
-		comments:           comments,
-		fileGroups:         groupCommentsByFile(comments),
-		selectedFileIdx:    0,
-		selectedCommentIdx: 0,
-		expandedCommentIdx: -1,
-		focusedPane:        PaneCommentList,
-		filterMode:         FilterNone,
-		theme:              theme,
-		styles:             styles,
-		compStyles:         compStyles,
-		showHelp:           false,
-		showMetrics:        false,
+		comments:       comments,
+		fileGroups:     groupCommentsByFile(comments),
+		selectedIdx:    0,
+		filterMode:     FilterNone,
+		listViewport:   listVP,
+		detailViewport: detailVP,
+		theme:          theme,
+		styles:         styles,
+		showDetail:     false,
 	}
 
 	m.filteredGroups = m.fileGroups
-	m.fileListViewport = viewport.New(30, 20)
-	m.commentListViewport = viewport.New(50, 20)
-	m.detailViewport = viewport.New(50, 20)
-
 	return m
 }
 
-func createReviewStyles(theme *Theme) *ReviewStyles {
+func createCrushReviewStyles(theme *Theme) *ReviewStyles {
 	return &ReviewStyles{
-		FileHeader: lipgloss.NewStyle().
-			Foreground(theme.Accent).
-			Bold(true).
-			PaddingLeft(1),
+		// Section headers - Crush style with subtle line
+		SectionTitle: lipgloss.NewStyle().
+			Foreground(theme.TextMuted).
+			Bold(false),
 
-		FileHeaderActive: lipgloss.NewStyle().
+		SectionLine: lipgloss.NewStyle().
+			Foreground(theme.Border),
+
+		// File items - clean, minimal
+		FileItem: lipgloss.NewStyle().
+			Foreground(theme.TextSecondary),
+
+		FileActive: lipgloss.NewStyle().
 			Foreground(theme.TextPrimary).
-			Background(lipgloss.Color("#3A3C55")).
-			Bold(true).
-			PaddingLeft(1),
+			Bold(true),
 
+		// Comment items
 		CommentItem: lipgloss.NewStyle().
-			Foreground(theme.TextSecondary).
-			PaddingLeft(2),
+			Foreground(theme.TextMuted),
 
 		CommentActive: lipgloss.NewStyle().
-			Foreground(theme.TextPrimary).
-			Background(lipgloss.Color("#3A3C55")).
-			PaddingLeft(2),
+			Foreground(theme.TextPrimary),
 
-		CommentExpanded: lipgloss.NewStyle().
-			Foreground(theme.TextPrimary).
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(theme.Accent).
-			Padding(1),
-
+		// Severity - simple colored dots
 		SeverityCritical: lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#FF6B6B")).
-			Bold(true),
+			Foreground(lipgloss.Color("#FF6B6B")),
 
 		SeverityWarning: lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#FFE066")).
-			Bold(true),
+			Foreground(lipgloss.Color("#FFD93D")),
 
 		SeveritySuggestion: lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#4ECDC4")).
+			Foreground(theme.StatusHighlight),
+
+		// Detail view
+		DetailTitle: lipgloss.NewStyle().
+			Foreground(theme.TextPrimary).
 			Bold(true),
+
+		DetailContent: lipgloss.NewStyle().
+			Foreground(theme.TextSecondary),
 
 		CodeBlock: lipgloss.NewStyle().
 			Foreground(theme.Code).
@@ -198,57 +182,15 @@ func createReviewStyles(theme *Theme) *ReviewStyles {
 		DiffRemoved: lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#FF6B6B")),
 
-		DiffContext: lipgloss.NewStyle().
-			Foreground(theme.TextMuted),
-
-		CategoryBadge: lipgloss.NewStyle().
-			Foreground(theme.TextPrimary).
-			Background(theme.Border).
-			Padding(0, 1),
-
-		LineNumber: lipgloss.NewStyle().
-			Foreground(theme.TextMuted),
-
 		Suggestion: lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#7FE9DE")).
-			Italic(true).
-			PaddingLeft(2),
+			Foreground(theme.StatusHighlight).
+			Italic(true),
 
-		FilterBar: lipgloss.NewStyle().
-			Foreground(theme.TextSecondary).
-			Background(theme.Surface).
-			Padding(0, 1),
+		StatusMuted: lipgloss.NewStyle().
+			Foreground(theme.TextMuted),
 
-		FilterActive: lipgloss.NewStyle().
-			Foreground(theme.Accent).
-			Background(theme.Surface).
-			Bold(true).
-			Padding(0, 1),
-
-		SearchInput: lipgloss.NewStyle().
-			Foreground(theme.TextPrimary).
-			Background(theme.Surface).
-			Padding(0, 1),
-
-		HelpKey: lipgloss.NewStyle().
-			Foreground(theme.Accent).
-			Bold(true),
-
-		HelpDesc: lipgloss.NewStyle().
+		StatusInfo: lipgloss.NewStyle().
 			Foreground(theme.TextSecondary),
-
-		HelpPanel: lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(theme.Border).
-			Padding(1, 2),
-
-		PaneBorder: lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(theme.Border),
-
-		PaneBorderActive: lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(theme.Accent),
 	}
 }
 
@@ -283,16 +225,11 @@ func groupCommentsByFile(comments []ReviewComment) []FileGroup {
 
 // Init initializes the review model.
 func (m *ReviewModel) Init() tea.Cmd {
-	return tea.Batch(
-		tea.EnterAltScreen,
-		tea.WindowSize(), // Request initial window size
-	)
+	return func() tea.Msg { return tea.RequestWindowSize() }
 }
 
 // Update handles messages for the review model.
 func (m *ReviewModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	var cmds []tea.Cmd
-
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
@@ -300,14 +237,7 @@ func (m *ReviewModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.ready = true
 		m.updateViewportSizes()
 
-	case tea.KeyMsg:
-		if m.showHelp {
-			if msg.String() == "?" || msg.String() == "esc" || msg.String() == "q" {
-				m.showHelp = false
-			}
-			return m, nil
-		}
-
+	case tea.KeyPressMsg:
 		if m.confirmPost {
 			return m.handleConfirmPost(msg)
 		}
@@ -319,12 +249,6 @@ func (m *ReviewModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, tea.Quit
 
-		case "?":
-			m.showHelp = !m.showHelp
-
-		case "m":
-			m.showMetrics = !m.showMetrics
-
 		case "j", "down":
 			m.moveDown()
 
@@ -332,20 +256,12 @@ func (m *ReviewModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.moveUp()
 
 		case "enter", "l", "right":
-			m.expandSelected()
+			m.showDetail = true
 
 		case "h", "left", "esc":
-			if m.expandedCommentIdx >= 0 {
-				m.expandedCommentIdx = -1
-			} else if m.focusedPane == PaneCommentDetail {
-				m.focusedPane = PaneCommentList
+			if m.showDetail {
+				m.showDetail = false
 			}
-
-		case "tab":
-			m.cycleFocus()
-
-		case "f":
-			m.cycleFilter()
 
 		case "1":
 			m.setFilter(FilterCritical)
@@ -363,26 +279,30 @@ func (m *ReviewModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.confirmPost = true
 
 		case "g":
-			m.goToTop()
+			m.selectedIdx = 0
 
 		case "G":
-			m.goToBottom()
+			m.selectedIdx = m.getTotalComments() - 1
+			if m.selectedIdx < 0 {
+				m.selectedIdx = 0
+			}
 
 		case "ctrl+d":
-			m.pageDown()
+			for i := 0; i < 10; i++ {
+				m.moveDown()
+			}
 
 		case "ctrl+u":
-			m.pageUp()
-
-		case " ":
-			m.toggleFileExpanded()
+			for i := 0; i < 10; i++ {
+				m.moveUp()
+			}
 		}
 	}
 
-	return m, tea.Batch(cmds...)
+	return m, nil
 }
 
-func (m *ReviewModel) handleConfirmPost(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m *ReviewModel) handleConfirmPost(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "y", "Y":
 		m.confirmPost = false
@@ -403,110 +323,50 @@ func (m *ReviewModel) updateViewportSizes() {
 		return
 	}
 
-	fileListWidth := m.width / 4
-	commentListWidth := m.width / 2
-	detailWidth := m.width - fileListWidth - commentListWidth - 4
+	contentHeight := m.height - 6 // Header + filter + status
 
-	contentHeight := m.height - 4
+	if m.showDetail {
+		// Split view: 40% list, 60% detail
+		listWidth := m.width * 2 / 5
+		detailWidth := m.width - listWidth - 2
 
-	m.fileListViewport.Width = fileListWidth
-	m.fileListViewport.Height = contentHeight
+		m.listViewport.SetWidth(listWidth)
+		m.listViewport.SetHeight(contentHeight)
 
-	m.commentListViewport.Width = commentListWidth
-	m.commentListViewport.Height = contentHeight
-
-	m.detailViewport.Width = detailWidth
-	m.detailViewport.Height = contentHeight
+		m.detailViewport.SetWidth(detailWidth)
+		m.detailViewport.SetHeight(contentHeight)
+	} else {
+		// Full width list
+		m.listViewport.SetWidth(m.width - 4)
+		m.listViewport.SetHeight(contentHeight)
+	}
 }
 
 func (m *ReviewModel) moveDown() {
-	switch m.focusedPane {
-	case PaneFileList:
-		if m.selectedFileIdx < len(m.filteredGroups)-1 {
-			m.selectedFileIdx++
-			m.selectedCommentIdx = 0
-		}
-	case PaneCommentList:
-		group := m.getCurrentGroup()
-		if group != nil && m.selectedCommentIdx < len(group.Comments)-1 {
-			m.selectedCommentIdx++
-		} else if m.selectedFileIdx < len(m.filteredGroups)-1 {
-			m.selectedFileIdx++
-			m.selectedCommentIdx = 0
-		}
+	total := m.getTotalComments()
+	if m.selectedIdx < total-1 {
+		m.selectedIdx++
 	}
 }
 
 func (m *ReviewModel) moveUp() {
-	switch m.focusedPane {
-	case PaneFileList:
-		if m.selectedFileIdx > 0 {
-			m.selectedFileIdx--
-			m.selectedCommentIdx = 0
-		}
-	case PaneCommentList:
-		if m.selectedCommentIdx > 0 {
-			m.selectedCommentIdx--
-		} else if m.selectedFileIdx > 0 {
-			m.selectedFileIdx--
-			group := m.getCurrentGroup()
-			if group != nil {
-				m.selectedCommentIdx = len(group.Comments) - 1
-			}
-		}
+	if m.selectedIdx > 0 {
+		m.selectedIdx--
 	}
 }
 
-func (m *ReviewModel) expandSelected() {
-	if m.focusedPane == PaneCommentList {
-		group := m.getCurrentGroup()
-		if group != nil && m.selectedCommentIdx < len(group.Comments) {
-			globalIdx := group.StartIdx + m.selectedCommentIdx
-			if m.expandedCommentIdx == globalIdx {
-				m.expandedCommentIdx = -1
-			} else {
-				m.expandedCommentIdx = globalIdx
-				m.focusedPane = PaneCommentDetail
-			}
-		}
+func (m *ReviewModel) getTotalComments() int {
+	total := 0
+	for _, g := range m.filteredGroups {
+		total += len(g.Comments)
 	}
-}
-
-func (m *ReviewModel) cycleFocus() {
-	switch m.focusedPane {
-	case PaneFileList:
-		m.focusedPane = PaneCommentList
-	case PaneCommentList:
-		if m.expandedCommentIdx >= 0 {
-			m.focusedPane = PaneCommentDetail
-		} else {
-			m.focusedPane = PaneFileList
-		}
-	case PaneCommentDetail:
-		m.focusedPane = PaneFileList
-	}
-}
-
-func (m *ReviewModel) cycleFilter() {
-	switch m.filterMode {
-	case FilterNone:
-		m.setFilter(FilterCritical)
-	case FilterCritical:
-		m.setFilter(FilterWarning)
-	case FilterWarning:
-		m.setFilter(FilterSuggestion)
-	case FilterSuggestion:
-		m.setFilter(FilterNone)
-	default:
-		m.setFilter(FilterNone)
-	}
+	return total
 }
 
 func (m *ReviewModel) setFilter(mode FilterMode) {
 	m.filterMode = mode
 	m.applyFilter()
-	m.selectedFileIdx = 0
-	m.selectedCommentIdx = 0
+	m.selectedIdx = 0
 }
 
 func (m *ReviewModel) applyFilter() {
@@ -515,76 +375,41 @@ func (m *ReviewModel) applyFilter() {
 		return
 	}
 
-	var severityFilter string
+	var severity string
 	switch m.filterMode {
 	case FilterCritical:
-		severityFilter = "critical"
+		severity = "critical"
 	case FilterWarning:
-		severityFilter = "warning"
+		severity = "warning"
 	case FilterSuggestion:
-		severityFilter = "suggestion"
+		severity = "suggestion"
 	}
 
-	filtered := make([]FileGroup, 0)
-	idx := 0
-	for _, group := range m.fileGroups {
-		var matchedComments []ReviewComment
-		for _, c := range group.Comments {
-			if c.Severity == severityFilter {
-				matchedComments = append(matchedComments, c)
+	var filtered []FileGroup
+	for _, g := range m.fileGroups {
+		var comments []ReviewComment
+		for _, c := range g.Comments {
+			if c.Severity == severity {
+				comments = append(comments, c)
 			}
 		}
-		if len(matchedComments) > 0 {
+		if len(comments) > 0 {
 			filtered = append(filtered, FileGroup{
-				Path:     group.Path,
-				Comments: matchedComments,
-				Expanded: group.Expanded,
-				StartIdx: idx,
+				Path:     g.Path,
+				Comments: comments,
+				Expanded: true,
 			})
-			idx += len(matchedComments)
 		}
 	}
+
+	// Recalculate start indices
+	idx := 0
+	for i := range filtered {
+		filtered[i].StartIdx = idx
+		idx += len(filtered[i].Comments)
+	}
+
 	m.filteredGroups = filtered
-}
-
-func (m *ReviewModel) toggleFileExpanded() {
-	if m.selectedFileIdx < len(m.filteredGroups) {
-		m.filteredGroups[m.selectedFileIdx].Expanded = !m.filteredGroups[m.selectedFileIdx].Expanded
-	}
-}
-
-func (m *ReviewModel) goToTop() {
-	m.selectedFileIdx = 0
-	m.selectedCommentIdx = 0
-}
-
-func (m *ReviewModel) goToBottom() {
-	if len(m.filteredGroups) > 0 {
-		m.selectedFileIdx = len(m.filteredGroups) - 1
-		group := m.getCurrentGroup()
-		if group != nil {
-			m.selectedCommentIdx = len(group.Comments) - 1
-		}
-	}
-}
-
-func (m *ReviewModel) pageDown() {
-	for i := 0; i < 10; i++ {
-		m.moveDown()
-	}
-}
-
-func (m *ReviewModel) pageUp() {
-	for i := 0; i < 10; i++ {
-		m.moveUp()
-	}
-}
-
-func (m *ReviewModel) getCurrentGroup() *FileGroup {
-	if m.selectedFileIdx >= 0 && m.selectedFileIdx < len(m.filteredGroups) {
-		return &m.filteredGroups[m.selectedFileIdx]
-	}
-	return nil
 }
 
 func (m *ReviewModel) getFilteredComments() []ReviewComment {
@@ -595,84 +420,126 @@ func (m *ReviewModel) getFilteredComments() []ReviewComment {
 	return result
 }
 
+func (m *ReviewModel) getSelectedComment() *ReviewComment {
+	idx := 0
+	for _, g := range m.filteredGroups {
+		for i := range g.Comments {
+			if idx == m.selectedIdx {
+				return &g.Comments[i]
+			}
+			idx++
+		}
+	}
+	return nil
+}
+
 // View renders the review TUI.
-func (m *ReviewModel) View() string {
+func (m *ReviewModel) View() tea.View {
+	var view tea.View
+	view.AltScreen = true
+	view.SetContent(m.ViewString())
+	return view
+}
+
+// ViewString returns the view content as a string (for embedding in other views).
+func (m *ReviewModel) ViewString() string {
 	if !m.ready {
 		return "Loading..."
-	}
-
-	if m.showHelp {
-		return m.renderHelp()
 	}
 
 	if m.confirmPost {
 		return m.renderConfirmPost()
 	}
 
-	var layout strings.Builder
+	var parts []string
 
-	header := m.renderHeader()
-	layout.WriteString(header)
-	layout.WriteString("\n")
+	// Header with title and counts
+	parts = append(parts, m.renderHeader())
+	parts = append(parts, "")
 
-	filterBar := m.renderFilterBar()
-	layout.WriteString(filterBar)
-	layout.WriteString("\n")
+	// Filter tabs
+	parts = append(parts, m.renderFilterTabs())
+	parts = append(parts, "")
 
-	contentHeight := m.height - 4
-	fileList := m.renderFileList(contentHeight)
-	commentList := m.renderCommentList(contentHeight)
-	detailView := m.renderDetailView(contentHeight)
+	// Main content
+	if m.showDetail {
+		// Split view
+		listContent := m.renderList()
+		detailContent := m.renderDetail()
 
-	fileListWidth := m.width / 4
-	commentListWidth := m.width / 2
-	detailWidth := m.width - fileListWidth - commentListWidth - 4
+		listWidth := m.width * 2 / 5
+		detailWidth := m.width - listWidth - 3
 
-	fileListPane := m.wrapPane(fileList, fileListWidth, contentHeight, m.focusedPane == PaneFileList)
-	commentListPane := m.wrapPane(commentList, commentListWidth, contentHeight, m.focusedPane == PaneCommentList)
-	detailPane := m.wrapPane(detailView, detailWidth, contentHeight, m.focusedPane == PaneCommentDetail)
+		listPane := lipgloss.NewStyle().
+			Width(listWidth).
+			Height(m.height - 6).
+			Render(listContent)
 
-	contentRow := lipgloss.JoinHorizontal(lipgloss.Top, fileListPane, commentListPane, detailPane)
-	layout.WriteString(contentRow)
-	layout.WriteString("\n")
+		separator := lipgloss.NewStyle().
+			Foreground(m.theme.Border).
+			Render("│")
 
-	statusBar := m.renderStatusBar()
-	layout.WriteString(statusBar)
+		detailPane := lipgloss.NewStyle().
+			Width(detailWidth).
+			Height(m.height - 6).
+			PaddingLeft(1).
+			Render(detailContent)
 
-	return layout.String()
-}
-
-func (m *ReviewModel) wrapPane(content string, width, height int, active bool) string {
-	style := m.styles.PaneBorder
-	if active {
-		style = m.styles.PaneBorderActive
+		content := lipgloss.JoinHorizontal(lipgloss.Top, listPane, separator, detailPane)
+		parts = append(parts, content)
+	} else {
+		// Full list view
+		parts = append(parts, m.renderList())
 	}
-	return style.Width(width).Height(height).Render(content)
+
+	// Status bar
+	parts = append(parts, "")
+	parts = append(parts, m.renderStatusBar())
+
+	return lipgloss.JoinVertical(lipgloss.Left, parts...)
 }
 
 func (m *ReviewModel) renderHeader() string {
+	// Title with icon
 	title := lipgloss.NewStyle().
-		Foreground(m.theme.Accent).
+		Foreground(m.theme.LogoPrimary).
 		Bold(true).
-		Render("◉ Review Comments")
+		Render("Review Comments")
 
+	// Counts
 	counts := m.getCommentCounts()
-	stats := fmt.Sprintf("Total: %d | Critical: %d | Warning: %d | Suggestion: %d",
-		counts["total"], counts["critical"], counts["warning"], counts["suggestion"])
+	countStr := fmt.Sprintf("%d comments", counts["total"])
 
-	statsStyled := lipgloss.NewStyle().
-		Foreground(m.theme.TextMuted).
-		Render(stats)
-
-	padding := m.width - lipgloss.Width(title) - lipgloss.Width(statsStyled) - 2
-	if padding < 0 {
-		padding = 1
+	if counts["critical"] > 0 {
+		countStr += fmt.Sprintf(" • %s %d critical",
+			m.styles.SeverityCritical.Render("●"),
+			counts["critical"])
+	}
+	if counts["warning"] > 0 {
+		countStr += fmt.Sprintf(" • %s %d warning",
+			m.styles.SeverityWarning.Render("●"),
+			counts["warning"])
+	}
+	if counts["suggestion"] > 0 {
+		countStr += fmt.Sprintf(" • %s %d suggestion",
+			m.styles.SeveritySuggestion.Render("●"),
+			counts["suggestion"])
 	}
 
-	return title + strings.Repeat(" ", padding) + statsStyled
+	countStyled := m.styles.StatusMuted.Render(countStr)
+
+	// Section line
+	titleWidth := lipgloss.Width(title) + lipgloss.Width(countStyled) + 4
+	lineWidth := m.width - titleWidth
+	if lineWidth < 0 {
+		lineWidth = 0
+	}
+	line := m.styles.SectionLine.Render(strings.Repeat("─", lineWidth))
+
+	return lipgloss.JoinHorizontal(lipgloss.Center, title, " ", line, " ", countStyled)
 }
 
-func (m *ReviewModel) renderFilterBar() string {
+func (m *ReviewModel) renderFilterTabs() string {
 	filters := []struct {
 		mode  FilterMode
 		label string
@@ -686,113 +553,156 @@ func (m *ReviewModel) renderFilterBar() string {
 
 	var parts []string
 	for _, f := range filters {
-		style := m.styles.FilterBar
+		label := fmt.Sprintf("[%s] %s", f.key, f.label)
 		if m.filterMode == f.mode {
-			style = m.styles.FilterActive
+			// Active tab
+			parts = append(parts, lipgloss.NewStyle().
+				Foreground(m.theme.TextPrimary).
+				Bold(true).
+				Render(label))
+		} else {
+			// Inactive tab
+			parts = append(parts, m.styles.StatusMuted.Render(label))
 		}
-		parts = append(parts, style.Render(fmt.Sprintf("[%s] %s", f.key, f.label)))
 	}
 
-	return strings.Join(parts, " ")
+	return strings.Join(parts, "  ")
 }
 
-func (m *ReviewModel) renderFileList(height int) string {
+func (m *ReviewModel) renderList() string {
 	var lines []string
+	currentIdx := 0
+	contentWidth := m.listViewport.Width() - 2
 
-	for i, group := range m.filteredGroups {
-		icon := "▼"
-		if !group.Expanded {
-			icon = "▶"
+	for _, group := range m.filteredGroups {
+		// File header - Crush style section
+		fileName := truncatePath(group.Path, contentWidth-10)
+		countStr := fmt.Sprintf("(%d)", len(group.Comments))
+
+		fileHeader := lipgloss.NewStyle().
+			Foreground(m.theme.TextMuted).
+			Render(fileName + " " + countStr)
+
+		// Add separator line
+		lineWidth := contentWidth - lipgloss.Width(fileHeader) - 1
+		if lineWidth > 0 {
+			fileHeader = fileHeader + " " + m.styles.SectionLine.Render(strings.Repeat("─", lineWidth))
 		}
 
-		style := m.styles.FileHeader
-		if i == m.selectedFileIdx && m.focusedPane == PaneFileList {
-			style = m.styles.FileHeaderActive
-		}
+		lines = append(lines, fileHeader)
 
-		fileName := truncateString(group.Path, m.width/4-6)
-		line := style.Render(fmt.Sprintf("%s %s (%d)", icon, fileName, len(group.Comments)))
-		lines = append(lines, line)
-	}
+		// Comments under this file
+		for i, comment := range group.Comments {
+			isSelected := currentIdx == m.selectedIdx
+			line := m.renderCommentLine(comment, isSelected, contentWidth)
+			lines = append(lines, "  "+line) // Indent under file
+			currentIdx++
 
-	for len(lines) < height {
-		lines = append(lines, "")
-	}
-
-	return strings.Join(lines[:min(height, len(lines))], "\n")
-}
-
-func (m *ReviewModel) renderCommentList(height int) string {
-	var lines []string
-
-	for groupIdx, group := range m.filteredGroups {
-		if !group.Expanded {
-			continue
-		}
-
-		for commentIdx, comment := range group.Comments {
-			icon := m.getSeverityIcon(comment.Severity)
-			isSelected := groupIdx == m.selectedFileIdx &&
-				commentIdx == m.selectedCommentIdx &&
-				m.focusedPane == PaneCommentList
-
-			style := m.styles.CommentItem
-			if isSelected {
-				style = m.styles.CommentActive
+			// Add spacing between comments (except last)
+			if i < len(group.Comments)-1 {
+				lines = append(lines, "")
 			}
-
-			lineInfo := m.styles.LineNumber.Render(fmt.Sprintf("L%d", comment.LineNumber))
-			category := m.styles.CategoryBadge.Render(comment.Category)
-
-			preview := truncateString(comment.Content, m.width/2-20)
-			line := style.Render(fmt.Sprintf("%s %s %s %s", icon, lineInfo, category, preview))
-			lines = append(lines, line)
 		}
+
+		lines = append(lines, "") // Space between files
 	}
 
 	if len(lines) == 0 {
-		lines = append(lines, lipgloss.NewStyle().
-			Foreground(m.theme.TextMuted).
-			Render("No comments match the current filter"))
+		return m.styles.StatusMuted.Render("No comments match the current filter")
 	}
 
-	for len(lines) < height {
-		lines = append(lines, "")
-	}
-
-	return strings.Join(lines[:min(height, len(lines))], "\n")
+	return strings.Join(lines, "\n")
 }
 
-func (m *ReviewModel) renderDetailView(height int) string {
-	if m.expandedCommentIdx < 0 {
-		return lipgloss.NewStyle().
+func (m *ReviewModel) renderCommentLine(comment ReviewComment, selected bool, maxWidth int) string {
+	// Severity icon
+	icon := m.getSeverityIcon(comment.Severity)
+
+	// Line number
+	lineNum := m.styles.StatusMuted.Render(fmt.Sprintf("L%d", comment.LineNumber))
+
+	// Category badge (if exists)
+	var category string
+	if comment.Category != "" {
+		category = lipgloss.NewStyle().
 			Foreground(m.theme.TextMuted).
-			Render("Select a comment and press Enter to view details")
+			Background(m.theme.Surface).
+			Padding(0, 1).
+			Render(comment.Category)
 	}
 
-	comment := m.getCommentByGlobalIdx(m.expandedCommentIdx)
+	// Content preview
+	contentWidth := maxWidth - 20 // Account for icon, line num, category
+	if category != "" {
+		contentWidth -= lipgloss.Width(category) + 1
+	}
+
+	preview := ansi.Truncate(comment.Content, contentWidth, "…")
+
+	// Style based on selection
+	if selected {
+		preview = lipgloss.NewStyle().
+			Foreground(m.theme.TextPrimary).
+			Render(preview)
+	} else {
+		preview = m.styles.StatusInfo.Render(preview)
+	}
+
+	// Combine parts
+	parts := []string{icon, lineNum}
+	if category != "" {
+		parts = append(parts, category)
+	}
+	parts = append(parts, preview)
+
+	line := strings.Join(parts, " ")
+
+	// Add selection indicator
+	if selected {
+		line = lipgloss.NewStyle().
+			Foreground(m.theme.StatusHighlight).
+			Render("▸ ") + line
+	} else {
+		line = "  " + line
+	}
+
+	return line
+}
+
+func (m *ReviewModel) renderDetail() string {
+	comment := m.getSelectedComment()
 	if comment == nil {
-		return ""
+		return m.styles.StatusMuted.Render("Select a comment to view details")
 	}
 
 	var lines []string
+	detailWidth := m.detailViewport.Width() - 2
 
-	headerLine := fmt.Sprintf("%s %s:%d",
-		m.getSeverityIcon(comment.Severity),
-		comment.FilePath,
-		comment.LineNumber)
-	lines = append(lines, m.styles.FileHeader.Render(headerLine))
+	// File and line
+	header := fmt.Sprintf("%s:%d", truncatePath(comment.FilePath, detailWidth-10), comment.LineNumber)
+	lines = append(lines, m.styles.DetailTitle.Render(header))
 	lines = append(lines, "")
 
-	lines = append(lines, m.styles.CategoryBadge.Render(comment.Category))
+	// Severity and category
+	severityLine := m.getSeverityIcon(comment.Severity) + " " +
+		lipgloss.NewStyle().Foreground(m.theme.TextSecondary).Render(comment.Severity)
+	if comment.Category != "" {
+		severityLine += " • " + m.styles.StatusMuted.Render(comment.Category)
+	}
+	lines = append(lines, severityLine)
 	lines = append(lines, "")
 
-	contentLines := wrapText(comment.Content, m.width/4-4)
-	lines = append(lines, contentLines...)
+	// Content
+	lines = append(lines, m.styles.StatusMuted.Render("Issue"))
+	contentLines := wrapText(comment.Content, detailWidth)
+	for _, cl := range contentLines {
+		lines = append(lines, m.styles.DetailContent.Render(cl))
+	}
 	lines = append(lines, "")
 
+	// Code block if present
 	if comment.CodeBlock != "" {
-		lines = append(lines, m.styles.HelpKey.Render("Code:"))
+		lines = append(lines, m.styles.StatusMuted.Render("Code"))
 		codeLines := strings.Split(comment.CodeBlock, "\n")
 		for _, cl := range codeLines {
 			lines = append(lines, m.styles.CodeBlock.Render(cl))
@@ -800,11 +710,12 @@ func (m *ReviewModel) renderDetailView(height int) string {
 		lines = append(lines, "")
 	}
 
+	// Diff if present
 	if comment.DiffBlock != "" {
-		lines = append(lines, m.styles.HelpKey.Render("Diff:"))
+		lines = append(lines, m.styles.StatusMuted.Render("Changes"))
 		diffLines := strings.Split(comment.DiffBlock, "\n")
 		for _, dl := range diffLines {
-			style := m.styles.DiffContext
+			style := m.styles.StatusMuted
 			if strings.HasPrefix(dl, "+") {
 				style = m.styles.DiffAdded
 			} else if strings.HasPrefix(dl, "-") {
@@ -815,107 +726,74 @@ func (m *ReviewModel) renderDetailView(height int) string {
 		lines = append(lines, "")
 	}
 
+	// Suggestion if present
 	if comment.Suggestion != "" {
-		lines = append(lines, m.styles.HelpKey.Render("Suggestion:"))
-		suggestionLines := wrapText(comment.Suggestion, m.width/4-6)
+		lines = append(lines, m.styles.StatusMuted.Render("Suggestion"))
+		suggestionLines := wrapText(comment.Suggestion, detailWidth-2)
 		for _, sl := range suggestionLines {
-			lines = append(lines, m.styles.Suggestion.Render(sl))
+			lines = append(lines, m.styles.Suggestion.Render("  "+sl))
 		}
 	}
 
-	for len(lines) < height {
-		lines = append(lines, "")
-	}
-
-	return strings.Join(lines[:min(height, len(lines))], "\n")
+	return strings.Join(lines, "\n")
 }
 
 func (m *ReviewModel) renderStatusBar() string {
-	mode := "REVIEW"
-	if m.filterMode != FilterNone {
-		mode = "FILTER"
+	// Crush-style hints at bottom
+	hints := []string{
+		"j/k navigate",
+		"enter view",
+		"0-3 filter",
+		"p post",
+		"q quit",
 	}
 
-	modeStyle := lipgloss.NewStyle().
-		Background(m.theme.Accent).
-		Foreground(m.theme.Background).
-		Bold(true).
-		Padding(0, 1).
-		Render(mode)
+	hintStr := strings.Join(hints, " • ")
+	hintStyled := m.styles.StatusMuted.Render(hintStr)
 
-	hints := "j/k: Navigate  Enter: Expand  f: Filter  p: Post  ?: Help  q: Quit"
-	hintsStyled := lipgloss.NewStyle().
-		Foreground(m.theme.TextMuted).
-		Render(hints)
-
-	position := ""
-	if len(m.filteredGroups) > 0 {
-		position = fmt.Sprintf("File %d/%d", m.selectedFileIdx+1, len(m.filteredGroups))
-	}
-	positionStyled := lipgloss.NewStyle().
-		Foreground(m.theme.TextSecondary).
-		Render(position)
-
-	leftWidth := lipgloss.Width(modeStyle)
-	rightWidth := lipgloss.Width(positionStyled)
-	centerWidth := lipgloss.Width(hintsStyled)
-	padding := m.width - leftWidth - rightWidth - centerWidth - 4
+	// Center the hints
+	padding := (m.width - lipgloss.Width(hintStyled)) / 2
 	if padding < 0 {
-		padding = 1
+		padding = 0
 	}
 
-	leftPad := padding / 2
-	rightPad := padding - leftPad
-
-	return modeStyle + strings.Repeat(" ", leftPad) + hintsStyled + strings.Repeat(" ", rightPad) + positionStyled
-}
-
-func (m *ReviewModel) renderHelp() string {
-	helpItems := []struct {
-		key  string
-		desc string
-	}{
-		{"j/k, ↑/↓", "Navigate up/down"},
-		{"Enter, l", "Expand/select comment"},
-		{"h, Esc", "Collapse/go back"},
-		{"Tab", "Cycle between panes"},
-		{"Space", "Toggle file expand/collapse"},
-		{"f", "Cycle through filters"},
-		{"0-3", "Quick filter (All/Critical/Warning/Suggestion)"},
-		{"g/G", "Go to top/bottom"},
-		{"Ctrl+d/u", "Page down/up"},
-		{"p", "Post comments to GitHub"},
-		{"m", "Toggle metrics view"},
-		{"?", "Toggle this help"},
-		{"q", "Quit"},
-	}
-
-	var lines []string
-	lines = append(lines, m.styles.FileHeader.Render("Keyboard Shortcuts"))
-	lines = append(lines, "")
-
-	for _, item := range helpItems {
-		key := m.styles.HelpKey.Render(fmt.Sprintf("%-12s", item.key))
-		desc := m.styles.HelpDesc.Render(item.desc)
-		lines = append(lines, "  "+key+"  "+desc)
-	}
-
-	content := strings.Join(lines, "\n")
-	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center,
-		m.styles.HelpPanel.Render(content))
+	return strings.Repeat(" ", padding) + hintStyled
 }
 
 func (m *ReviewModel) renderConfirmPost() string {
 	counts := m.getCommentCounts()
-	content := fmt.Sprintf("Post %d comments to GitHub?\n\n"+
-		"  Critical: %d\n"+
-		"  Warning: %d\n"+
-		"  Suggestion: %d\n\n"+
-		"[Y]es  [N]o",
-		counts["total"], counts["critical"], counts["warning"], counts["suggestion"])
 
-	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center,
-		m.styles.HelpPanel.Render(content))
+	var lines []string
+	lines = append(lines, m.styles.DetailTitle.Render("Post comments to GitHub?"))
+	lines = append(lines, "")
+	lines = append(lines, fmt.Sprintf("  Total: %d comments", counts["total"]))
+
+	if counts["critical"] > 0 {
+		lines = append(lines, fmt.Sprintf("  %s Critical: %d",
+			m.styles.SeverityCritical.Render("●"), counts["critical"]))
+	}
+	if counts["warning"] > 0 {
+		lines = append(lines, fmt.Sprintf("  %s Warning: %d",
+			m.styles.SeverityWarning.Render("●"), counts["warning"]))
+	}
+	if counts["suggestion"] > 0 {
+		lines = append(lines, fmt.Sprintf("  %s Suggestion: %d",
+			m.styles.SeveritySuggestion.Render("●"), counts["suggestion"]))
+	}
+
+	lines = append(lines, "")
+	lines = append(lines, m.styles.StatusInfo.Render("[Y]es  [N]o"))
+
+	content := strings.Join(lines, "\n")
+
+	// Center in screen
+	box := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(m.theme.Border).
+		Padding(1, 3).
+		Render(content)
+
+	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, box)
 }
 
 func (m *ReviewModel) getSeverityIcon(severity string) string {
@@ -927,7 +805,7 @@ func (m *ReviewModel) getSeverityIcon(severity string) string {
 	case "suggestion":
 		return m.styles.SeveritySuggestion.Render("●")
 	default:
-		return "○"
+		return m.styles.StatusMuted.Render("○")
 	}
 }
 
@@ -948,17 +826,6 @@ func (m *ReviewModel) getCommentCounts() map[string]int {
 	return counts
 }
 
-func (m *ReviewModel) getCommentByGlobalIdx(idx int) *ReviewComment {
-	current := 0
-	for _, group := range m.filteredGroups {
-		if idx < current+len(group.Comments) {
-			return &group.Comments[idx-current]
-		}
-		current += len(group.Comments)
-	}
-	return nil
-}
-
 // SetOnPost sets the callback for posting comments.
 func (m *ReviewModel) SetOnPost(fn func([]ReviewComment) error) {
 	m.onPost = fn
@@ -977,14 +844,27 @@ func (m *ReviewModel) SetSize(width, height int) {
 	m.updateViewportSizes()
 }
 
-func truncateString(s string, maxLen int) string {
-	if len(s) <= maxLen {
-		return s
+func truncatePath(path string, maxLen int) string {
+	if len(path) <= maxLen {
+		return path
+	}
+	// Show last part of path
+	parts := strings.Split(path, "/")
+	if len(parts) <= 2 {
+		if maxLen <= 3 {
+			return path[:maxLen]
+		}
+		return path[:maxLen-3] + "..."
+	}
+	// Try to fit last 2 parts
+	short := parts[len(parts)-2] + "/" + parts[len(parts)-1]
+	if len(short) <= maxLen {
+		return "…/" + short
 	}
 	if maxLen <= 3 {
-		return s[:maxLen]
+		return short[:maxLen]
 	}
-	return s[:maxLen-3] + "..."
+	return short[:maxLen-1] + "…"
 }
 
 func wrapText(text string, width int) []string {
@@ -1026,24 +906,16 @@ func RunReviewTUI(comments []ReviewComment, onPost func([]ReviewComment) error) 
 	model := NewReviewModel(comments, theme)
 	model.SetOnPost(onPost)
 
-	// Open /dev/tty directly for both input and output to bypass any
-	// terminal state issues from go-prompt or redirected stdout/stdin
 	tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
 	if err != nil {
 		return fmt.Errorf("failed to open /dev/tty: %w", err)
 	}
 	defer tty.Close()
 
-	// Force lipgloss to use ANSI256 colors since we're writing to a custom TTY
-	// that lipgloss doesn't automatically detect as color-capable
-	lipgloss.SetColorProfile(termenv.ANSI256)
-
 	p := tea.NewProgram(
 		model,
-		tea.WithAltScreen(),
-		tea.WithInput(tty),        // Read input directly from TTY
-		tea.WithOutput(tty),       // Write output directly to TTY
-		tea.WithMouseCellMotion(), // Enables terminal size tracking and mouse support
+		tea.WithInput(tty),
+		tea.WithOutput(tty),
 	)
 	_, err = p.Run()
 	return err

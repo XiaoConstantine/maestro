@@ -6,11 +6,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/charmbracelet/bubbles/textarea"
-	"github.com/charmbracelet/bubbles/viewport"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/glamour"
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/bubbles/v2/textarea"
+	"charm.land/bubbles/v2/viewport"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/glamour/v2"
 )
 
 // Message represents a conversation message.
@@ -76,13 +76,27 @@ func NewWithOptions(modernUI bool) *Model {
 	ta.SetWidth(80)
 	ta.SetHeight(1) // Single line like terminal
 	ta.ShowLineNumbers = false
-	ta.FocusedStyle.CursorLine = lipgloss.NewStyle()
-	ta.BlurredStyle.CursorLine = lipgloss.NewStyle()
-	ta.FocusedStyle.Base = styles.InputText
-	ta.BlurredStyle.Base = styles.InputText
+	// v2 uses SetStyles with textarea.Styles struct
+	ta.SetStyles(textarea.Styles{
+		Focused: textarea.StyleState{
+			Base:        styles.InputText,
+			Text:        styles.InputText,
+			CursorLine:  lipgloss.NewStyle(),
+			Placeholder: lipgloss.NewStyle().Foreground(theme.TextMuted),
+		},
+		Blurred: textarea.StyleState{
+			Base:        styles.InputText,
+			Text:        styles.InputText,
+			CursorLine:  lipgloss.NewStyle(),
+			Placeholder: lipgloss.NewStyle().Foreground(theme.TextMuted),
+		},
+	})
 
 	// Configure viewport for conversation
-	vp := viewport.New(80, 20)
+	vp := viewport.New()
+	vp.SetWidth(80)
+	vp.SetHeight(20)
+	vp.KeyMap = viewport.KeyMap{}
 
 	// Configure minimal markdown renderer
 	renderer, _ := glamour.NewTermRenderer(
@@ -145,7 +159,7 @@ func NewWithOptions(modernUI bool) *Model {
 func (m *Model) Init() tea.Cmd {
 	var cmds []tea.Cmd
 
-	cmds = append(cmds, tea.EnterAltScreen)
+	// In v2, alt screen is set via View() return value, not Init command
 
 	if m.modernUI {
 		// Initialize modern components
@@ -189,14 +203,14 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.ready = true
 
 		// Update component sizes
-		m.viewport.Width = m.width - 2
-		m.viewport.Height = m.height - 4 // Reserve space for input and borders
-		m.input.SetWidth(m.width - 4)    // Account for prompt
+		m.viewport.SetWidth(m.width - 2)
+		m.viewport.SetHeight(m.height - 4) // Reserve space for input and borders
+		m.input.SetWidth(m.width - 4)      // Account for prompt
 
 		// Re-render messages with new width
 		m.renderMessages()
 
-	case tea.KeyMsg:
+	case tea.KeyPressMsg:
 		switch msg.String() {
 		case "ctrl+c":
 			return m, tea.Quit
@@ -295,14 +309,14 @@ func (m *Model) updateModernUI(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		// Update main content area sizing
-		m.viewport.Width = m.width - 2
-		m.viewport.Height = topHeight - 2
+		m.viewport.SetWidth(m.width - 2)
+		m.viewport.SetHeight(topHeight - 2)
 		m.input.SetWidth(max(10, leftWidth-4))
 
 		// Re-render messages with new width
 		m.renderMessages()
 
-	case tea.KeyMsg:
+	case tea.KeyPressMsg:
 		// Command palette takes priority
 		if m.commandPalette != nil && m.commandPalette.IsVisible() {
 			updatedCommandPalette, cmd := m.commandPalette.Update(msg)
@@ -376,8 +390,7 @@ func (m *Model) handleAction(action ActionType, data string) tea.Cmd {
 
 	case ActionSwitchPane:
 		if m.splitPane != nil {
-			updatedSplitPane, _ := m.splitPane.Update(tea.KeyMsg{Type: tea.KeyTab})
-			*m.splitPane = updatedSplitPane
+			m.splitPane.cycleFocus(true)
 		}
 
 	case ActionToggleFileTree:
@@ -429,13 +442,18 @@ func (m *Model) handleAction(action ActionType, data string) tea.Cmd {
 }
 
 // View renders the terminal UI.
-func (m *Model) View() string {
+func (m *Model) View() tea.View {
+	var view tea.View
+	view.AltScreen = true
+
 	if !m.ready {
-		return "Initializing..."
+		view.SetContent("Initializing...")
+		return view
 	}
 
 	if m.modernUI {
-		return m.viewModernUI()
+		view.SetContent(m.viewModernUI())
+		return view
 	}
 
 	// Legacy UI rendering
@@ -458,10 +476,11 @@ func (m *Model) View() string {
 	content := strings.Join(sections, "\n")
 
 	// Apply container style
-	return m.styles.Container.
+	view.SetContent(m.styles.Container.
 		Width(m.width).
 		Height(m.height).
-		Render(content)
+		Render(content))
+	return view
 }
 
 // viewModernUI renders the modern split-pane UI.

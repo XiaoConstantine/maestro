@@ -1,7 +1,7 @@
 package terminal
 
 import (
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 )
 
 // RunModernUI starts the modern terminal UI.
@@ -10,7 +10,8 @@ func RunModernUI() error {
 	m := NewModern()
 
 	// Create the program
-	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
+	// In v2, alt screen and mouse are controlled via View() return value
+	p := tea.NewProgram(m)
 
 	// Run the program
 	_, err := p.Run()
@@ -23,7 +24,8 @@ func RunLegacyUI() error {
 	m := New()
 
 	// Create the program
-	p := tea.NewProgram(m, tea.WithAltScreen())
+	// In v2, alt screen is controlled via View() return value
+	p := tea.NewProgram(m)
 
 	// Run the program
 	_, err := p.Run()

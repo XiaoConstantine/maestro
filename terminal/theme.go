@@ -1,30 +1,41 @@
 package terminal
 
 import (
-	"github.com/charmbracelet/lipgloss"
+	"image/color"
+
+	"charm.land/lipgloss/v2"
 )
 
 // Theme defines the minimal color scheme for Claude Code-inspired design.
 type Theme struct {
 	// Background colors - deep, muted tones
-	Background lipgloss.Color // Deep dark background
-	Surface    lipgloss.Color // Slightly lighter for subtle separation
+	Background color.Color // Deep dark background
+	Surface    color.Color // Slightly lighter for subtle separation
 
 	// Text colors - clean hierarchy
-	TextPrimary   lipgloss.Color // Main text - clean white
-	TextSecondary lipgloss.Color // Secondary text - muted gray
-	TextMuted     lipgloss.Color // Hints and metadata
+	TextPrimary   color.Color // Main text - clean white
+	TextSecondary color.Color // Secondary text - muted gray
+	TextMuted     color.Color // Hints and metadata
 
 	// Functional colors - used sparingly
-	Accent lipgloss.Color // Minimal blue accent
-	Border lipgloss.Color // Subtle borders
-	Cursor lipgloss.Color // Terminal cursor
+	Accent    color.Color // Primary accent (cyan)
+	Secondary color.Color // Secondary accent (purple/magenta)
+	Border    color.Color // Subtle borders
+	Cursor    color.Color // Terminal cursor
+
+	// Logo colors - Crush-style purple/magenta gradient
+	LogoPrimary   color.Color // Purple (Charple) - left side of gradient
+	LogoSecondary color.Color // Magenta (Dolly) - right side of gradient
+	LogoField     color.Color // Diagonal field lines color
+
+	// Status bar colors
+	StatusHighlight color.Color // Mint green for highlighted status bar
 
 	// Syntax colors - for code only
-	Code    lipgloss.Color // Code text
-	Comment lipgloss.Color // Code comments
-	String  lipgloss.Color // String literals
-	Keyword lipgloss.Color // Keywords
+	Code    color.Color // Code text
+	Comment color.Color // Code comments
+	String  color.Color // String literals
+	Keyword color.Color // Keywords
 }
 
 // ClaudeCodeTheme returns the minimal Claude Code-inspired theme.
@@ -40,9 +51,18 @@ func ClaudeCodeTheme() *Theme {
 		TextMuted:     lipgloss.Color("#6B6B7E"), // Very muted purple-gray
 
 		// Functional - used for accents and highlights
-		Accent: lipgloss.Color("#00D9FF"), // Cyan accent for active elements
-		Border: lipgloss.Color("#3A3C55"), // Subtle purple borders
-		Cursor: lipgloss.Color("#00D9FF"), // Cyan cursor
+		Accent:    lipgloss.Color("#00D9FF"), // Cyan accent for active elements
+		Secondary: lipgloss.Color("#B185F7"), // Purple/magenta secondary accent
+		Border:    lipgloss.Color("#3A3C55"), // Subtle purple borders
+		Cursor:    lipgloss.Color("#00D9FF"), // Cyan cursor
+
+		// Logo colors - Maestro coral/salmon orange
+		LogoPrimary:   lipgloss.Color("#E8985A"), // Coral/salmon orange
+		LogoSecondary: lipgloss.Color("#E8985A"), // Same color (solid, not gradient)
+		LogoField:     lipgloss.Color("#E8985A"), // Coral for diagonal lines
+
+		// Status bar colors
+		StatusHighlight: lipgloss.Color("#00FFB2"), // Julep - mint green
 
 		// Code syntax - purple/cyan palette
 		Code:    lipgloss.Color("#D4D4E5"), // Light purple-gray for code

@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"strings"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 )
 
 // TodoStatus represents the status of a TODO item.
@@ -62,7 +62,7 @@ func (tl *TodoListModel) Update(msg tea.Msg) (TodoListModel, tea.Cmd) {
 		tl.width = msg.Width / 3   // TODO panel takes 1/3 of width
 		tl.height = msg.Height - 3 // Account for borders and status
 
-	case tea.KeyMsg:
+	case tea.KeyPressMsg:
 		if tl.focused {
 			switch msg.String() {
 			case "j", "down":
