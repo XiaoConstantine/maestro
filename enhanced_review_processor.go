@@ -87,22 +87,17 @@ func hashSignature(sig core.Signature) string {
 }
 
 // getParallelWorkers returns the number of parallel workers to use for chunk processing.
-// It checks MAESTRO_PARALLEL_WORKERS env var, then falls back to CPU count with a reasonable cap.
+// It checks MAESTRO_PARALLEL_WORKERS env var, then falls back to a default of 50.
 func getParallelWorkers() int {
 	if envWorkers := os.Getenv("MAESTRO_PARALLEL_WORKERS"); envWorkers != "" {
 		if workers, err := strconv.Atoi(envWorkers); err == nil && workers > 0 {
 			return workers
 		}
 	}
-	// Default to CPU count, capped at 16 to avoid overwhelming the LLM backend
-	workers := runtime.NumCPU()
-	if workers > 16 {
-		workers = 16
-	}
-	if workers < 2 {
-		workers = 2
-	}
-	return workers
+	// Default to 80 workers for I/O-bound LLM API calls.
+	// LLM calls spend most time waiting on network responses, not CPU,
+	// so more workers improve throughput by overlapping HTTP requests.
+	return 80
 }
 
 // getOrCreateModules retrieves cached modules or creates new ones if not found.
