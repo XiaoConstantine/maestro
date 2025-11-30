@@ -909,9 +909,11 @@ func (a *PRReviewAgent) ReviewPRWithChanges(ctx context.Context, prNumber int, t
 	reviewStart := time.Now()
 	logger.Info(ctx, "🎬 Starting PR #%d review for %d files", prNumber, len(tasks))
 
-	if a.activeThreads == nil {
-		a.activeThreads = make(map[int64]*ThreadTracker)
-	}
+	// Reset state for new review to avoid stale data from previous reviews
+	a.activeThreads = make(map[int64]*ThreadTracker)
+	a.hadExistingComments = false
+	// Reset stopper - sync.Once and closed channels don't reset automatically
+	a.stopper = NewStopper()
 
 	// Show indexing status to user
 	isIndexing, progress, indexErr := a.indexStatus.GetStatus()
@@ -954,6 +956,7 @@ func (a *PRReviewAgent) ReviewPRWithChanges(ctx context.Context, prNumber int, t
 		newThreadsByOthers []*ThreadTracker // New threads started by others
 	)
 	var allComments []PRReviewComment
+	logger.Debug(ctx, "🔍 Categorizing %d active threads", len(a.activeThreads))
 	for _, thread := range a.activeThreads {
 		if thread.OriginalAuthor == a.githubTools.GetAuthenticatedUser(ctx) {
 			// This is a thread I started
@@ -981,6 +984,8 @@ func (a *PRReviewAgent) ReviewPRWithChanges(ctx context.Context, prNumber int, t
 			continue
 		}
 	}
+	logger.Debug(ctx, "📊 Thread categorization: myOpenThreads=%d, repliestoMe=%d, newThreadsByOthers=%d",
+		len(myOpenThreads), len(repliestoMe), len(newThreadsByOthers))
 	if len(myOpenThreads) == 0 && len(repliestoMe) == 0 {
 		if console.Color() {
 			msg := "No existing review found, performing initial review"
@@ -2465,11 +2470,17 @@ func (a *PRReviewAgent) processExistingCommentsWithChanges(ctx context.Context, 
 	}
 
 	// Process general PR (issue) comments as separate discussions
+	authenticatedUser := githubTools.GetAuthenticatedUser(ctx)
 	for _, ic := range issueComments {
 		login := ic.GetUser().GetLogin()
 		lower := strings.ToLower(login)
 		// Skip obvious bots
 		if strings.Contains(lower, "bot") || strings.Contains(lower, "codecov") || strings.Contains(lower, "actions") {
+			continue
+		}
+		// Skip our own issue comments - they're not actionable threads for review
+		if login == authenticatedUser {
+			logger.Debug(ctx, "Skipping own issue comment from %s", login)
 			continue
 		}
 		id := ic.GetID()
