@@ -35,13 +35,13 @@ type MaestroModel struct {
 	viewport viewport.Model
 
 	// Inline review results (Crush-style - results shown in conversation)
-	reviewResults       []ReviewComment
-	selectedReviewIdx   int
-	showReviewDetail    bool
-	inputFocus          InputFocus
-	reviewFileExpanded  map[string]bool // Track expanded/collapsed file groups
-	selectedFileIdx     int             // Currently selected file group index
-	selectedCommentIdx  int             // Index within current file group (-1 if file header selected)
+	reviewResults      []ReviewComment
+	selectedReviewIdx  int
+	showReviewDetail   bool
+	inputFocus         InputFocus
+	reviewFileExpanded map[string]bool // Track expanded/collapsed file groups
+	selectedFileIdx    int             // Currently selected file group index
+	selectedCommentIdx int             // Index within current file group (-1 if file header selected)
 
 	// Dimensions
 	width  int
@@ -140,9 +140,10 @@ func (m *MaestroModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.MouseWheelMsg:
 		// Handle mouse wheel scrolling in the viewport
-		if msg.Button == tea.MouseWheelUp {
+		switch msg.Button {
+		case tea.MouseWheelUp:
 			m.viewport.ScrollUp(3)
-		} else if msg.Button == tea.MouseWheelDown {
+		case tea.MouseWheelDown:
 			m.viewport.ScrollDown(3)
 		}
 
@@ -563,6 +564,16 @@ func (m *MaestroModel) cmdReview(prArg string) tea.Cmd {
 			return ErrorMsg{Error: fmt.Errorf("invalid PR number: %s", prArg)}
 		}
 	}
+
+	// Clear previous review results when starting a new review
+	m.reviewResults = nil
+	m.selectedReviewIdx = 0
+	m.selectedFileIdx = 0
+	m.selectedCommentIdx = 0
+	m.reviewFileExpanded = nil
+	m.showReviewDetail = false
+	m.inputFocus = FocusInput
+	m.renderMessages()
 
 	// Start progress display
 	startCmd := m.progressModel.Start(fmt.Sprintf("Reviewing PR #%d...", prNumber))
@@ -1201,7 +1212,7 @@ func RunMaestro(cfg *MaestroConfig, backend MaestroBackend) error {
 			_, _ = tty.WriteString("\033[?1049l") // Exit alternate screen
 			_, _ = tty.WriteString("\033[?25h")   // Show cursor
 			_, _ = tty.WriteString("\033[0m")     // Reset colors
-			panic(r)                       // Re-panic after cleanup
+			panic(r)                              // Re-panic after cleanup
 		}
 	}()
 
