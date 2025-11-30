@@ -94,10 +94,10 @@ func getParallelWorkers() int {
 			return workers
 		}
 	}
-	// Default to 80 workers for I/O-bound LLM API calls.
+	// Default to 120 workers for I/O-bound LLM API calls.
 	// LLM calls spend most time waiting on network responses, not CPU,
 	// so more workers improve throughput by overlapping HTTP requests.
-	return 80
+	return 120
 }
 
 // getOrCreateModules retrieves cached modules or creates new ones if not found.
