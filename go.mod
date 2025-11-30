@@ -9,7 +9,7 @@ require (
 	charm.land/bubbletea/v2 v2.0.0-rc.2
 	charm.land/lipgloss/v2 v2.0.0-beta.3.0.20251106193318-19329a3e8410
 	github.com/AlecAivazis/survey/v2 v2.3.7
-	github.com/XiaoConstantine/dspy-go v0.64.0
+	github.com/XiaoConstantine/dspy-go v0.65.0
 	github.com/XiaoConstantine/mcp-go v0.3.1
 	github.com/XiaoConstantine/sgrep v0.1.0
 	github.com/asg017/sqlite-vec-go-bindings v0.1.6
@@ -80,6 +80,3 @@ require (
 	golang.org/x/sys v0.38.0 // indirect
 	golang.org/x/term v0.36.0
 )
-
-// Use local dspy-go for performance testing
-replace github.com/XiaoConstantine/dspy-go => /Users/xiao/development/github.com/XiaoConstantine/dspy-go
