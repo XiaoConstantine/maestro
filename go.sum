@@ -18,8 +18,8 @@ github.com/XiaoConstantine/dspy-go v0.65.0 h1:wKRSnlc9miHcNVBNe1Uu47SzkQ2URRCtvY
 github.com/XiaoConstantine/dspy-go v0.65.0/go.mod h1:HHtIwbaMWQveQWpd4jl9MbqGo4CoMV+6Z1EOklMkTbQ=
 github.com/XiaoConstantine/mcp-go v0.3.1 h1:5aSrqvvulbKI1hxN7Aj3iSotX0VRSpDShXIDls4ZC+U=
 github.com/XiaoConstantine/mcp-go v0.3.1/go.mod h1:qsY3Gm4CYMREmoLXEMwtf0Hdb5F957kgcpF6huoNHcY=
-github.com/XiaoConstantine/sgrep v0.1.0 h1:HtiCyHAA2BkxOVUySqTvSlrSZhmun6hoiBth0+QRb98=
-github.com/XiaoConstantine/sgrep v0.1.0/go.mod h1:eZW9Hn9vpWNlj06UbP70y/p9PA/UtHIOQJG3+J5Yhgk=
+github.com/XiaoConstantine/sgrep v0.5.2 h1:gQnS5xQ7oCEN+yra0nfYOxxXqZDl07NmaI8VO5OgKbY=
+github.com/XiaoConstantine/sgrep v0.5.2/go.mod h1:qQz6Sgdiqxf98rfdfAbGBKNzIrzQwaci5zg+UIWNwPE=
 github.com/alecthomas/assert/v2 v2.7.0 h1:QtqSACNS3tF7oasA8CU6A6sXZSBDqnm7RfpLl9bZqbE=
 github.com/alecthomas/assert/v2 v2.7.0/go.mod h1:Bze95FyfUr7x34QZrjL+XP+0qgp/zg8yS+TtBj1WA3k=
 github.com/alecthomas/chroma/v2 v2.14.0 h1:R3+wzpnUArGcQz7fCETQBzO5n9IMNi13iIs46aU4V9E=
