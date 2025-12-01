@@ -76,7 +76,7 @@ graph TB
 ### **GitHub Integration**
 - **Seamless PR Workflow**: Direct integration with GitHub pull request comments
 - **Bulk Processing**: Efficient handling of large PRs with parallel processing
-- **Interactive Mode**: Guided setup and configuration
+- **Modern TUI**: Bubbletea-based terminal UI with keyboard navigation and real-time updates
 - **Real-time Feedback**: Live processing status and progress indicators
 
 ### **AI CLI Tool Integration**
@@ -156,10 +156,13 @@ tmux attach -t llm        # LLM server logs
 ### **Quick Start**
 
 ```bash
-# Interactive mode with guided setup and AI tool integration
+# Launch TUI (default when no PR specified)
+./maestro
+
+# Or explicitly with interactive flag
 ./maestro -i
 
-# Direct CLI usage for a specific PR  
+# Direct CLI usage for a specific PR
 ./maestro --owner=username --repo=repository --pr=123
 
 # Use integrated Claude Code CLI
@@ -217,16 +220,17 @@ MAESTRO_CONSENSUS_VALIDATION=true        # Consensus validation
 ### **Command Line Options**
 - `--github-token`: GitHub personal access token
 - `--owner`: Repository owner
-- `--repo`: Repository name  
+- `--repo`: Repository name
 - `--pr`: Pull request number to review
 - `--model`: LLM backend selection
 - `--index-workers`: Concurrent indexing workers
 - `--review-workers`: Concurrent review workers
 - `--verbose`: Enable detailed logging
-- `-i`: Interactive mode with AI CLI integration
+- `-i, --interactive`: Launch TUI (also default when no PR specified)
 
-### **Interactive Mode Commands**
+### **TUI Commands**
 - `/help`: Show available commands
+- `/review <pr>`: Review a pull request
 - `/claude [args]`: Access Claude Code CLI directly
 - `/gemini [args]`: Access Gemini CLI for web search
 - `/sessions create <name> <purpose>`: Create new AI session
