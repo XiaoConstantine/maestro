@@ -65,10 +65,6 @@ type RAGStore interface {
 	// FindSimilarWithDebug finds similar content with detailed debugging information
 	FindSimilarWithDebug(ctx context.Context, embedding []float32, limit int, contentTypes ...string) ([]*Content, DebugInfo, error)
 
-
-	// FindSimilarWithLateInteraction combines submodular optimization with late interaction refinement
-	FindSimilarWithLateInteraction(ctx context.Context, embedding []float32, limit int, codeContext, queryContext string, contentTypes ...string) ([]*Content, *RefinementResult, error)
-
 	// UpdateContent updates an existing content piece
 	UpdateContent(ctx context.Context, content *Content) error
 
@@ -459,57 +455,6 @@ func (s *sqliteRAGStore) PopulateGuidelinesBackground(ctx context.Context, langu
 func (s *sqliteRAGStore) FindSimilar(ctx context.Context, embedding []float32, limit int, contentTypes ...string) ([]*Content, error) {
 	results, _, err := s.FindSimilarWithDebug(ctx, embedding, limit, contentTypes...)
 	return results, err
-}
-
-
-// FindSimilarWithLateInteraction implements late interaction refinement without submodular optimization.
-func (s *sqliteRAGStore) FindSimilarWithLateInteraction(ctx context.Context, embedding []float32, limit int, codeContext, queryContext string, contentTypes ...string) ([]*Content, *RefinementResult, error) {
-	// Get candidates using larger search for refinement
-	candidateLimit := min(limit*2, 50) // Get more candidates for late interaction
-	candidates, _, err := s.FindSimilarWithDebug(ctx, embedding, candidateLimit, contentTypes...)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to get candidates: %w", err)
-	}
-
-	s.log.Debug(ctx, "Retrieved %d candidates for late interaction processing", len(candidates))
-
-	if len(candidates) == 0 {
-		return candidates, nil, nil
-	}
-
-	// Return top candidates if we don't have enough for refinement
-	if len(candidates) <= limit {
-		s.log.Debug(ctx, "Candidate count (%d) <= limit (%d), returning candidates without optimization", len(candidates), limit)
-		refinementResult := &RefinementResult{
-			OriginalCount:   len(candidates),
-			FinalCount:      len(candidates),
-			ProcessingTime:  time.Millisecond,
-			QualityMetrics: RefinementQualityMetrics{
-				ConfidenceScore: 0.8,
-				RelevanceScore:  0.8,
-			},
-		}
-		return candidates, refinementResult, nil
-	}
-
-	// Simple truncation to limit
-	selected := candidates
-	if len(selected) > limit {
-		selected = selected[:limit]
-	}
-
-	refinementResult := &RefinementResult{
-		OriginalCount:   len(candidates),
-		FinalCount:      len(selected),
-		ProcessingTime:  time.Millisecond,
-		QualityMetrics: RefinementQualityMetrics{
-			ConfidenceScore: 0.9,
-			RelevanceScore:  0.9,
-		},
-	}
-
-	s.log.Debug(ctx, "Late interaction completed: %d final guidelines selected", len(selected))
-	return selected, refinementResult, nil
 }
 
 // FindRelevantGuidelines performs pattern-based multi-vector search for guidelines.

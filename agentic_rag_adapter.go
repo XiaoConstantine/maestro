@@ -78,30 +78,6 @@ func (ara *AgenticRAGAdapter) FindSimilarWithDebug(ctx context.Context, embeddin
 	return contents, debugInfo, nil
 }
 
-// FindSimilarWithLateInteraction performs iterative search refinement.
-func (ara *AgenticRAGAdapter) FindSimilarWithLateInteraction(ctx context.Context, embedding []float32, limit int, codeContext, queryContext string, contentTypes ...string) ([]*Content, *RefinementResult, error) {
-	// Create query from both contexts
-	query := fmt.Sprintf("%s %s", queryContext, ara.extractKeywords(codeContext))
-
-	result, err := ara.orchestrator.ExecuteSearch(ctx, query, codeContext)
-	if err != nil {
-		return nil, nil, fmt.Errorf("interactive agentic search failed: %w", err)
-	}
-
-	contents := ara.convertToContent(result, limit)
-	refinementResult := &RefinementResult{
-		OriginalCount:  1,
-		FinalCount:     len(contents),
-		ProcessingTime: time.Second, // Placeholder
-		QualityMetrics: RefinementQualityMetrics{
-			ConfidenceScore: result.ConfidenceScore,
-			RelevanceScore:  result.ConfidenceScore,
-		},
-	}
-
-	return contents, refinementResult, nil
-}
-
 // Enhanced methods that provide better agentic search interface
 
 // SearchCode performs code-specific agentic search.
@@ -227,35 +203,6 @@ This project contains %d Go source files covering various functionalities includ
 	}
 
 	return contents
-}
-
-
-func (ara *AgenticRAGAdapter) extractKeywords(text string) string {
-	// Simple keyword extraction
-	words := strings.Fields(text)
-	var keywords []string
-
-	for _, word := range words {
-		if len(word) > 3 && !ara.isStopWord(word) {
-			keywords = append(keywords, word)
-		}
-	}
-
-	if len(keywords) > 5 {
-		keywords = keywords[:5] // Limit to top 5
-	}
-
-	return strings.Join(keywords, " ")
-}
-
-func (ara *AgenticRAGAdapter) isStopWord(word string) bool {
-	stopWords := map[string]bool{
-		"the": true, "and": true, "for": true, "are": true,
-		"but": true, "not": true, "you": true, "all": true,
-		"can": true, "had": true, "her": true, "was": true,
-		"one": true, "our": true, "out": true, "day": true,
-	}
-	return stopWords[strings.ToLower(word)]
 }
 
 func (ara *AgenticRAGAdapter) createTopMatches(contents []*Content) []string {
