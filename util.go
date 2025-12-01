@@ -10,12 +10,10 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 
 	"github.com/XiaoConstantine/dspy-go/pkg/core"
 	"github.com/XiaoConstantine/dspy-go/pkg/logging"
-	"github.com/logrusorgru/aurora"
 )
 
 func parseModelString(modelStr string) (provider, name, config string) {
@@ -172,100 +170,6 @@ func CreateStoragePath(ctx context.Context, owner, repo string) (string, error) 
 	// Use a single database file per repository
 	dbName := fmt.Sprintf("%s_%s.db", owner, repo)
 	return filepath.Join(maestroDir, dbName), nil
-}
-
-func formatStructuredAnswer(answer string) string {
-	if !strings.Contains(answer, "\n") {
-		// For single-line answers, keep it simple
-		return fmt.Sprintf("\n%s %s\n",
-			aurora.Green("Answer:").Bold().String(),
-			answer)
-	}
-
-	// For multi-line answers, add structure
-	sections := strings.Split(answer, "\n\n")
-	var formatted strings.Builder
-
-	for i, section := range sections {
-		if i == 0 {
-			// First section gets special treatment as main answer
-			formatted.WriteString(fmt.Sprintf("\n%s\n%s\n",
-				aurora.Green("Answer:").Bold().String(),
-				section))
-		} else {
-			// Additional sections get indentation and formatting
-			formatted.WriteString(fmt.Sprintf("\n%s\n",
-				indent(section, 2)))
-		}
-	}
-
-	return formatted.String()
-}
-
-func groupFilesByDirectory(files []string) map[string][]string {
-	groups := make(map[string][]string)
-	for _, file := range files {
-		dir := filepath.Dir(file)
-		groups[dir] = append(groups[dir], filepath.Base(file))
-	}
-	return groups
-}
-
-// Helper function to print file tree.
-func printFileTree(console ConsoleInterface, filesByDir map[string][]string) {
-	// Sort directories for consistent output
-	dirs := make([]string, 0, len(filesByDir))
-	for dir := range filesByDir {
-		dirs = append(dirs, dir)
-	}
-	sort.Strings(dirs)
-
-	for _, dir := range dirs {
-		files := filesByDir[dir]
-		if console.Color() {
-			console.Printf("📁 %s\n", aurora.Blue(dir).String())
-		} else {
-			console.Printf("📁 %s\n", dir)
-		}
-
-		for i, file := range files {
-			prefix := "   ├── "
-			if i == len(files)-1 {
-				prefix = "   └── "
-			}
-			if console.Color() {
-				console.Printf("%s%s\n", prefix, aurora.Cyan(file).String())
-			} else {
-				console.Printf("%s%s\n", prefix, file)
-			}
-		}
-	}
-}
-
-func preprocessForEmbedding(content string) (string, error) {
-	// Break into smaller chunks suitable for embedding
-	const maxEmbeddingLength = 4000 // Characters, not tokens
-
-	if len(content) <= maxEmbeddingLength {
-		return content, nil
-	}
-
-	// Split on natural boundaries like paragraphs or functions
-	lines := strings.Split(content, "\n")
-	var chunk strings.Builder
-	currentLength := 0
-
-	for _, line := range lines {
-		lineLength := len(line) + 1 // +1 for newline
-		if currentLength+lineLength > maxEmbeddingLength {
-			break
-		}
-		chunk.WriteString(line)
-		chunk.WriteString("\n")
-		currentLength += lineLength
-	}
-
-	return chunk.String(), nil
 }
 
 // levenshteinDistance calculates the minimum number of single-character edits

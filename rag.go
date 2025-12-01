@@ -1022,68 +1022,6 @@ func formatQuery(query string, args []interface{}) string {
 	return formattedQuery
 }
 
-// by combining content with metadata context for better semantic matching.
-func (s *sqliteRAGStore) createEnhancedGuidelineEmbedding(ctx context.Context, content string, rule ReviewRule, guideline GuidelineContent) string {
-	// Combine guideline content with rich context for better embedding
-	var embeddingText strings.Builder
-
-	// Add category and dimension context first
-	embeddingText.WriteString(fmt.Sprintf("Category: %s\n", guideline.Category))
-	embeddingText.WriteString(fmt.Sprintf("Dimension: %s\n", rule.Dimension))
-	embeddingText.WriteString(fmt.Sprintf("Impact: %s\n", rule.Metadata.Impact))
-	embeddingText.WriteString(fmt.Sprintf("Rule: %s\n", rule.Name))
-	embeddingText.WriteString("\n")
-
-	// Add the main content
-	embeddingText.WriteString("Content:\n")
-	embeddingText.WriteString(content)
-
-	// Add examples if available to improve context
-	if rule.Examples.Good != "" || rule.Examples.Bad != "" {
-		embeddingText.WriteString("\n\nExamples:\n")
-		if rule.Examples.Good != "" {
-			embeddingText.WriteString(fmt.Sprintf("Good example: %s\n", truncateString(rule.Examples.Good, 100)))
-		}
-		if rule.Examples.Bad != "" {
-			embeddingText.WriteString(fmt.Sprintf("Bad example: %s\n", truncateString(rule.Examples.Bad, 100)))
-		}
-		if rule.Examples.Explanation != "" {
-			embeddingText.WriteString(fmt.Sprintf("Explanation: %s\n", truncateString(rule.Examples.Explanation, 150)))
-		}
-	}
-
-	// Also add examples from the original guideline if available
-	if len(guideline.Examples) > 0 {
-		embeddingText.WriteString("\n\nAdditional Examples:\n")
-		for i, example := range guideline.Examples {
-			if i >= 2 { // Limit examples to avoid too much noise
-				break
-			}
-			if example.Good != "" {
-				embeddingText.WriteString(fmt.Sprintf("- Good: %s\n", truncateString(example.Good, 80)))
-			}
-			if example.Bad != "" {
-				embeddingText.WriteString(fmt.Sprintf("- Bad: %s\n", truncateString(example.Bad, 80)))
-			}
-		}
-	}
-
-	s.log.Debug(ctx, "Enhanced guideline embedding text length: %d chars for rule %s",
-		embeddingText.Len(), rule.Name)
-
-	return embeddingText.String()
-}
-
-// getGuidelineChunkSize returns the configured chunk size for guidelines.
-func getGuidelineChunkSize() int {
-	if value := os.Getenv("MAESTRO_GUIDELINE_CHUNK_SIZE"); value != "" {
-		if size, err := strconv.Atoi(value); err == nil && size > 100 && size < 32000 {
-			return size
-		}
-	}
-	return 6000 // Default to larger chunks (about 4096 bytes) for better context preservation
-}
-
 // getGuidelineEmbeddingModel returns the unified embedding model for guidelines.
 func getGuidelineEmbeddingModel() string {
 	// Use the same unified model as code for consistency
