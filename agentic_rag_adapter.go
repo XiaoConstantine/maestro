@@ -361,6 +361,11 @@ func (ara *AgenticRAGAdapter) PopulateGuidelines(ctx context.Context, language s
 	return nil
 }
 
+func (ara *AgenticRAGAdapter) PopulateGuidelinesBackground(ctx context.Context, language string) error {
+	// Same as PopulateGuidelines for agentic adapter (already lightweight)
+	return ara.PopulateGuidelines(ctx, language)
+}
+
 func (ara *AgenticRAGAdapter) StoreRule(ctx context.Context, rule ReviewRule) error {
 	// Rules are handled dynamically through search
 	ara.logger.Debug(ctx, "StoreRule called (no-op in agentic search): %s", rule.ID)

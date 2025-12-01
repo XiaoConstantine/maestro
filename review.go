@@ -368,16 +368,17 @@ func NewPRReviewAgent(ctx context.Context, githubTool GitHubInterface, dbPath st
 	} else {
 		logger.Debug(ctx, "Using traditional RAG system")
 		var err error
-		store, err = NewSQLiteRAGStore(db, logger)
+		dataDir := filepath.Dir(dbPath)
+		store, err = NewSQLiteRAGStore(db, logger, dataDir)
 		if err != nil {
 			db.Close()
 			return nil, fmt.Errorf("failed to initialize rag store: %v", err)
 		}
 	}
 
-	// Ensure guidelines are populated for primary repo language so guideline matching doesn't return 0
+	// Populate guidelines asynchronously to avoid blocking TUI startup
 	// Detect primary language via GitHub API; default to Go
-	func() {
+	go func() {
 		defer func() {
 			if r := recover(); r != nil {
 				logger.Warn(ctx, "guideline population panic recovered: %v", r)
@@ -395,10 +396,10 @@ func NewPRReviewAgent(ctx context.Context, githubTool GitHubInterface, dbPath st
 				}
 			}
 		}
-		if err := store.PopulateGuidelines(ctx, primary); err != nil {
+		if err := store.PopulateGuidelinesBackground(ctx, primary); err != nil {
 			logger.Warn(ctx, "Failed to populate guidelines for %s: %v", primary, err)
 		} else {
-			logger.Debug(ctx, "Guidelines populated for language: %s", primary)
+			logger.Info(ctx, "Guidelines populated for language: %s", primary)
 		}
 	}()
 
@@ -718,15 +719,6 @@ func (a *PRReviewAgent) startBackgroundIndexing(ctx context.Context, githubTool 
 
 	// Clone repo to /tmp and index with sgrep
 	err := a.cloneAndIndexWithSgrep(ctx, repoFullName, "")
-
-	// Fall back to legacy indexing if sgrep fails
-	if err != nil {
-		logger.Debug(ctx, "sgrep indexing failed (%v), falling back to legacy indexer", err)
-
-		// Silent background indexing - no console output
-		indexer := NewRepoIndexer(githubTool, store, workers)
-		err = indexer.IndexRepositoryBackground(ctx, "", dbPath)
-	}
 
 	a.indexStatus.mu.Lock()
 	defer a.indexStatus.mu.Unlock()
@@ -1170,7 +1162,8 @@ func (a *PRReviewAgent) analyzePatterns(ctx context.Context, tasks []PRReviewTas
 		// This avoids redundant guideline searches for the same patterns across chunks
 		var allFilePatterns []SimpleCodePattern
 		seenPatterns := make(map[string]bool)
-		enhancer := NewGuidelineSearchEnhancer(logger)
+		// Use empty dataDir since ExtractCodePatterns doesn't need guidelines directory
+		enhancer := NewGuidelineSearchEnhancer(logger, "")
 		
 		for _, chunk := range chunks {
 			chunkPatterns := enhancer.ExtractCodePatterns(ctx, chunk)

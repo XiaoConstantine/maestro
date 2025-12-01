@@ -78,6 +78,9 @@ type RAGStore interface {
 	// Populate style guide, best practices based on repo language
 	PopulateGuidelines(ctx context.Context, language string) error
 
+	// PopulateGuidelinesBackground runs guideline population without console output (for async use)
+	PopulateGuidelinesBackground(ctx context.Context, language string) error
+
 	StoreRule(ctx context.Context, rule ReviewRule) error
 
 	// HasContent checks if the database contains any indexed content
@@ -99,6 +102,10 @@ type sqliteRAGStore struct {
 	// Pattern-level cache for guideline search results to avoid redundant queries
 	patternCacheMu sync.RWMutex
 	patternCache   map[string][]GuidelineSearchResult // key: pattern name, value: search results
+
+	// Sgrep-based guideline search
+	guidelineSearcher *GuidelineSearchEnhancer
+	dataDir           string
 }
 
 func (s *sqliteRAGStore) init() error {
@@ -165,12 +172,14 @@ func (s *sqliteRAGStore) init() error {
 }
 
 // NewSQLiteRAGStore creates a new SQLite-backed RAG store.
-func NewSQLiteRAGStore(db *sql.DB, logger *logging.Logger) (RAGStore, error) {
+func NewSQLiteRAGStore(db *sql.DB, logger *logging.Logger, dataDir string) (RAGStore, error) {
 	store := &sqliteRAGStore{
-		db:           db,
-		log:          logger,
-		closed:       false,
-		patternCache: make(map[string][]GuidelineSearchResult),
+		db:                db,
+		log:               logger,
+		closed:            false,
+		patternCache:      make(map[string][]GuidelineSearchResult),
+		guidelineSearcher: NewGuidelineSearchEnhancer(logger, dataDir),
+		dataDir:           dataDir,
 	}
 
 	if err := store.init(); err != nil {
@@ -337,18 +346,17 @@ func (s *sqliteRAGStore) StoreContents(ctx context.Context, contents []*Content)
 	return nil
 }
 
-// populate guidelines during database initialization.
+// populate guidelines during database initialization using sgrep for indexing.
 func (s *sqliteRAGStore) PopulateGuidelines(ctx context.Context, language string) error {
-
 	s.log.Debug(ctx, "Starting guideline population for language: %s", language)
 
 	console := NewConsole(os.Stdout, s.log, nil)
 	fetcher := NewGuidelineFetcher(s.log)
+
 	// Start with fetching guidelines
 	var guidelines []GuidelineContent
 	err := console.WithSpinner(ctx, "Fetching coding guidelines...", func() error {
 		var err error
-		fetcher := NewGuidelineFetcher(s.log)
 		guidelines, err = fetcher.FetchGuidelines(ctx)
 		if err != nil {
 			return fmt.Errorf("failed to fetch guidelines: %w", err)
@@ -362,100 +370,88 @@ func (s *sqliteRAGStore) PopulateGuidelines(ctx context.Context, language string
 	console.StartSpinner("Processing guidelines...")
 	s.log.Debug(ctx, "Fetched %d guidelines", len(guidelines))
 
-	totalChunks := 0
-	// Store guidelines in the same database
+	// Store rules in database and collect guidelines for sgrep indexing
 	for i, guideline := range guidelines {
-
 		progress := float64(i+1) / float64(len(guidelines)) * 100
 		console.UpdateSpinnerText(fmt.Sprintf("Processing guidelines... %.1f%% (%d/%d)",
 			progress, i+1, len(guidelines)))
+
 		rule, err := fetcher.ConvertGuidelineToRules(ctx, guideline)
 		if err != nil {
-			s.log.Error(ctx, "failed to convert guideline to rule")
-		}
-		if err := s.StoreRule(ctx, rule[0]); err != nil {
-			console.StopSpinner()
-			return fmt.Errorf("failed to store rule: %w", err)
-		}
-
-		content := FormatRuleContent(rule[0])
-
-		guidelineFilePath := fmt.Sprintf("guidelines/%s/%s.md", rule[0].Dimension, guideline.Category)
-		chunkConfig, err := NewChunkConfig(
-			WithStrategy(ChunkBySize),
-			WithMaxTokens(getGuidelineChunkSize()),
-			WithContextLines(5),
-			WithOverlapLines(2),
-			WithFilePath(guidelineFilePath),
-		)
-		if err != nil {
-			s.log.Warn(ctx, "Failed to create chunk config for guideline %s: %v", guideline.ID, err)
+			s.log.Error(ctx, "failed to convert guideline to rule: %v", err)
 			continue
 		}
-
-		chunks, err := chunkfile(ctx, content, "", chunkConfig)
-		if err != nil {
-			s.log.Debug(ctx, "Failed to chunk guideline %s: %v, storing as single unit", guideline.ID, err)
-			chunks = []ReviewChunk{{
-				content:     content,
-				startline:   1,
-				endline:     len(strings.Split(content, "\n")),
-				filePath:    guidelineFilePath,
-				totalChunks: 1,
-			}}
-		}
-		for j, chunk := range chunks {
-			chunkID := fmt.Sprintf("guideline_%s_chunk_%d", guideline.ID, j+1)
-			metadata := map[string]string{
-				"content_type": ContentTypeGuideline,
-				"language":     language,
-				"category":     guideline.Category,
-				"dimension":    rule[0].Dimension,
-				"impact":       rule[0].Metadata.Impact,
-				"guideline_id": guideline.ID,
-				"chunk_number": fmt.Sprintf("%d", j+1),
-				"total_chunks": fmt.Sprintf("%d", len(chunks)),
-				"start_line":   fmt.Sprintf("%d", chunk.startline),
-				"end_line":     fmt.Sprintf("%d", chunk.endline),
-				"rule_name":    rule[0].Name,
-			}
-			// Enhanced embedding text with context for better semantic matching
-			embeddingText := s.createEnhancedGuidelineEmbedding(ctx, chunk.content, rule[0], guideline)
-
-			// Generate embedding using smart router (local sgrep or cloud fallback)
-			embeddingModel := getGuidelineEmbeddingModel()
-			router := GetEmbeddingRouter()
-			embedding, err := router.CreateEmbedding(ctx, embeddingText, WithBatch(true), WithModel(embeddingModel))
-			if err != nil {
-				s.log.Warn(ctx, "Failed to create embedding: %v", err)
-				continue
-			}
-			// Store the chunk with enhanced embedding
-			err = s.StoreContent(ctx, &Content{
-				ID:        chunkID,
-				Text:      chunk.content,    // Original text
-				Embedding: embedding.Vector, // Enhanced embedding
-				Metadata:  metadata,         // Rich metadata
-			})
-			if err != nil {
-				s.log.Warn(ctx, "Failed to store guideline chunk: %v", err)
-				continue
-			}
-
-			totalChunks++
+		if err := s.StoreRule(ctx, rule[0]); err != nil {
+			s.log.Warn(ctx, "Failed to store rule: %v", err)
+			continue
 		}
 	}
+
+	// Write guidelines as markdown files for sgrep indexing
+	console.UpdateSpinnerText("Writing guidelines for sgrep indexing...")
+	if err := s.guidelineSearcher.WriteGuidelines(ctx, guidelines); err != nil {
+		s.log.Warn(ctx, "Failed to write guidelines for sgrep: %v", err)
+	}
+
+	// Index guidelines with sgrep
+	console.UpdateSpinnerText("Indexing guidelines with sgrep...")
+	if err := s.guidelineSearcher.IndexGuidelines(ctx); err != nil {
+		s.log.Warn(ctx, "Failed to index guidelines with sgrep: %v", err)
+	}
+
 	console.StopSpinner()
 
 	if console.Color() {
 		console.Printf("%s %s\n",
 			aurora.Green("✓").Bold(),
-			aurora.White(fmt.Sprintf("Successfully processed %d guidelines", len(guidelines))).Bold(),
+			aurora.White(fmt.Sprintf("Successfully processed %d guidelines (sgrep indexed)", len(guidelines))).Bold(),
 		)
 	} else {
 		console.Printf("✓ Successfully processed %d guidelines\n", len(guidelines))
 	}
 	s.log.Debug(ctx, "Finished fetch guidelines")
+	return nil
+}
+
+// PopulateGuidelinesBackground runs guideline population without console output.
+// Use this for async initialization to avoid interfering with TUI.
+func (s *sqliteRAGStore) PopulateGuidelinesBackground(ctx context.Context, language string) error {
+	s.log.Info(ctx, "Starting background guideline population for language: %s", language)
+
+	fetcher := NewGuidelineFetcher(s.log)
+
+	// Fetch guidelines
+	guidelines, err := fetcher.FetchGuidelines(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to fetch guidelines: %w", err)
+	}
+
+	s.log.Debug(ctx, "Fetched %d guidelines", len(guidelines))
+
+	// Store rules in database and collect guidelines for sgrep indexing
+	for _, guideline := range guidelines {
+		rule, err := fetcher.ConvertGuidelineToRules(ctx, guideline)
+		if err != nil {
+			s.log.Error(ctx, "failed to convert guideline to rule: %v", err)
+			continue
+		}
+		if err := s.StoreRule(ctx, rule[0]); err != nil {
+			s.log.Warn(ctx, "Failed to store rule: %v", err)
+			continue
+		}
+	}
+
+	// Write guidelines as markdown files for sgrep indexing
+	if err := s.guidelineSearcher.WriteGuidelines(ctx, guidelines); err != nil {
+		s.log.Warn(ctx, "Failed to write guidelines for sgrep: %v", err)
+	}
+
+	// Index guidelines with sgrep
+	if err := s.guidelineSearcher.IndexGuidelines(ctx); err != nil {
+		s.log.Warn(ctx, "Failed to index guidelines with sgrep: %v", err)
+	}
+
+	s.log.Info(ctx, "Background guideline population completed: %d guidelines indexed", len(guidelines))
 	return nil
 }
 
@@ -531,7 +527,7 @@ func (s *sqliteRAGStore) FindRelevantGuidelines(
 		return []GuidelineSearchResult{}, nil
 	}
 
-	enhancer := NewGuidelineSearchEnhancer(s.log)
+	enhancer := NewGuidelineSearchEnhancer(s.log, s.dataDir)
 	allResults := make(map[string]*GuidelineSearchResult)
 
 	// First, check cache for each pattern and identify which need fresh searches

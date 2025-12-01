@@ -2,22 +2,265 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/XiaoConstantine/dspy-go/pkg/logging"
 )
 
-// GuidelineSearchEnhancer provides pattern-based guideline search with semantic enrichment.
+// GuidelineSearchEnhancer provides pattern-based guideline search with sgrep semantic search.
 type GuidelineSearchEnhancer struct {
-	log *logging.Logger
+	log           *logging.Logger
+	guidelinesDir string
+	indexed       bool
+	indexMu       sync.RWMutex
 }
 
 // NewGuidelineSearchEnhancer creates a new guideline search enhancer.
-func NewGuidelineSearchEnhancer(logger *logging.Logger) *GuidelineSearchEnhancer {
+func NewGuidelineSearchEnhancer(logger *logging.Logger, dataDir string) *GuidelineSearchEnhancer {
+	guidelinesDir := filepath.Join(dataDir, "guidelines")
 	return &GuidelineSearchEnhancer{
-		log: logger,
+		log:           logger,
+		guidelinesDir: guidelinesDir,
+		indexed:       false,
 	}
+}
+
+// SgrepGuidelineResult represents a sgrep search result for guidelines.
+type SgrepGuidelineResult struct {
+	FilePath  string  `json:"file_path"`
+	StartLine int     `json:"start_line"`
+	EndLine   int     `json:"end_line"`
+	Content   string  `json:"content"`
+	Score     float64 `json:"score"`
+}
+
+// WriteGuidelines writes guidelines as markdown files for sgrep indexing.
+func (gse *GuidelineSearchEnhancer) WriteGuidelines(ctx context.Context, guidelines []GuidelineContent) error {
+	if gse.guidelinesDir == "" {
+		return fmt.Errorf("guidelines directory not configured")
+	}
+
+	// Create guidelines directory if it doesn't exist
+	if err := os.MkdirAll(gse.guidelinesDir, 0755); err != nil {
+		return fmt.Errorf("failed to create guidelines directory: %w", err)
+	}
+
+	for _, g := range guidelines {
+		filename := fmt.Sprintf("%s.md", sanitizeFilename(g.ID))
+		filePath := filepath.Join(gse.guidelinesDir, filename)
+
+		content := gse.formatGuidelineAsMarkdown(g)
+		if err := os.WriteFile(filePath, []byte(content), 0644); err != nil {
+			gse.log.Warn(ctx, "Failed to write guideline %s: %v", g.ID, err)
+			continue
+		}
+	}
+
+	gse.log.Debug(ctx, "Wrote %d guidelines to %s", len(guidelines), gse.guidelinesDir)
+	return nil
+}
+
+// formatGuidelineAsMarkdown formats a guideline as markdown for sgrep indexing.
+func (gse *GuidelineSearchEnhancer) formatGuidelineAsMarkdown(g GuidelineContent) string {
+	var sb strings.Builder
+
+	sb.WriteString(fmt.Sprintf("# %s\n\n", g.Category))
+	sb.WriteString(fmt.Sprintf("Category: %s\n", g.Category))
+	sb.WriteString(fmt.Sprintf("Language: %s\n\n", g.Language))
+
+	sb.WriteString("## Description\n\n")
+	sb.WriteString(g.Text)
+	sb.WriteString("\n\n")
+
+	for i, example := range g.Examples {
+		if i >= 3 { // Limit examples
+			break
+		}
+		if example.Bad != "" {
+			sb.WriteString("## Bad Example\n\n```go\n")
+			sb.WriteString(example.Bad)
+			sb.WriteString("\n```\n\n")
+		}
+		if example.Good != "" {
+			sb.WriteString("## Good Example\n\n```go\n")
+			sb.WriteString(example.Good)
+			sb.WriteString("\n```\n\n")
+		}
+		if example.Explanation != "" {
+			sb.WriteString("## Explanation\n\n")
+			sb.WriteString(example.Explanation)
+			sb.WriteString("\n\n")
+		}
+	}
+
+	return sb.String()
+}
+
+// IndexGuidelines runs sgrep index on the guidelines directory.
+func (gse *GuidelineSearchEnhancer) IndexGuidelines(ctx context.Context) error {
+	gse.indexMu.Lock()
+	defer gse.indexMu.Unlock()
+
+	if gse.guidelinesDir == "" {
+		return fmt.Errorf("guidelines directory not configured")
+	}
+
+	// Check if guidelines directory exists
+	if _, err := os.Stat(gse.guidelinesDir); os.IsNotExist(err) {
+		return fmt.Errorf("guidelines directory does not exist: %s", gse.guidelinesDir)
+	}
+
+	cmd := exec.CommandContext(ctx, "sgrep", "index", ".")
+	cmd.Dir = gse.guidelinesDir
+
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("sgrep index failed: %s: %w", string(output), err)
+	}
+
+	gse.indexed = true
+	gse.log.Debug(ctx, "Successfully indexed guidelines directory: %s", gse.guidelinesDir)
+	return nil
+}
+
+// IsIndexed returns whether guidelines have been indexed.
+func (gse *GuidelineSearchEnhancer) IsIndexed() bool {
+	gse.indexMu.RLock()
+	defer gse.indexMu.RUnlock()
+	return gse.indexed
+}
+
+// SearchGuidelines searches guidelines using sgrep semantic search.
+func (gse *GuidelineSearchEnhancer) SearchGuidelines(ctx context.Context, query string, limit int) ([]GuidelineSearchResult, error) {
+	if gse.guidelinesDir == "" || !gse.isSgrepAvailable(ctx) {
+		gse.log.Warn(ctx, "sgrep not available or guidelines dir not set, returning empty results")
+		return []GuidelineSearchResult{}, nil
+	}
+
+	args := []string{query, "--json", "-n", fmt.Sprintf("%d", limit)}
+	cmd := exec.CommandContext(ctx, "sgrep", args...)
+	cmd.Dir = gse.guidelinesDir
+
+	output, err := cmd.Output()
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			stderr := string(exitErr.Stderr)
+			if strings.Contains(stderr, "not indexed") || strings.Contains(stderr, "no index found") {
+				gse.log.Warn(ctx, "Guidelines not indexed, attempting to index...")
+				if indexErr := gse.IndexGuidelines(ctx); indexErr != nil {
+					return nil, fmt.Errorf("failed to index guidelines: %w", indexErr)
+				}
+				// Retry search after indexing
+				cmd = exec.CommandContext(ctx, "sgrep", args...)
+				cmd.Dir = gse.guidelinesDir
+				output, err = cmd.Output()
+				if err != nil {
+					return nil, fmt.Errorf("sgrep search failed after indexing: %w", err)
+				}
+			} else {
+				return nil, fmt.Errorf("sgrep search failed: %s", stderr)
+			}
+		} else {
+			return nil, fmt.Errorf("sgrep search failed: %w", err)
+		}
+	}
+
+	// Parse JSON results
+	var sgrepResults []SgrepGuidelineResult
+	if err := json.Unmarshal(output, &sgrepResults); err != nil {
+		gse.log.Warn(ctx, "Failed to parse sgrep output as JSON: %v", err)
+		return []GuidelineSearchResult{}, nil
+	}
+
+	// Convert to GuidelineSearchResult
+	results := make([]GuidelineSearchResult, 0, len(sgrepResults))
+	for _, r := range sgrepResults {
+		// Convert distance score to relevance (lower distance = higher relevance)
+		relevance := 1.0 - r.Score
+		if relevance < 0 {
+			relevance = 0
+		}
+
+		result := GuidelineSearchResult{
+			Content: &Content{
+				ID:   fmt.Sprintf("%s:%d-%d", r.FilePath, r.StartLine, r.EndLine),
+				Text: r.Content,
+				Metadata: map[string]string{
+					"file_path":    r.FilePath,
+					"start_line":   fmt.Sprintf("%d", r.StartLine),
+					"end_line":     fmt.Sprintf("%d", r.EndLine),
+					"content_type": ContentTypeGuideline,
+					"source":       "sgrep",
+				},
+			},
+			FinalScore: relevance,
+			Pattern:    query,
+		}
+		results = append(results, result)
+	}
+
+	gse.log.Debug(ctx, "Sgrep search for '%s' returned %d results", query, len(results))
+	return results, nil
+}
+
+// FindRelevantGuidelinesWithSgrep finds guidelines relevant to the given code using sgrep.
+func (gse *GuidelineSearchEnhancer) FindRelevantGuidelinesWithSgrep(ctx context.Context, code string, limit int) ([]GuidelineSearchResult, error) {
+	patterns := gse.ExtractCodePatterns(ctx, code)
+	if len(patterns) == 0 {
+		gse.log.Debug(ctx, "No patterns detected in code")
+		return []GuidelineSearchResult{}, nil
+	}
+
+	var allResults []GuidelineSearchResult
+	perPatternLimit := max(limit/len(patterns), 3)
+
+	for _, pattern := range patterns {
+		query := fmt.Sprintf("Go best practices for %s: %s", pattern.Name, pattern.Description)
+		results, err := gse.SearchGuidelines(ctx, query, perPatternLimit)
+		if err != nil {
+			gse.log.Warn(ctx, "sgrep search failed for pattern %s: %v", pattern.Name, err)
+			continue
+		}
+
+		// Add pattern context to results
+		for i := range results {
+			results[i].Pattern = pattern.Name
+			results[i].ContextDescription = fmt.Sprintf("Relevant to %s pattern detected in your code", pattern.Name)
+		}
+
+		allResults = append(allResults, results...)
+	}
+
+	// Deduplicate and sort
+	allResults = DeduplicateResults(allResults)
+
+	// Return top N
+	if len(allResults) > limit {
+		allResults = allResults[:limit]
+	}
+
+	gse.log.Debug(ctx, "Found %d relevant guidelines via sgrep", len(allResults))
+	return allResults, nil
+}
+
+// isSgrepAvailable checks if sgrep CLI is installed.
+func (gse *GuidelineSearchEnhancer) isSgrepAvailable(ctx context.Context) bool {
+	cmd := exec.CommandContext(ctx, "which", "sgrep")
+	return cmd.Run() == nil
+}
+
+// sanitizeFilename creates a safe filename from a guideline ID.
+func sanitizeFilename(id string) string {
+	safe := strings.ReplaceAll(id, "/", "-")
+	safe = strings.ReplaceAll(safe, " ", "-")
+	safe = strings.ReplaceAll(safe, ":", "-")
+	return safe
 }
 
 // SimpleCodePattern represents a detected code pattern in a file for guideline search.
