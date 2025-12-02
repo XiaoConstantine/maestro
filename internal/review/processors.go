@@ -5,7 +5,6 @@ import (
 	"context"
 	"fmt"
 	"math"
-	"strconv"
 	"strings"
 	"time"
 
@@ -14,7 +13,6 @@ import (
 	"github.com/XiaoConstantine/dspy-go/pkg/logging"
 	"github.com/XiaoConstantine/dspy-go/pkg/modules"
 	"github.com/XiaoConstantine/maestro/internal/types"
-	"golang.org/x/exp/maps"
 )
 
 // CodeReviewProcessor handles code review task processing.
@@ -295,136 +293,7 @@ func calculateValidationScore(handoff *ReviewHandoff) float64 {
 	return math.Round(averageScore*100) / 100
 }
 
-func parseReviewComments(ctx context.Context, filePath string, commentsStr string, metric MetricsCollector) ([]PRReviewComment, error) {
-	var comments []PRReviewComment
 
-	sections := strings.Split(commentsStr, "\n-")
-	for _, section := range sections {
-		if strings.TrimSpace(section) == "" {
-			continue
-		}
-
-		comment := PRReviewComment{FilePath: filePath}
-		lines := strings.Split(section, "\n")
-		for _, line := range lines {
-			parts := strings.SplitN(strings.TrimSpace(line), ":", 2)
-			if len(parts) != 2 {
-				continue
-			}
-
-			key := strings.TrimSpace(parts[0])
-			value := strings.TrimSpace(parts[1])
-
-			switch key {
-			case "line":
-				value = strings.TrimPrefix(value, "L")
-				value = strings.Split(value, "-")[0]
-				if lineNum, err := strconv.Atoi(value); err == nil && lineNum > 0 {
-					comment.LineNumber = lineNum
-				}
-			case "severity":
-				comment.Severity = validateSeverity(value)
-			case "content":
-				comment.Content = value
-			case "suggestion":
-				comment.Suggestion = value
-			case "category":
-				comment.Category = validateCategory(value)
-			}
-		}
-
-		if isValidComment(comment) {
-			comments = append(comments, comment)
-			metric.TrackReviewComment(ctx, comment, true)
-		}
-	}
-
-	return comments, nil
-}
-
-func extractComments(ctx context.Context, result interface{}, filePath string, metric MetricsCollector) ([]PRReviewComment, error) {
-	logger := logging.GetLogger()
-	logger.Debug(ctx, "Extracting comments from result type: %T", result)
-	switch v := result.(type) {
-	case map[string]interface{}:
-		logger.Debug(ctx, "Processing map result with keys: %v", maps.Keys(v))
-		if comments, ok := v["comments"].([]PRReviewComment); ok {
-			return comments, nil
-		}
-
-		if metadata, ok := v["metadata"].(map[string]interface{}); ok {
-			logger.Debug(ctx, "Found metadata with keys: %v", maps.Keys(metadata))
-			if handoffRaw, ok := metadata["handoff"]; ok {
-				logger.Debug(ctx, "Found handoff of type: %T", handoffRaw)
-				handoff, ok := handoffRaw.(*ReviewHandoff)
-				if !ok {
-					return nil, fmt.Errorf("invalid handoff type: %T", handoffRaw)
-				}
-
-				var comments []PRReviewComment
-				for _, issue := range handoff.ValidatedIssues {
-					comment := PRReviewComment{
-						FilePath:   issue.FilePath,
-						LineNumber: issue.LineRange.Start,
-						Content:    issue.Context,
-						Severity:   issue.Severity,
-						Category:   issue.Category,
-						Suggestion: issue.Suggestion,
-					}
-					metric.TrackReviewComment(ctx, comment, true)
-					comments = append(comments, comment)
-				}
-				return comments, nil
-			}
-		}
-
-		commentsRaw, exists := v["comments"]
-		if !exists {
-			return nil, fmt.Errorf("missing comments in result")
-		}
-
-		commentsStr, ok := commentsRaw.(string)
-		if !ok {
-			return nil, fmt.Errorf("invalid comments format: %T", commentsRaw)
-		}
-
-		return parseReviewComments(ctx, filePath, commentsStr, metric)
-
-	default:
-		return nil, fmt.Errorf("unexpected result type: %T", result)
-	}
-}
-
-func validateSeverity(severity string) string {
-	validSeverities := map[string]bool{
-		"critical":   true,
-		"warning":    true,
-		"suggestion": true,
-	}
-
-	severity = strings.ToLower(strings.TrimSpace(severity))
-	if validSeverities[severity] {
-		return severity
-	}
-	return "suggestion"
-}
-
-func validateCategory(category string) string {
-	validCategories := map[string]bool{
-		"error-handling":   true,
-		"code-style":       true,
-		"performance":      true,
-		"security":         true,
-		"documentation":    true,
-		"comment-response": true,
-	}
-
-	category = strings.ToLower(strings.TrimSpace(category))
-	if validCategories[category] {
-		return category
-	}
-	return "code-style"
-}
 
 func isValidComment(comment PRReviewComment) bool {
 	if comment.LineNumber <= 0 ||

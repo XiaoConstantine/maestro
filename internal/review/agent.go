@@ -6,7 +6,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/XiaoConstantine/dspy-go/pkg/agents"
 	"github.com/XiaoConstantine/maestro/internal/types"
 )
 
@@ -16,7 +15,6 @@ type Agent interface {
 	ReviewPRWithChanges(ctx context.Context, prNumber int, tasks []types.PRReviewTask, console types.ConsoleInterface, preloadedChanges *types.PRChanges) ([]types.PRReviewComment, error)
 	Stop(ctx context.Context)
 	Metrics(ctx context.Context) types.MetricsCollector
-	Orchestrator(ctx context.Context) *agents.FlexibleOrchestrator
 	ClonedRepoPath() string
 	WaitForClone(ctx context.Context, timeout time.Duration) string
 	GetIndexingStatus() *types.IndexingStatus

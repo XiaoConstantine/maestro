@@ -16,8 +16,10 @@ import (
 	"github.com/XiaoConstantine/dspy-go/pkg/core"
 	"github.com/XiaoConstantine/dspy-go/pkg/llms"
 	"github.com/XiaoConstantine/dspy-go/pkg/logging"
+	"github.com/XiaoConstantine/maestro/internal/agent"
 	"github.com/XiaoConstantine/maestro/internal/github"
 	"github.com/XiaoConstantine/maestro/internal/review"
+	"github.com/XiaoConstantine/maestro/internal/search"
 	"github.com/XiaoConstantine/maestro/internal/types"
 	"github.com/XiaoConstantine/maestro/internal/util"
 	"github.com/XiaoConstantine/maestro/terminal"
@@ -222,7 +224,10 @@ Available slash commands in interactive mode:
 
 	rootCmd.PersistentFlags().IntVar(&cfg.indexWorkers, "index-workers", runtime.NumCPU(), "Number of concurrent workers for repository indexing")
 
-	rootCmd.PersistentFlags().IntVar(&cfg.reviewWorkers, "review-workers", runtime.NumCPU(), "Number of concurrent workers for parallel review")
+	// Default to 120 workers for I/O-bound LLM API calls.
+	// LLM calls are network-bound, not CPU-bound, so higher concurrency
+	// improves throughput by overlapping HTTP requests.
+	rootCmd.PersistentFlags().IntVar(&cfg.reviewWorkers, "review-workers", 120, "Number of concurrent workers for parallel review")
 
 	// Mark required flags
 	rootCmd.PersistentPreRun = func(cmd *cobra.Command, args []string) {
@@ -540,8 +545,97 @@ func (a *TUIBackendAdapter) ReviewPR(ctx context.Context, prNumber int, onProgre
 }
 
 // AskQuestion implements terminal.MaestroBackend.
+// It uses the UnifiedReActAgent which can iteratively search and read files to answer questions.
 func (a *TUIBackendAdapter) AskQuestion(ctx context.Context, question string) (string, error) {
-	return "Question answering coming soon. Use /review <PR#> to review a pull request.", nil
+	if a.agent == nil {
+		return "", fmt.Errorf("agent not initialized")
+	}
+
+	logger := logging.GetLogger()
+	logger.Info(ctx, "Processing question with ReAct agent: %s", question)
+
+	// Get the cloned repo path
+	repoPath := a.agent.ClonedRepoPath()
+	if repoPath == "" {
+		return "Repository is still being cloned. Please wait a moment and try again.", nil
+	}
+
+	// Create a SimpleSearchTool for the cloned repo
+	searchTool := search.NewSimpleSearchTool(logger, repoPath)
+
+	// Create a UnifiedReActAgent that can iteratively explore the codebase
+	reactAgent, err := agent.NewUnifiedReActAgent("qa-agent", searchTool, logger)
+	if err != nil {
+		logger.Error(ctx, "Failed to create ReAct agent: %v", err)
+		return "", fmt.Errorf("failed to initialize question answering: %w", err)
+	}
+
+	// Create search request with the question
+	searchRequest := &search.SearchRequest{
+		Query:         question,
+		Context:       fmt.Sprintf("Repository: %s/%s. Answer the user's question by exploring the codebase. For overview questions, start by reading README.md.", a.owner, a.repo),
+		MaxResults:    10,
+		RequiredDepth: 3,
+	}
+
+	// Execute the search using the ReAct agent
+	response, err := reactAgent.ExecuteSearch(ctx, searchRequest)
+	if err != nil {
+		logger.Error(ctx, "ReAct agent search failed: %v", err)
+		return "", fmt.Errorf("failed to answer question: %w", err)
+	}
+
+	// Format the response
+	var result strings.Builder
+
+	// Extract the answer from the ReAct agent results
+	// The agent's answer is stored in a result with FilePath like "phase-X-output"
+	var answer string
+	var sourceFiles []string
+	seenFiles := make(map[string]bool)
+
+	for _, r := range response.Results {
+		if r.SearchResult == nil {
+			continue
+		}
+		// Phase outputs contain the agent's synthesized answer
+		if strings.HasPrefix(r.FilePath, "phase-") || strings.HasPrefix(r.FilePath, "react-") {
+			if r.Line != "" && len(r.Line) > len(answer) {
+				answer = r.Line
+			}
+		} else if r.FilePath != "" {
+			// Track actual source files explored
+			if !seenFiles[r.FilePath] {
+				seenFiles[r.FilePath] = true
+				sourceFiles = append(sourceFiles, r.FilePath)
+			}
+		}
+	}
+
+	// Use the agent's answer, fall back to synthesis
+	if answer != "" {
+		result.WriteString(answer)
+	} else if response.Synthesis != "" {
+		result.WriteString(response.Synthesis)
+	} else {
+		return fmt.Sprintf("I couldn't find relevant information about \"%s\" in this repository.", question), nil
+	}
+
+	// Add source files if available
+	if len(sourceFiles) > 0 {
+		result.WriteString("\n\n📁 Sources explored:\n")
+		for _, f := range sourceFiles {
+			result.WriteString(fmt.Sprintf("  • %s\n", f))
+		}
+	}
+
+	// Add confidence indicator
+	if response.Confidence < 0.5 {
+		result.WriteString("\n⚠️  Low confidence answer - results may be incomplete")
+	}
+
+	logger.Info(ctx, "ReAct agent completed in %v with confidence %.2f", response.Duration, response.Confidence)
+	return result.String(), nil
 }
 
 // GetRepoInfo implements terminal.MaestroBackend.

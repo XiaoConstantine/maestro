@@ -10,7 +10,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/XiaoConstantine/dspy-go/pkg/agents"
 	"github.com/XiaoConstantine/dspy-go/pkg/core"
 	"github.com/XiaoConstantine/dspy-go/pkg/logging"
 	"github.com/briandowns/spinner"
@@ -850,10 +849,10 @@ type ReviewAgent interface {
 	ReviewPRWithChanges(ctx context.Context, prNumber int, tasks []PRReviewTask, console ConsoleInterface, preloadedChanges *PRChanges) ([]PRReviewComment, error)
 	Stop(ctx context.Context)
 	Metrics(ctx context.Context) MetricsCollector
-	Orchestrator(ctx context.Context) *agents.FlexibleOrchestrator
 	ClonedRepoPath() string
 	WaitForClone(ctx context.Context, timeout time.Duration) string
 	GetIndexingStatus() *IndexingStatus
+	GetRAGStore() RAGStore
 	Close() error
 }
 

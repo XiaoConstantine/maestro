@@ -90,13 +90,17 @@ func InitializeEnhancedFeatures() {
 // GetGlobalFeatures returns the global feature configuration.
 func GetGlobalFeatures() *types.EnhancedFeatures {
 	featuresMu.RLock()
-	defer featuresMu.RUnlock()
-
-	if globalFeatures == nil {
-		featuresMu.RUnlock()
-		InitializeEnhancedFeatures()
-		featuresMu.RLock()
+	if globalFeatures != nil {
+		defer featuresMu.RUnlock()
+		return globalFeatures
 	}
+	featuresMu.RUnlock()
+
+	// Initialize if nil - InitializeEnhancedFeatures acquires write lock
+	InitializeEnhancedFeatures()
+
+	featuresMu.RLock()
+	defer featuresMu.RUnlock()
 	return globalFeatures
 }
 

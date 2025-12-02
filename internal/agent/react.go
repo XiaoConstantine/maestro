@@ -132,8 +132,8 @@ func NewUnifiedReActAgent(id string, searchTool *search.SimpleSearchTool, logger
 		"Adaptive search agent that specializes dynamically based on query type and complexity",
 		react.WithExecutionMode(react.ModeReAct),
 		react.WithReflection(false, 0),
-		react.WithMaxIterations(8),
-		react.WithTimeout(60*time.Second),
+		react.WithMaxIterations(15),
+		react.WithTimeout(120*time.Second),
 	)
 
 	agent := &UnifiedReActAgent{
@@ -629,7 +629,7 @@ func (ura *UnifiedReActAgent) executePhase(ctx context.Context, input map[string
 		ura.recordToolUsage(tool, phase.PhaseNumber, "Phase execution", 0.0)
 	}
 
-	phaseCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	phaseCtx, cancel := context.WithTimeout(ctx, 120*time.Second)
 	defer cancel()
 
 	result, err := ura.reactAgent.Execute(phaseCtx, input)
@@ -993,6 +993,14 @@ Focus on selecting the right tool and parameters for the task.
 	}
 	baseInstruction += fmt.Sprintf("Aim for %d-%d tool calls to thoroughly explore before completing the search.\n",
 		minIter, maxIter)
+
+	baseInstruction += `
+CRITICAL: When you have gathered enough information to answer the user's question:
+1. Call Finish immediately with <action><tool_name>Finish</tool_name></action>
+2. Put your complete answer in the 'answer' field
+3. DO NOT keep exploring if you already have the answer
+4. Summarize your findings clearly in the answer field
+`
 
 	return baseInstruction
 }

@@ -249,6 +249,7 @@ func (m *MaestroModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Handle async response from backend
 		m.addMessage("assistant", msg.Content)
 		m.statusBar.SetMessage("")
+		m.progressModel.Hide() // Ensure progress is hidden when response arrives
 
 	case ReviewResultMsg:
 		// Store review results for inline display (Crush-style)

@@ -87,6 +87,164 @@ func NewRepoQAProcessor(store RAGStore) *RepoQAProcessor {
 	}
 }
 
+// SearchQueries contains optimized queries for code search.
+type SearchQueries struct {
+	Queries         []string // List of search queries to try
+	IncludeReadme   bool     // Whether to prioritize README/doc files
+	UseHybridSearch bool     // Whether to use hybrid (semantic + keyword) search
+}
+
+// GenerateSearchQueries uses LLM to generate optimized search queries for sgrep.
+// This helps translate vague user questions into effective semantic search queries.
+func (p *RepoQAProcessor) GenerateSearchQueries(ctx context.Context, question, repoName string) (*SearchQueries, error) {
+	signature := core.NewSignature(
+		[]core.InputField{
+			{Field: core.Field{Name: "user_question", Description: "The user's question about the codebase"}},
+			{Field: core.Field{Name: "repo_name", Description: "Repository name for context"}},
+		},
+		[]core.OutputField{
+			{Field: core.Field{Name: "search_queries", Description: "3 optimized search queries, one per line"}},
+			{Field: core.Field{Name: "include_readme", Description: "yes or no"}},
+			{Field: core.Field{Name: "use_hybrid", Description: "yes or no"}},
+		},
+	).WithInstruction(`Generate optimized search queries for sgrep, a semantic code search tool.
+
+ABOUT SGREP:
+- Semantic search: finds code by meaning, not exact text match
+- Works well with: technical terms, concept descriptions, specific patterns
+- Works poorly with: vague questions like "what does this do", "how does it work"
+- Scores are L2 distance (lower = more similar), typically 0.6-0.9 range
+
+YOUR TASK:
+Convert the user's question into 3 effective search queries that will find relevant code.
+
+GUIDELINES:
+1. Include the repo/project name in at least one query for overview questions
+2. Use technical terms and programming concepts
+3. Be specific - "error handling retry mechanism" beats "how errors work"
+4. For architecture questions, include terms like "main", "entry point", "core", "module"
+5. Each query should be 3-8 words
+
+Set include_readme=yes for: overview, purpose, architecture, getting started questions
+Set use_hybrid=yes for: queries with specific function/variable names
+
+OUTPUT FORMAT:
+search_queries: one query per line, exactly 3 queries
+include_readme: yes or no
+use_hybrid: yes or no`)
+
+	predict := modules.NewPredict(signature).
+		WithName("SearchQueryGenerator").
+		WithXMLOutput(interceptors.XMLConfig{
+			StrictParsing:  false,
+			FallbackToText: true,
+			ValidateXML:    false,
+			MaxDepth:       10,
+			ParseTimeout:   5 * time.Second,
+		})
+
+	logger := logging.GetLogger()
+	result, err := predict.Process(ctx, map[string]interface{}{
+		"user_question": question,
+		"repo_name":     repoName,
+	})
+	if err != nil {
+		logger.Warn(ctx, "Failed to generate search queries, using original question: %v", err)
+		return &SearchQueries{
+			Queries:       []string{question},
+			IncludeReadme: isOverviewQuestion(question),
+		}, nil
+	}
+
+	return parseSearchQueries(ctx, result, question)
+}
+
+// isOverviewQuestion checks if question is about repo overview/purpose.
+func isOverviewQuestion(question string) bool {
+	q := strings.ToLower(question)
+	terms := []string{
+		"what does", "what is", "purpose", "overview", "about",
+		"explain", "describe", "introduction", "architecture",
+		"how does this repo", "how does this project",
+	}
+	for _, term := range terms {
+		if strings.Contains(q, term) {
+			return true
+		}
+	}
+	return false
+}
+
+// parseSearchQueries extracts search queries from LLM response.
+func parseSearchQueries(ctx context.Context, result interface{}, originalQuestion string) (*SearchQueries, error) {
+	logger := logging.GetLogger()
+	queries := &SearchQueries{
+		Queries:       []string{originalQuestion},
+		IncludeReadme: isOverviewQuestion(originalQuestion),
+	}
+
+	resultMap, ok := result.(map[string]interface{})
+	if !ok {
+		return queries, nil
+	}
+
+	// Extract search queries
+	if searchQueriesStr, ok := resultMap["search_queries"].(string); ok && searchQueriesStr != "" {
+		lines := strings.Split(searchQueriesStr, "\n")
+		var extracted []string
+		for _, line := range lines {
+			line = strings.TrimSpace(line)
+			// Remove numbering like "1.", "2.", etc.
+			if len(line) > 2 && line[1] == '.' {
+				line = strings.TrimSpace(line[2:])
+			}
+			if line != "" {
+				extracted = append(extracted, line)
+			}
+		}
+		if len(extracted) > 0 {
+			queries.Queries = extracted
+			logger.Info(ctx, "Generated %d search queries from question: %s", len(extracted), originalQuestion)
+			for i, q := range extracted {
+				logger.Debug(ctx, "  Query %d: %s", i+1, q)
+			}
+		}
+	}
+
+	// Extract include_readme
+	if includeReadme, ok := resultMap["include_readme"].(string); ok {
+		queries.IncludeReadme = strings.ToLower(strings.TrimSpace(includeReadme)) == "yes"
+	}
+
+	// Extract use_hybrid
+	if useHybrid, ok := resultMap["use_hybrid"].(string); ok {
+		queries.UseHybridSearch = strings.ToLower(strings.TrimSpace(useHybrid)) == "yes"
+	}
+
+	return queries, nil
+}
+
+// AnswerWithContext answers a question using pre-fetched content (e.g., from sgrep).
+// This allows the caller to provide search results from any source (sgrep, RAG, etc.).
+func (p *RepoQAProcessor) AnswerWithContext(ctx context.Context, question string, contents []*Content) (*QAResponse, error) {
+	signature := core.NewSignature(
+		[]core.InputField{
+			{Field: core.Field{Name: "question"}},
+			{Field: core.Field{Name: "relevant_context"}},
+		},
+		[]core.OutputField{
+			{Field: core.Field{Name: "answer"}},
+			{Field: core.Field{Name: "confidence"}},
+			{Field: core.Field{Name: "source_files"}},
+		},
+	).WithInstruction(`Answer questions about the repository using the provided context.
+    Follow repository conventions and patterns when explaining code.
+    Reference specific files and line numbers when available.`)
+
+	metadata := &QAMetadata{Question: question}
+	return p.processResults(ctx, signature, metadata, contents)
+}
+
 // Process implements the TaskProcessor interface.
 func (p *RepoQAProcessor) Process(ctx context.Context, task agents.Task, context map[string]interface{}) (interface{}, error) {
 	signature := core.NewSignature(

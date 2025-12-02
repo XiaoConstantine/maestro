@@ -9,7 +9,7 @@ require (
 	charm.land/bubbletea/v2 v2.0.0-rc.2
 	charm.land/lipgloss/v2 v2.0.0-beta.3.0.20251106193318-19329a3e8410
 	github.com/AlecAivazis/survey/v2 v2.3.7
-	github.com/XiaoConstantine/dspy-go v0.65.0
+	github.com/XiaoConstantine/dspy-go v0.65.1
 	github.com/XiaoConstantine/mcp-go v0.3.1
 	github.com/XiaoConstantine/sgrep v0.5.2
 	github.com/asg017/sqlite-vec-go-bindings v0.1.6
@@ -21,7 +21,6 @@ require (
 	github.com/logrusorgru/aurora v2.0.3+incompatible
 	github.com/mattn/go-isatty v0.0.20
 	github.com/mattn/go-sqlite3 v1.14.32
-	golang.org/x/exp v0.0.0-20251009144603-d2f985daa21b
 	golang.org/x/oauth2 v0.30.0
 )
 

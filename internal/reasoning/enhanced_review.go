@@ -77,15 +77,25 @@ func getParallelWorkers() int {
 
 // getOrCreateModules retrieves cached modules or creates new ones if not found.
 func getOrCreateModules(signature core.Signature) *ModuleCacheEntry {
+	logger := logging.GetLogger()
 	signatureHash := hashSignature(signature)
 	maxWorkers := getParallelWorkers()
+	llm := core.GetDefaultLLM()
+
+	logger.Info(context.Background(), "🔧 getOrCreateModules called, llm=%v, maxWorkers=%d", llm != nil, maxWorkers)
 
 	// Try to get from cache first
 	if cached, ok := moduleCache.Load(signatureHash); ok {
 		if entry, ok := cached.(*ModuleCacheEntry); ok {
-			if time.Since(entry.CreatedAt) < 24*time.Hour {
+			// Check if cache is valid: not expired AND has LLM configured
+			// We check LLM field directly since there's no GetLLM method
+			cachedLLM := entry.BasePredict.LLM
+			logger.Info(context.Background(), "🔧 Found cached entry, cachedLLM=%v, age=%v", cachedLLM != nil, time.Since(entry.CreatedAt))
+			if time.Since(entry.CreatedAt) < 24*time.Hour && cachedLLM != nil {
 				return entry
 			}
+			// Invalidate cache if expired or LLM not set
+			logger.Info(context.Background(), "🔧 Invalidating cache: expired=%v, llmNil=%v", time.Since(entry.CreatedAt) >= 24*time.Hour, cachedLLM == nil)
 			moduleCache.Delete(signatureHash)
 		}
 	}
@@ -94,23 +104,31 @@ func getOrCreateModules(signature core.Signature) *ModuleCacheEntry {
 	moduleCacheMux.Lock()
 	defer moduleCacheMux.Unlock()
 
-	// Double-check pattern
+	// Double-check pattern - also verify LLM is set
 	if cached, ok := moduleCache.Load(signatureHash); ok {
 		if entry, ok := cached.(*ModuleCacheEntry); ok {
-			return entry
+			if entry.BasePredict.LLM != nil {
+				return entry
+			}
+			moduleCache.Delete(signatureHash)
 		}
 	}
 
-	// Create new module instances
+	// Create new module instances with LLM
+	logger.Info(context.Background(), "🔧 Creating NEW modules with llm=%v", llm != nil)
 	basePredict := modules.NewPredict(signature).WithName("CodeReviewPredict")
+	basePredict.SetLLM(llm)
+	logger.Info(context.Background(), "🔧 After SetLLM, basePredict.LLM=%v", basePredict.LLM != nil)
 
 	parallelProcessor := modules.NewParallel(
 		basePredict,
 		modules.WithMaxWorkers(maxWorkers),
 		modules.WithReturnFailures(true),
 	).WithName("ParallelCodeReview")
+	parallelProcessor.SetLLM(llm)
 
 	consensusModule := modules.NewMultiChainComparison(signature, 3, 0.7).WithName("ConsensusReview")
+	consensusModule.SetLLM(llm)
 
 	entry := &ModuleCacheEntry{
 		BasePredict:       basePredict,
@@ -120,6 +138,7 @@ func getOrCreateModules(signature core.Signature) *ModuleCacheEntry {
 	}
 
 	moduleCache.Store(signatureHash, entry)
+	logger.Info(context.Background(), "🔧 Stored new entry in cache")
 	return entry
 }
 
@@ -134,6 +153,7 @@ func NewEnhancedCodeReviewProcessor(metrics types.MetricsCollector, logger *logg
 		RewardFn:  codeReviewQualityReward,
 	}
 	refinementModule := modules.NewRefine(cachedModules.BasePredict, refinementConfig).WithName("CodeReviewRefiner")
+	refinementModule.SetLLM(core.GetDefaultLLM())
 
 	return &EnhancedCodeReviewProcessor{
 		parallelProcessor: cachedModules.ParallelProcessor,
@@ -145,26 +165,19 @@ func NewEnhancedCodeReviewProcessor(metrics types.MetricsCollector, logger *logg
 }
 
 // createCodeReviewSignature creates the signature for code review.
+// Includes core fields only (no package_name/imports for A/B testing).
 func createCodeReviewSignature() core.Signature {
 	return core.NewSignature(
 		[]core.InputField{
+			// Core required fields
 			{Field: core.Field{Name: "file_content", Description: "The source code to review"}},
 			{Field: core.Field{Name: "changes", Description: "The specific changes made to the code"}},
 			{Field: core.Field{Name: "guidelines", Description: "Coding guidelines and standards"}},
 			{Field: core.Field{Name: "repo_context", Description: "Repository context and patterns"}},
 			{Field: core.Field{Name: "file_path", Description: "Path of the file being reviewed"}},
 			{Field: core.Field{Name: "file_type_context", Description: "File type specific review context and focus areas"}},
-			{Field: core.Field{Name: "package_name", Description: "Go package declaration for this file"}},
-			{Field: core.Field{Name: "imports", Description: "Import statements showing external dependencies"}},
-			{Field: core.Field{Name: "type_definitions", Description: "Struct, interface and custom type definitions from the file"}},
-			{Field: core.Field{Name: "interfaces", Description: "Interface definitions showing contracts and expected behavior"}},
-			{Field: core.Field{Name: "function_signatures", Description: "Function signatures showing available functions and their parameters"}},
-			{Field: core.Field{Name: "method_signatures", Description: "Method signatures showing receiver methods"}},
-			{Field: core.Field{Name: "leading_context", Description: "Code lines before the chunk for context (15+ lines)"}},
-			{Field: core.Field{Name: "trailing_context", Description: "Code lines after the chunk for context (15+ lines)"}},
-			{Field: core.Field{Name: "called_functions", Description: "Functions called within this code chunk"}},
-			{Field: core.Field{Name: "used_types", Description: "Types and structs referenced in this chunk"}},
-			{Field: core.Field{Name: "semantic_purpose", Description: "High-level description of what this code chunk does"}},
+			{Field: core.Field{Name: "leading_context", Description: "Code lines before the chunk for context"}},
+			{Field: core.Field{Name: "trailing_context", Description: "Code lines after the chunk for context"}},
 		},
 		[]core.OutputField{
 			{Field: core.NewField("rationale")},
@@ -176,21 +189,20 @@ func createCodeReviewSignature() core.Signature {
 
 // codeReviewInstruction contains the detailed instructions for the code review LLM.
 const codeReviewInstruction = `
-You are an expert code reviewer with comprehensive context about the codebase. Your goal is to provide HIGH-VALUE, ACTIONABLE feedback that developers will find genuinely useful. AVOID generic comments that waste time.
+You are an expert code reviewer. Your goal is to provide HIGH-VALUE, ACTIONABLE feedback that developers will find genuinely useful. AVOID generic comments that waste time.
 
-ENHANCED CONTEXT AVAILABLE:
-- package_name: The Go package this code belongs to
-- imports: All import dependencies showing what external packages are used
-- type_definitions: Custom types, structs, and interfaces defined in this file
-- function_signatures: Available functions with their parameters and return types
-- leading_context: 15+ lines of code before this chunk for full context
-- trailing_context: 15+ lines of code after this chunk for continuity
-- called_functions: Functions called within this specific chunk
-- used_types: Types and data structures referenced in this chunk
-- semantic_purpose: High-level description of what this code accomplishes
+CONTEXT AVAILABLE:
+- file_path: Path of the file being reviewed
+- file_content: The source code chunk to review
+- changes: The specific diff/changes made to the code
+- guidelines: Coding guidelines and standards to apply
+- leading_context: Code lines before this chunk for context
+- trailing_context: Code lines after this chunk for context
 
 OUTPUT REQUIREMENTS:
-- rationale: Provide evidence-based analysis. End with JSON array of issues or [] if none found
+- rationale: Provide evidence-based analysis. End with a JSON array of issues in this format:
+  [{"type": "bug|security|performance|style", "severity": "critical|high|medium|low", "line": <line_number>, "description": "<issue description>", "suggestion": "<how to fix>"}]
+  Return [] if no issues found.
 - overall_assessment: Summarize actual findings (not theoretical concerns)
 - confidence_score: 0.9+ for concrete issues, <0.7 for speculative concerns
 
@@ -365,12 +377,18 @@ func parseRawIssue(raw map[string]interface{}, defaultFilePath string) *types.Re
 		issue.FilePath = filePath
 	}
 
+	// Handle both "line_number" and "line" keys
 	if lineNumber, ok := raw["line_number"].(float64); ok {
 		issue.LineRange = types.LineRange{Start: int(lineNumber), End: int(lineNumber)}
+	} else if line, ok := raw["line"].(float64); ok {
+		issue.LineRange = types.LineRange{Start: int(line), End: int(line)}
 	}
 
+	// Handle both "category" and "type" keys
 	if category, ok := raw["category"].(string); ok {
 		issue.Category = category
+	} else if issueType, ok := raw["type"].(string); ok {
+		issue.Category = issueType
 	}
 
 	if severity, ok := raw["severity"].(string); ok {
@@ -437,4 +455,175 @@ func calculateConfidence(issues []types.ReviewIssue) float64 {
 	}
 
 	return total / float64(len(issues))
+}
+
+// ProcessMultipleChunks processes multiple chunks in parallel using modules.Parallel.
+// This is the high-performance batch processing method that should be used for code reviews.
+func (p *EnhancedCodeReviewProcessor) ProcessMultipleChunks(ctx context.Context, chunks []map[string]interface{}, taskContext map[string]interface{}) ([]*types.EnhancedReviewResult, error) {
+	if len(chunks) == 0 {
+		return []*types.EnhancedReviewResult{}, nil
+	}
+
+	startTime := util.GetCurrentTimeMs()
+	p.logger.Info(ctx, "🚀 Processing %d chunks with parallel module (workers: %d)", len(chunks), getParallelWorkers())
+
+	// Prepare batch inputs for parallel processing
+	batchInputs := make([]map[string]interface{}, len(chunks))
+	for i, chunk := range chunks {
+		inputs := make(map[string]interface{})
+
+		// Copy chunk data
+		for k, v := range chunk {
+			inputs[k] = v
+		}
+
+		// Add task context (guidelines, repo patterns, etc.)
+		for k, v := range taskContext {
+			if _, exists := inputs[k]; !exists {
+				inputs[k] = v
+			}
+		}
+
+		// Add file type context
+		if filePath, ok := chunk["file_path"].(string); ok {
+			inputs["file_type_context"] = getFileTypeContext(filePath)
+		}
+
+		batchInputs[i] = inputs
+	}
+
+	// Process all chunks in parallel using modules.Parallel
+	p.logger.Info(ctx, "🔍 Calling parallelProcessor.Process with %d batch inputs", len(batchInputs))
+	result, err := p.parallelProcessor.Process(ctx, map[string]interface{}{
+		"batch_inputs": batchInputs,
+	})
+	if err != nil {
+		p.logger.Error(ctx, "❌ Parallel processing error: %v", err)
+		return nil, fmt.Errorf("parallel processing failed: %w", err)
+	}
+
+	p.logger.Info(ctx, "🔍 Parallel processing returned, result keys: %v", getMapKeys(result))
+
+	// Check for failures
+	if failures, ok := result["failures"].([]map[string]interface{}); ok && len(failures) > 0 {
+		p.logger.Warn(ctx, "⚠️ Got %d failures from parallel processing", len(failures))
+		for i, f := range failures {
+			if i < 3 { // Log first 3 failures
+				p.logger.Warn(ctx, "  Failure %d: %v", i, f)
+			}
+		}
+	}
+
+	// Extract results
+	rawResults, ok := result["results"].([]map[string]interface{})
+	if !ok {
+		// Try alternate format
+		if resultsList, ok := result["results"].([]interface{}); ok {
+			rawResults = make([]map[string]interface{}, len(resultsList))
+			for i, r := range resultsList {
+				if m, ok := r.(map[string]interface{}); ok {
+					rawResults[i] = m
+				}
+			}
+		}
+	}
+
+	// Parse results into EnhancedReviewResult
+	results := make([]*types.EnhancedReviewResult, len(chunks))
+	for i, chunk := range chunks {
+		filePath, _ := chunk["file_path"].(string)
+
+		var rawResult map[string]interface{}
+		if i < len(rawResults) && rawResults[i] != nil {
+			rawResult = rawResults[i]
+		}
+
+		if rawResult == nil {
+			// Empty result for this chunk
+			results[i] = &types.EnhancedReviewResult{
+				Issues:         []types.ReviewIssue{},
+				OverallQuality: "good",
+				Confidence:     0.9,
+				FilePath:       filePath,
+			}
+			continue
+		}
+
+		// Parse issues from result
+		issues := p.parseIssuesFromResult(rawResult, filePath)
+
+		results[i] = &types.EnhancedReviewResult{
+			Issues:         issues,
+			OverallQuality: determineOverallQuality(issues),
+			Confidence:     calculateConfidence(issues),
+			FilePath:       filePath,
+		}
+	}
+
+	processingTime := util.GetCurrentTimeMs() - startTime
+	totalIssues := 0
+	for _, r := range results {
+		totalIssues += len(r.Issues)
+	}
+
+	p.logger.Info(ctx, "✅ Parallel processing completed: %d chunks, %d issues found in %.2fms",
+		len(chunks), totalIssues, processingTime)
+
+	return results, nil
+}
+
+// parseIssuesFromResult parses issues from a single result map.
+func (p *EnhancedCodeReviewProcessor) parseIssuesFromResult(result map[string]interface{}, filePath string) []types.ReviewIssue {
+	var issues []types.ReviewIssue
+
+	rationale, ok := result["rationale"].(string)
+	if !ok {
+		return issues
+	}
+
+	// Try to extract JSON array from rationale
+	jsonStart := strings.Index(rationale, "[")
+	jsonEnd := strings.LastIndex(rationale, "]")
+
+	if jsonStart >= 0 && jsonEnd > jsonStart {
+		jsonStr := rationale[jsonStart : jsonEnd+1]
+
+		var rawIssues []map[string]interface{}
+		if err := json.Unmarshal([]byte(jsonStr), &rawIssues); err == nil {
+			for _, raw := range rawIssues {
+				issue := parseRawIssue(raw, filePath)
+				if issue != nil {
+					issues = append(issues, *issue)
+				}
+			}
+		}
+	}
+
+	return issues
+}
+
+// getMapKeys returns the keys of a map for logging.
+func getMapKeys(m map[string]interface{}) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	return keys
+}
+
+// getFileTypeContext returns context hints based on file type.
+func getFileTypeContext(filePath string) string {
+	if strings.Contains(filePath, "_test.go") || strings.Contains(filePath, "/test/") {
+		return "TEST_FILE: Focus on test quality, coverage, edge cases, and maintainability."
+	}
+	if strings.Contains(filePath, "main.go") || strings.Contains(filePath, "/cmd/") {
+		return "MAIN_FILE: Focus on error handling, configuration validation, and startup logic."
+	}
+	if strings.Contains(filePath, "config") || strings.Contains(filePath, "settings") {
+		return "CONFIG_FILE: Focus on security (no hardcoded secrets), validation, and proper defaults."
+	}
+	if strings.Contains(filePath, "/api/") || strings.Contains(filePath, "/handler/") {
+		return "API_FILE: Focus on input validation, authentication, authorization, and error responses."
+	}
+	return "PRODUCTION_FILE: Focus on correctness, security, error handling, and maintainability."
 }
