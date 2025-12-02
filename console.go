@@ -19,31 +19,7 @@ import (
 	"github.com/mattn/go-isatty"
 )
 
-type ConsoleInterface interface {
-	StartSpinner(message string)
-	StopSpinner()
-	WithSpinner(ctx context.Context, message string, fn func() error) error
-	ShowComments(comments []PRReviewComment, metric MetricsCollector)
-	ShowCommentsInteractive(comments []PRReviewComment, onPost func([]PRReviewComment) error) error
-	ShowSummary(comments []PRReviewComment, metric MetricsCollector)
-	StartReview(pr *github.PullRequest)
-	ReviewingFile(file string, current, total int)
-	ConfirmReviewPost(commentCount int) (bool, error)
-	ReviewComplete()
-	UpdateSpinnerText(text string)
-	ShowReviewMetrics(metrics MetricsCollector, comments []PRReviewComment)
-	CollectAllFeedback(comments []PRReviewComment, metric MetricsCollector) error
-	Confirm(opts PromptOptions) (bool, error)
-	FileError(filepath string, err error)
-	Printf(format string, a ...interface{})
-	Println(a ...interface{})
-	PrintHeader(text string)
-	NoIssuesFound(file string, chunkNumber, totalChunks int)
-	SeverityIcon(severity string) string
-	Color() bool
-	Spinner() *spinner.Spinner
-	IsInteractive() bool
-}
+// Type aliases are defined in types_aliases.go - this file uses them
 
 // Console handles user-facing output separate from logging.
 type Console struct {
@@ -54,33 +30,6 @@ type Console struct {
 	isInteractive bool // Cached terminal interactivity state
 
 	mu sync.Mutex
-}
-
-type SpinnerConfig struct {
-	Color   string
-	Speed   time.Duration
-	CharSet []string
-	Prefix  string
-	Suffix  string
-}
-
-// PromptOptions configures how the confirmation prompt behaves.
-type PromptOptions struct {
-	Message  string        // The question to ask
-	Default  bool          // Default answer if user just hits enter
-	HelpText string        // Optional help text shown below prompt
-	Timeout  time.Duration // Optional timeout for response
-	Color    bool          // Whether to use colors in prompt
-}
-
-func DefaultPromptOptions() PromptOptions {
-	return PromptOptions{
-		Message:  "Continue?",
-		Default:  false,
-		HelpText: "",
-		Timeout:  30 * time.Second,
-		Color:    true,
-	}
 }
 
 func DefaultSpinnerConfig() SpinnerConfig {

@@ -7,7 +7,6 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
-	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -17,9 +16,15 @@ import (
 	"github.com/XiaoConstantine/dspy-go/pkg/core"
 	"github.com/XiaoConstantine/dspy-go/pkg/llms"
 	"github.com/XiaoConstantine/dspy-go/pkg/logging"
+	"github.com/XiaoConstantine/maestro/internal/agent"
+	"github.com/XiaoConstantine/maestro/internal/github"
+	"github.com/XiaoConstantine/maestro/internal/review"
+	"github.com/XiaoConstantine/maestro/internal/search"
+	"github.com/XiaoConstantine/maestro/internal/types"
+	"github.com/XiaoConstantine/maestro/internal/util"
 	"github.com/XiaoConstantine/maestro/terminal"
 	"github.com/briandowns/spinner"
-	"github.com/google/go-github/v68/github"
+	gh "github.com/google/go-github/v68/github"
 	"github.com/logrusorgru/aurora"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
@@ -160,8 +165,6 @@ func main() {
 	// Set up signal handler for graceful shutdown
 	setupSignalHandler()
 
-	// Initialize enhanced DSPy-Go features
-	InitializeEnhancedFeatures()
 	// Create root command
 	rootCmd := &cobra.Command{
 		Use:   "Maestro",
@@ -180,15 +183,15 @@ Available slash commands in interactive mode:
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if cmd.Flags().Changed("model") {
 				modelStr, _ := cmd.Flags().GetString("model")
-				provider, name, config := parseModelString(modelStr)
+				provider, name, modelCfg := util.ParseModelString(modelStr)
 				if provider != "" {
 					cfg.modelProvider = provider
 				}
 				if name != "" {
 					cfg.modelName = name
 				}
-				if config != "" {
-					cfg.modelConfig = config
+				if modelCfg != "" {
+					cfg.modelConfig = modelCfg
 				}
 			}
 
@@ -221,7 +224,10 @@ Available slash commands in interactive mode:
 
 	rootCmd.PersistentFlags().IntVar(&cfg.indexWorkers, "index-workers", runtime.NumCPU(), "Number of concurrent workers for repository indexing")
 
-	rootCmd.PersistentFlags().IntVar(&cfg.reviewWorkers, "review-workers", runtime.NumCPU(), "Number of concurrent workers for parallel review")
+	// Default to 120 workers for I/O-bound LLM API calls.
+	// LLM calls are network-bound, not CPU-bound, so higher concurrency
+	// improves throughput by overlapping HTTP requests.
+	rootCmd.PersistentFlags().IntVar(&cfg.reviewWorkers, "review-workers", 120, "Number of concurrent workers for parallel review")
 
 	// Mark required flags
 	rootCmd.PersistentPreRun = func(cmd *cobra.Command, args []string) {
@@ -264,13 +270,20 @@ func runCLIWithoutBanner(cfg *config) error {
 	logging.SetLogger(logger)
 
 	console := NewConsole(os.Stdout, logger, nil)
-	err = validateModelConfig(cfg)
+	modelCfg := &util.ModelConfig{
+		ModelProvider: cfg.modelProvider,
+		ModelName:     cfg.modelName,
+		ModelConfig:   cfg.modelConfig,
+		APIKey:        cfg.apiKey,
+	}
+	err = util.ValidateModelConfig(modelCfg)
 	if err != nil {
 		logger.Error(ctx, "Model config is incorrect: %v", err)
 		os.Exit(1)
 	}
+	cfg.apiKey = modelCfg.APIKey // Update with resolved API key
 	err = console.WithSpinner(ctx, "Verifying permissions...", func() error {
-		return VerifyTokenPermissions(ctx, cfg.githubToken, cfg.owner, cfg.repo)
+		return github.VerifyTokenPermissions(ctx, cfg.githubToken, cfg.owner, cfg.repo)
 	})
 	if err != nil {
 		logger.Error(ctx, "Token permission verification failed: %v", err)
@@ -282,7 +295,7 @@ func runCLIWithoutBanner(cfg *config) error {
 	}
 	llms.EnsureFactory()
 
-	modelID := constructModelID(cfg)
+	modelID := util.ConstructModelID(modelCfg)
 	err = core.ConfigureDefaultLLM(cfg.apiKey, modelID)
 
 	if err != nil {
@@ -293,11 +306,11 @@ func runCLIWithoutBanner(cfg *config) error {
 	if err := core.ConfigureTeacherLLM(cfg.apiKey, core.ModelGoogleGeminiPro); err != nil {
 		return fmt.Errorf("failed to configure teacher LLM: %w", err)
 	}
-	githubTools := NewGitHubTools(cfg.githubToken, cfg.owner, cfg.repo)
+	githubTools := github.NewTools(cfg.githubToken, cfg.owner, cfg.repo)
 
 	// Initialize MCP bash helper for GitHub operations
-	var mcpHelper *MCPBashHelper
-	if helper, err := NewMCPBashHelper(); err != nil {
+	var mcpHelper *github.MCPBashHelper
+	if helper, err := github.NewMCPBashHelper(); err != nil {
 		logger.Warn(ctx, "Failed to initialize MCP bash helper: %v", err)
 		logger.Info(ctx, "Falling back to GitHub API for PR operations")
 		mcpHelper = nil
@@ -312,12 +325,12 @@ func runCLIWithoutBanner(cfg *config) error {
 		logger.Debug(ctx, "MCP bash helper initialized successfully")
 	}
 
-	dbPath, err := CreateStoragePath(ctx, cfg.owner, cfg.repo)
+	dbPath, err := util.CreateStoragePath(ctx, cfg.owner, cfg.repo)
 	// Check if we already have an index for this commit
 	if err != nil {
 		panic(err)
 	}
-	agent, err := NewPRReviewAgent(ctx, githubTools, dbPath, &AgentConfig{
+	agent, err := review.NewPRReviewAgent(ctx, githubTools, dbPath, &types.AgentConfig{
 		IndexWorkers:  cfg.indexWorkers,
 		ReviewWorkers: cfg.reviewWorkers,
 	})
@@ -335,10 +348,10 @@ func runCLIWithoutBanner(cfg *config) error {
 }
 
 // runFullPRReview executes the complete PR review process.
-func runFullPRReview(ctx context.Context, prNumber int, cfg *config, console ConsoleInterface, agent ReviewAgent, mcpHelper *MCPBashHelper) error {
+func runFullPRReview(ctx context.Context, prNumber int, cfg *config, console types.ConsoleInterface, agent types.ReviewAgent, mcpHelper *github.MCPBashHelper) error {
 	logger := logging.GetLogger()
 
-	githubTools := NewGitHubTools(cfg.githubToken, cfg.owner, cfg.repo)
+	githubTools := github.NewTools(cfg.githubToken, cfg.owner, cfg.repo)
 
 	// Fetching PR changes
 	if console.Color() {
@@ -357,7 +370,7 @@ func runFullPRReview(ctx context.Context, prNumber int, cfg *config, console Con
 	}
 	console.StartReview(pr)
 
-	var changes *PRChanges
+	var changes *types.PRChanges
 
 	// Use MCP if available, otherwise fall back to GitHub API
 	if mcpHelper != nil {
@@ -368,7 +381,7 @@ func runFullPRReview(ctx context.Context, prNumber int, cfg *config, console Con
 			logger.Warn(ctx, "Clone not available, falling back to GitHub API")
 			changes, err = githubTools.GetPullRequestChanges(ctx, prNumber)
 		} else {
-			changes, err = GetPullRequestChangesWithMCP(ctx, cfg.owner, cfg.repo, prNumber, mcpHelper, clonePath)
+			changes, err = github.GetPullRequestChangesWithMCP(ctx, cfg.owner, cfg.repo, prNumber, mcpHelper, clonePath)
 		}
 	} else {
 		logger.Debug(ctx, "Using GitHub API to fetch PR changes")
@@ -379,7 +392,7 @@ func runFullPRReview(ctx context.Context, prNumber int, cfg *config, console Con
 		logger.Error(ctx, "Failed to get PR changes: %v", err)
 		return fmt.Errorf("failed to get PR changes: %w", err)
 	}
-	tasks := make([]PRReviewTask, 0, len(changes.Files))
+	tasks := make([]types.PRReviewTask, 0, len(changes.Files))
 	for _, file := range changes.Files {
 
 		if console.Color() {
@@ -394,7 +407,7 @@ func runFullPRReview(ctx context.Context, prNumber int, cfg *config, console Con
 		}
 		// File being processed
 
-		tasks = append(tasks, PRReviewTask{
+		tasks = append(tasks, types.PRReviewTask{
 			FilePath:    file.FilePath,
 			FileContent: file.FileContent,
 			Changes:     file.Patch,
@@ -406,13 +419,13 @@ func runFullPRReview(ctx context.Context, prNumber int, cfg *config, console Con
 			aurora.Green("⚡").Bold(),
 			aurora.White(fmt.Sprintf("Starting code review for %d %s",
 				len(tasks),
-				pluralize("file", len(tasks)))).Bold(),
+				util.Pluralize("file", len(tasks)))).Bold(),
 			aurora.Blue("...").String(),
 		)
 	} else {
 		console.Printf("⚡ Starting code review for %d %s...\n",
 			len(tasks),
-			pluralize("file", len(tasks)))
+			util.Pluralize("file", len(tasks)))
 	}
 	// Starting code review
 	// Note: Don't stop the agent here in interactive mode - it's managed at the session level
@@ -427,7 +440,7 @@ func runFullPRReview(ctx context.Context, prNumber int, cfg *config, console Con
 
 		if useInteractiveTUI && console.IsInteractive() {
 			// Use the new lazygit-style TUI for reviewing comments
-			onPost := func(selectedComments []PRReviewComment) error {
+			onPost := func(selectedComments []types.PRReviewComment) error {
 				logger.Info(ctx, "Posting %d review comments to GitHub", len(selectedComments))
 				return githubTools.CreateReviewComments(ctx, prNumber, selectedComments)
 			}
@@ -460,26 +473,16 @@ func runFullPRReview(ctx context.Context, prNumber int, cfg *config, console Con
 	return nil
 }
 
-// getVectorDimensions returns the configured vector dimensions.
-func getVectorDimensions() int {
-	if dimensions := os.Getenv("MAESTRO_VECTOR_DIMENSIONS"); dimensions != "" {
-		if dims, err := strconv.Atoi(dimensions); err == nil && dims > 0 && dims <= 2048 {
-			return dims
-		}
-	}
-	return 768 // Default for text-embedding-004
-}
-
 // TUIBackendAdapter adapts ReviewAgent to terminal.MaestroBackend.
 type TUIBackendAdapter struct {
-	agent       ReviewAgent
-	githubTools GitHubInterface
+	agent       types.ReviewAgent
+	githubTools types.GitHubInterface
 	owner       string
 	repo        string
 }
 
 // NewTUIBackendAdapter creates a new backend adapter.
-func NewTUIBackendAdapter(agent ReviewAgent, githubTools GitHubInterface, owner, repo string) *TUIBackendAdapter {
+func NewTUIBackendAdapter(agent types.ReviewAgent, githubTools types.GitHubInterface, owner, repo string) *TUIBackendAdapter {
 	return &TUIBackendAdapter{
 		agent:       agent,
 		githubTools: githubTools,
@@ -507,9 +510,9 @@ func (a *TUIBackendAdapter) ReviewPR(ctx context.Context, prNumber int, onProgre
 	}
 
 	// Create review tasks from the changes
-	tasks := make([]PRReviewTask, 0, len(changes.Files))
+	tasks := make([]types.PRReviewTask, 0, len(changes.Files))
 	for _, file := range changes.Files {
-		tasks = append(tasks, PRReviewTask{
+		tasks = append(tasks, types.PRReviewTask{
 			FilePath:    file.FilePath,
 			FileContent: file.FileContent,
 			Changes:     file.Patch,
@@ -542,8 +545,97 @@ func (a *TUIBackendAdapter) ReviewPR(ctx context.Context, prNumber int, onProgre
 }
 
 // AskQuestion implements terminal.MaestroBackend.
+// It uses the UnifiedReActAgent which can iteratively search and read files to answer questions.
 func (a *TUIBackendAdapter) AskQuestion(ctx context.Context, question string) (string, error) {
-	return "Question answering coming soon. Use /review <PR#> to review a pull request.", nil
+	if a.agent == nil {
+		return "", fmt.Errorf("agent not initialized")
+	}
+
+	logger := logging.GetLogger()
+	logger.Info(ctx, "Processing question with ReAct agent: %s", question)
+
+	// Get the cloned repo path
+	repoPath := a.agent.ClonedRepoPath()
+	if repoPath == "" {
+		return "Repository is still being cloned. Please wait a moment and try again.", nil
+	}
+
+	// Create a SimpleSearchTool for the cloned repo
+	searchTool := search.NewSimpleSearchTool(logger, repoPath)
+
+	// Create a UnifiedReActAgent that can iteratively explore the codebase
+	reactAgent, err := agent.NewUnifiedReActAgent("qa-agent", searchTool, logger)
+	if err != nil {
+		logger.Error(ctx, "Failed to create ReAct agent: %v", err)
+		return "", fmt.Errorf("failed to initialize question answering: %w", err)
+	}
+
+	// Create search request with the question
+	searchRequest := &search.SearchRequest{
+		Query:         question,
+		Context:       fmt.Sprintf("Repository: %s/%s. Answer the user's question by exploring the codebase. For overview questions, start by reading README.md.", a.owner, a.repo),
+		MaxResults:    10,
+		RequiredDepth: 3,
+	}
+
+	// Execute the search using the ReAct agent
+	response, err := reactAgent.ExecuteSearch(ctx, searchRequest)
+	if err != nil {
+		logger.Error(ctx, "ReAct agent search failed: %v", err)
+		return "", fmt.Errorf("failed to answer question: %w", err)
+	}
+
+	// Format the response
+	var result strings.Builder
+
+	// Extract the answer from the ReAct agent results
+	// The agent's answer is stored in a result with FilePath like "phase-X-output"
+	var answer string
+	var sourceFiles []string
+	seenFiles := make(map[string]bool)
+
+	for _, r := range response.Results {
+		if r.SearchResult == nil {
+			continue
+		}
+		// Phase outputs contain the agent's synthesized answer
+		if strings.HasPrefix(r.FilePath, "phase-") || strings.HasPrefix(r.FilePath, "react-") {
+			if r.Line != "" && len(r.Line) > len(answer) {
+				answer = r.Line
+			}
+		} else if r.FilePath != "" {
+			// Track actual source files explored
+			if !seenFiles[r.FilePath] {
+				seenFiles[r.FilePath] = true
+				sourceFiles = append(sourceFiles, r.FilePath)
+			}
+		}
+	}
+
+	// Use the agent's answer, fall back to synthesis
+	if answer != "" {
+		result.WriteString(answer)
+	} else if response.Synthesis != "" {
+		result.WriteString(response.Synthesis)
+	} else {
+		return fmt.Sprintf("I couldn't find relevant information about \"%s\" in this repository.", question), nil
+	}
+
+	// Add source files if available
+	if len(sourceFiles) > 0 {
+		result.WriteString("\n\n📁 Sources explored:\n")
+		for _, f := range sourceFiles {
+			result.WriteString(fmt.Sprintf("  • %s\n", f))
+		}
+	}
+
+	// Add confidence indicator
+	if response.Confidence < 0.5 {
+		result.WriteString("\n⚠️  Low confidence answer - results may be incomplete")
+	}
+
+	logger.Info(ctx, "ReAct agent completed in %v with confidence %.2f", response.Duration, response.Confidence)
+	return result.String(), nil
 }
 
 // GetRepoInfo implements terminal.MaestroBackend.
@@ -574,12 +666,12 @@ func (c *tuiProgressConsole) StopSpinner() {}
 func (c *tuiProgressConsole) WithSpinner(ctx context.Context, message string, fn func() error) error {
 	return fn()
 }
-func (c *tuiProgressConsole) ShowComments(comments []PRReviewComment, metric MetricsCollector)                    {}
-func (c *tuiProgressConsole) ShowCommentsInteractive(comments []PRReviewComment, onPost func([]PRReviewComment) error) error {
+func (c *tuiProgressConsole) ShowComments(comments []types.PRReviewComment, metric types.MetricsCollector) {}
+func (c *tuiProgressConsole) ShowCommentsInteractive(comments []types.PRReviewComment, onPost func([]types.PRReviewComment) error) error {
 	return nil
 }
-func (c *tuiProgressConsole) ShowSummary(comments []PRReviewComment, metric MetricsCollector) {}
-func (c *tuiProgressConsole) StartReview(pr *github.PullRequest) {
+func (c *tuiProgressConsole) ShowSummary(comments []types.PRReviewComment, metric types.MetricsCollector) {}
+func (c *tuiProgressConsole) StartReview(pr *gh.PullRequest) {
 	if c.onProgress != nil && pr != nil {
 		c.onProgress(fmt.Sprintf("Starting review: %s", pr.GetTitle()))
 	}
@@ -600,11 +692,12 @@ func (c *tuiProgressConsole) UpdateSpinnerText(text string) {
 		c.onProgress(text)
 	}
 }
-func (c *tuiProgressConsole) ShowReviewMetrics(metrics MetricsCollector, comments []PRReviewComment) {}
-func (c *tuiProgressConsole) CollectAllFeedback(comments []PRReviewComment, metric MetricsCollector) error {
+func (c *tuiProgressConsole) ShowReviewMetrics(metrics types.MetricsCollector, comments []types.PRReviewComment) {
+}
+func (c *tuiProgressConsole) CollectAllFeedback(comments []types.PRReviewComment, metric types.MetricsCollector) error {
 	return nil
 }
-func (c *tuiProgressConsole) Confirm(opts PromptOptions) (bool, error) { return false, nil }
+func (c *tuiProgressConsole) Confirm(opts types.PromptOptions) (bool, error) { return false, nil }
 func (c *tuiProgressConsole) FileError(filepath string, err error) {
 	if c.onProgress != nil {
 		c.onProgress(fmt.Sprintf("Error in %s: %v", filepath, err))
@@ -645,24 +738,31 @@ func runModernUI(cfg *config) error {
 	logging.SetLogger(logger)
 
 	// Validate model config and setup LLM
-	if err := validateModelConfig(cfg); err != nil {
+	modelCfg := &util.ModelConfig{
+		ModelProvider: cfg.modelProvider,
+		ModelName:     cfg.modelName,
+		ModelConfig:   cfg.modelConfig,
+		APIKey:        cfg.apiKey,
+	}
+	if err := util.ValidateModelConfig(modelCfg); err != nil {
 		return fmt.Errorf("model config is incorrect: %w", err)
 	}
+	cfg.apiKey = modelCfg.APIKey // Update with resolved API key
 	llms.EnsureFactory()
-	modelID := constructModelID(cfg)
+	modelID := util.ConstructModelID(modelCfg)
 	if err := core.ConfigureDefaultLLM(cfg.apiKey, modelID); err != nil {
 		return fmt.Errorf("failed to configure LLM: %w", err)
 	}
 
 	// Initialize GitHub tools and agent for real functionality
-	githubTools := NewGitHubTools(cfg.githubToken, cfg.owner, cfg.repo)
-	dbPath, err := CreateStoragePath(ctx, cfg.owner, cfg.repo)
+	githubTools := github.NewTools(cfg.githubToken, cfg.owner, cfg.repo)
+	dbPath, err := util.CreateStoragePath(ctx, cfg.owner, cfg.repo)
 	if err != nil {
 		return fmt.Errorf("failed to create storage path: %w", err)
 	}
 
 	// Create agent to enable real reviews
-	agent, err := NewPRReviewAgent(ctx, githubTools, dbPath, &AgentConfig{
+	agent, err := review.NewPRReviewAgent(ctx, githubTools, dbPath, &types.AgentConfig{
 		IndexWorkers:  cfg.indexWorkers,
 		ReviewWorkers: cfg.reviewWorkers,
 	})
