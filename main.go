@@ -7,7 +7,6 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
-	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -17,9 +16,13 @@ import (
 	"github.com/XiaoConstantine/dspy-go/pkg/core"
 	"github.com/XiaoConstantine/dspy-go/pkg/llms"
 	"github.com/XiaoConstantine/dspy-go/pkg/logging"
+	"github.com/XiaoConstantine/maestro/internal/github"
+	"github.com/XiaoConstantine/maestro/internal/review"
+	"github.com/XiaoConstantine/maestro/internal/types"
+	"github.com/XiaoConstantine/maestro/internal/util"
 	"github.com/XiaoConstantine/maestro/terminal"
 	"github.com/briandowns/spinner"
-	"github.com/google/go-github/v68/github"
+	gh "github.com/google/go-github/v68/github"
 	"github.com/logrusorgru/aurora"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
@@ -160,8 +163,6 @@ func main() {
 	// Set up signal handler for graceful shutdown
 	setupSignalHandler()
 
-	// Initialize enhanced DSPy-Go features
-	InitializeEnhancedFeatures()
 	// Create root command
 	rootCmd := &cobra.Command{
 		Use:   "Maestro",
@@ -180,15 +181,15 @@ Available slash commands in interactive mode:
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if cmd.Flags().Changed("model") {
 				modelStr, _ := cmd.Flags().GetString("model")
-				provider, name, config := parseModelString(modelStr)
+				provider, name, modelCfg := util.ParseModelString(modelStr)
 				if provider != "" {
 					cfg.modelProvider = provider
 				}
 				if name != "" {
 					cfg.modelName = name
 				}
-				if config != "" {
-					cfg.modelConfig = config
+				if modelCfg != "" {
+					cfg.modelConfig = modelCfg
 				}
 			}
 
@@ -264,13 +265,20 @@ func runCLIWithoutBanner(cfg *config) error {
 	logging.SetLogger(logger)
 
 	console := NewConsole(os.Stdout, logger, nil)
-	err = validateModelConfig(cfg)
+	modelCfg := &util.ModelConfig{
+		ModelProvider: cfg.modelProvider,
+		ModelName:     cfg.modelName,
+		ModelConfig:   cfg.modelConfig,
+		APIKey:        cfg.apiKey,
+	}
+	err = util.ValidateModelConfig(modelCfg)
 	if err != nil {
 		logger.Error(ctx, "Model config is incorrect: %v", err)
 		os.Exit(1)
 	}
+	cfg.apiKey = modelCfg.APIKey // Update with resolved API key
 	err = console.WithSpinner(ctx, "Verifying permissions...", func() error {
-		return VerifyTokenPermissions(ctx, cfg.githubToken, cfg.owner, cfg.repo)
+		return github.VerifyTokenPermissions(ctx, cfg.githubToken, cfg.owner, cfg.repo)
 	})
 	if err != nil {
 		logger.Error(ctx, "Token permission verification failed: %v", err)
@@ -282,7 +290,7 @@ func runCLIWithoutBanner(cfg *config) error {
 	}
 	llms.EnsureFactory()
 
-	modelID := constructModelID(cfg)
+	modelID := util.ConstructModelID(modelCfg)
 	err = core.ConfigureDefaultLLM(cfg.apiKey, modelID)
 
 	if err != nil {
@@ -293,11 +301,11 @@ func runCLIWithoutBanner(cfg *config) error {
 	if err := core.ConfigureTeacherLLM(cfg.apiKey, core.ModelGoogleGeminiPro); err != nil {
 		return fmt.Errorf("failed to configure teacher LLM: %w", err)
 	}
-	githubTools := NewGitHubTools(cfg.githubToken, cfg.owner, cfg.repo)
+	githubTools := github.NewTools(cfg.githubToken, cfg.owner, cfg.repo)
 
 	// Initialize MCP bash helper for GitHub operations
-	var mcpHelper *MCPBashHelper
-	if helper, err := NewMCPBashHelper(); err != nil {
+	var mcpHelper *github.MCPBashHelper
+	if helper, err := github.NewMCPBashHelper(); err != nil {
 		logger.Warn(ctx, "Failed to initialize MCP bash helper: %v", err)
 		logger.Info(ctx, "Falling back to GitHub API for PR operations")
 		mcpHelper = nil
@@ -312,12 +320,12 @@ func runCLIWithoutBanner(cfg *config) error {
 		logger.Debug(ctx, "MCP bash helper initialized successfully")
 	}
 
-	dbPath, err := CreateStoragePath(ctx, cfg.owner, cfg.repo)
+	dbPath, err := util.CreateStoragePath(ctx, cfg.owner, cfg.repo)
 	// Check if we already have an index for this commit
 	if err != nil {
 		panic(err)
 	}
-	agent, err := NewPRReviewAgent(ctx, githubTools, dbPath, &AgentConfig{
+	agent, err := review.NewPRReviewAgent(ctx, githubTools, dbPath, &types.AgentConfig{
 		IndexWorkers:  cfg.indexWorkers,
 		ReviewWorkers: cfg.reviewWorkers,
 	})
@@ -335,10 +343,10 @@ func runCLIWithoutBanner(cfg *config) error {
 }
 
 // runFullPRReview executes the complete PR review process.
-func runFullPRReview(ctx context.Context, prNumber int, cfg *config, console ConsoleInterface, agent ReviewAgent, mcpHelper *MCPBashHelper) error {
+func runFullPRReview(ctx context.Context, prNumber int, cfg *config, console types.ConsoleInterface, agent types.ReviewAgent, mcpHelper *github.MCPBashHelper) error {
 	logger := logging.GetLogger()
 
-	githubTools := NewGitHubTools(cfg.githubToken, cfg.owner, cfg.repo)
+	githubTools := github.NewTools(cfg.githubToken, cfg.owner, cfg.repo)
 
 	// Fetching PR changes
 	if console.Color() {
@@ -357,7 +365,7 @@ func runFullPRReview(ctx context.Context, prNumber int, cfg *config, console Con
 	}
 	console.StartReview(pr)
 
-	var changes *PRChanges
+	var changes *types.PRChanges
 
 	// Use MCP if available, otherwise fall back to GitHub API
 	if mcpHelper != nil {
@@ -368,7 +376,7 @@ func runFullPRReview(ctx context.Context, prNumber int, cfg *config, console Con
 			logger.Warn(ctx, "Clone not available, falling back to GitHub API")
 			changes, err = githubTools.GetPullRequestChanges(ctx, prNumber)
 		} else {
-			changes, err = GetPullRequestChangesWithMCP(ctx, cfg.owner, cfg.repo, prNumber, mcpHelper, clonePath)
+			changes, err = github.GetPullRequestChangesWithMCP(ctx, cfg.owner, cfg.repo, prNumber, mcpHelper, clonePath)
 		}
 	} else {
 		logger.Debug(ctx, "Using GitHub API to fetch PR changes")
@@ -379,7 +387,7 @@ func runFullPRReview(ctx context.Context, prNumber int, cfg *config, console Con
 		logger.Error(ctx, "Failed to get PR changes: %v", err)
 		return fmt.Errorf("failed to get PR changes: %w", err)
 	}
-	tasks := make([]PRReviewTask, 0, len(changes.Files))
+	tasks := make([]types.PRReviewTask, 0, len(changes.Files))
 	for _, file := range changes.Files {
 
 		if console.Color() {
@@ -394,7 +402,7 @@ func runFullPRReview(ctx context.Context, prNumber int, cfg *config, console Con
 		}
 		// File being processed
 
-		tasks = append(tasks, PRReviewTask{
+		tasks = append(tasks, types.PRReviewTask{
 			FilePath:    file.FilePath,
 			FileContent: file.FileContent,
 			Changes:     file.Patch,
@@ -406,13 +414,13 @@ func runFullPRReview(ctx context.Context, prNumber int, cfg *config, console Con
 			aurora.Green("⚡").Bold(),
 			aurora.White(fmt.Sprintf("Starting code review for %d %s",
 				len(tasks),
-				pluralize("file", len(tasks)))).Bold(),
+				util.Pluralize("file", len(tasks)))).Bold(),
 			aurora.Blue("...").String(),
 		)
 	} else {
 		console.Printf("⚡ Starting code review for %d %s...\n",
 			len(tasks),
-			pluralize("file", len(tasks)))
+			util.Pluralize("file", len(tasks)))
 	}
 	// Starting code review
 	// Note: Don't stop the agent here in interactive mode - it's managed at the session level
@@ -427,7 +435,7 @@ func runFullPRReview(ctx context.Context, prNumber int, cfg *config, console Con
 
 		if useInteractiveTUI && console.IsInteractive() {
 			// Use the new lazygit-style TUI for reviewing comments
-			onPost := func(selectedComments []PRReviewComment) error {
+			onPost := func(selectedComments []types.PRReviewComment) error {
 				logger.Info(ctx, "Posting %d review comments to GitHub", len(selectedComments))
 				return githubTools.CreateReviewComments(ctx, prNumber, selectedComments)
 			}
@@ -460,26 +468,16 @@ func runFullPRReview(ctx context.Context, prNumber int, cfg *config, console Con
 	return nil
 }
 
-// getVectorDimensions returns the configured vector dimensions.
-func getVectorDimensions() int {
-	if dimensions := os.Getenv("MAESTRO_VECTOR_DIMENSIONS"); dimensions != "" {
-		if dims, err := strconv.Atoi(dimensions); err == nil && dims > 0 && dims <= 2048 {
-			return dims
-		}
-	}
-	return 768 // Default for text-embedding-004
-}
-
 // TUIBackendAdapter adapts ReviewAgent to terminal.MaestroBackend.
 type TUIBackendAdapter struct {
-	agent       ReviewAgent
-	githubTools GitHubInterface
+	agent       types.ReviewAgent
+	githubTools types.GitHubInterface
 	owner       string
 	repo        string
 }
 
 // NewTUIBackendAdapter creates a new backend adapter.
-func NewTUIBackendAdapter(agent ReviewAgent, githubTools GitHubInterface, owner, repo string) *TUIBackendAdapter {
+func NewTUIBackendAdapter(agent types.ReviewAgent, githubTools types.GitHubInterface, owner, repo string) *TUIBackendAdapter {
 	return &TUIBackendAdapter{
 		agent:       agent,
 		githubTools: githubTools,
@@ -507,9 +505,9 @@ func (a *TUIBackendAdapter) ReviewPR(ctx context.Context, prNumber int, onProgre
 	}
 
 	// Create review tasks from the changes
-	tasks := make([]PRReviewTask, 0, len(changes.Files))
+	tasks := make([]types.PRReviewTask, 0, len(changes.Files))
 	for _, file := range changes.Files {
-		tasks = append(tasks, PRReviewTask{
+		tasks = append(tasks, types.PRReviewTask{
 			FilePath:    file.FilePath,
 			FileContent: file.FileContent,
 			Changes:     file.Patch,
@@ -574,12 +572,12 @@ func (c *tuiProgressConsole) StopSpinner() {}
 func (c *tuiProgressConsole) WithSpinner(ctx context.Context, message string, fn func() error) error {
 	return fn()
 }
-func (c *tuiProgressConsole) ShowComments(comments []PRReviewComment, metric MetricsCollector)                    {}
-func (c *tuiProgressConsole) ShowCommentsInteractive(comments []PRReviewComment, onPost func([]PRReviewComment) error) error {
+func (c *tuiProgressConsole) ShowComments(comments []types.PRReviewComment, metric types.MetricsCollector) {}
+func (c *tuiProgressConsole) ShowCommentsInteractive(comments []types.PRReviewComment, onPost func([]types.PRReviewComment) error) error {
 	return nil
 }
-func (c *tuiProgressConsole) ShowSummary(comments []PRReviewComment, metric MetricsCollector) {}
-func (c *tuiProgressConsole) StartReview(pr *github.PullRequest) {
+func (c *tuiProgressConsole) ShowSummary(comments []types.PRReviewComment, metric types.MetricsCollector) {}
+func (c *tuiProgressConsole) StartReview(pr *gh.PullRequest) {
 	if c.onProgress != nil && pr != nil {
 		c.onProgress(fmt.Sprintf("Starting review: %s", pr.GetTitle()))
 	}
@@ -600,11 +598,12 @@ func (c *tuiProgressConsole) UpdateSpinnerText(text string) {
 		c.onProgress(text)
 	}
 }
-func (c *tuiProgressConsole) ShowReviewMetrics(metrics MetricsCollector, comments []PRReviewComment) {}
-func (c *tuiProgressConsole) CollectAllFeedback(comments []PRReviewComment, metric MetricsCollector) error {
+func (c *tuiProgressConsole) ShowReviewMetrics(metrics types.MetricsCollector, comments []types.PRReviewComment) {
+}
+func (c *tuiProgressConsole) CollectAllFeedback(comments []types.PRReviewComment, metric types.MetricsCollector) error {
 	return nil
 }
-func (c *tuiProgressConsole) Confirm(opts PromptOptions) (bool, error) { return false, nil }
+func (c *tuiProgressConsole) Confirm(opts types.PromptOptions) (bool, error) { return false, nil }
 func (c *tuiProgressConsole) FileError(filepath string, err error) {
 	if c.onProgress != nil {
 		c.onProgress(fmt.Sprintf("Error in %s: %v", filepath, err))
@@ -645,24 +644,31 @@ func runModernUI(cfg *config) error {
 	logging.SetLogger(logger)
 
 	// Validate model config and setup LLM
-	if err := validateModelConfig(cfg); err != nil {
+	modelCfg := &util.ModelConfig{
+		ModelProvider: cfg.modelProvider,
+		ModelName:     cfg.modelName,
+		ModelConfig:   cfg.modelConfig,
+		APIKey:        cfg.apiKey,
+	}
+	if err := util.ValidateModelConfig(modelCfg); err != nil {
 		return fmt.Errorf("model config is incorrect: %w", err)
 	}
+	cfg.apiKey = modelCfg.APIKey // Update with resolved API key
 	llms.EnsureFactory()
-	modelID := constructModelID(cfg)
+	modelID := util.ConstructModelID(modelCfg)
 	if err := core.ConfigureDefaultLLM(cfg.apiKey, modelID); err != nil {
 		return fmt.Errorf("failed to configure LLM: %w", err)
 	}
 
 	// Initialize GitHub tools and agent for real functionality
-	githubTools := NewGitHubTools(cfg.githubToken, cfg.owner, cfg.repo)
-	dbPath, err := CreateStoragePath(ctx, cfg.owner, cfg.repo)
+	githubTools := github.NewTools(cfg.githubToken, cfg.owner, cfg.repo)
+	dbPath, err := util.CreateStoragePath(ctx, cfg.owner, cfg.repo)
 	if err != nil {
 		return fmt.Errorf("failed to create storage path: %w", err)
 	}
 
 	// Create agent to enable real reviews
-	agent, err := NewPRReviewAgent(ctx, githubTools, dbPath, &AgentConfig{
+	agent, err := review.NewPRReviewAgent(ctx, githubTools, dbPath, &types.AgentConfig{
 		IndexWorkers:  cfg.indexWorkers,
 		ReviewWorkers: cfg.reviewWorkers,
 	})
