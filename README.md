@@ -5,58 +5,92 @@ Maestro is an intelligent code review assistant built with DSPy-Go that provides
 
 ## 🏗️ Architecture Overview
 
-```mermaid
-graph TB
-    subgraph "User Interface Layer"
-        CLI[Command Line Interface]
-        Interactive[Interactive Mode] 
-        GitHub[GitHub Integration]
-        ClaudeCLI[Claude Code CLI]
-        GeminiCLI[Gemini CLI]
-        Sessions[AI Session Management]
-    end
-
-    subgraph "Core Analysis Engine"
-        Agent[PR Review Agent]
-        Context[Context Extractor]
-        Processor[Enhanced Review Processor]
-        Aggregator[Result Aggregator]
-    end
-
-    subgraph "Intelligence Layer"
-        AST[AST Parser]
-        RAG[RAG Store & Retrieval]
-        LLM[LLM Orchestration]
-        Rules[Review Rules Engine]
-    end
-
-    subgraph "Data & Storage"
-        Vector[SQLite + Vector DB]
-        Embedding[Embedding Models]
-        Guidelines[Code Guidelines]
-        Patterns[Code Patterns]
-    end
-
-    CLI --> Agent
-    Interactive --> Agent
-    GitHub --> Agent
-    ClaudeCLI --> Agent
-    GeminiCLI --> Agent
-    Sessions --> Agent
-    
-    Agent --> Context
-    Agent --> Processor
-    Processor --> Aggregator
-    
-    Context --> AST
-    Processor --> RAG
-    Processor --> LLM
-    Agent --> Rules
-    
-    RAG --> Vector
-    RAG --> Embedding
-    Vector --> Guidelines
-    Vector --> Patterns
+```
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                              USER INTERFACE                                     │
+│  ┌─────────────────┐  ┌─────────────────────────────┐  ┌─────────────────────┐  │
+│  │    CLI Mode     │  │   TUI v2 (Bubbletea)        │  │    GitHub API       │  │
+│  │                 │  │  ┌─────────────────────────┐│  │                     │  │
+│  │  • Spinner      │  │  │ Vim Keybindings        ││  │  • PR Changes       │  │
+│  │  • Progress     │  │  │ Command Palette        ││  │  • Review Comments  │  │
+│  │  • Prompts      │  │  │ File Tree / TODOs      ││  │  • OAuth2           │  │
+│  │                 │  │  │ Review Display         ││  │                     │  │
+│  └────────┬────────┘  │  └─────────────────────────┘│  └──────────┬──────────┘  │
+│           │           └──────────────┬──────────────┘             │             │
+└───────────┼──────────────────────────┼────────────────────────────┼─────────────┘
+            │                          │                            │
+            ▼                          ▼                            │
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                              BRIDGE LAYER                                       │
+│  ┌─────────────────────────┐      ┌─────────────────────────────┐              │
+│  │   Console Interface     │      │   TUI Backend Adapter       │              │
+│  │   (Spinner, Prompts)    │      │   (Async Progress, Bridge)  │              │
+│  └────────────┬────────────┘      └──────────────┬──────────────┘              │
+└───────────────┼──────────────────────────────────┼──────────────────────────────┘
+                │                                  │
+                └─────────────┬────────────────────┘
+                              ▼
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                         UNIFIED REACT AGENT                                     │
+│  ┌───────────────────────────────────────────────────────────────────────────┐  │
+│  │  • Dynamic Tool Selection    • Iterative Reasoning    • Query Routing    │  │
+│  │  • Context Management        • Quality Tracking       • XML Tool Config  │  │
+│  └───────────────────────────────────────────────────────────────────────────┘  │
+│         │                              │                           │            │
+│         ▼                              ▼                           ▼            │
+│  ┌─────────────┐            ┌──────────────────┐         ┌─────────────────┐   │
+│  │   /review   │            │      /ask        │         │    /search      │   │
+│  │  PR Review  │            │  Question Answer │         │  Code Search    │   │
+│  └──────┬──────┘            └────────┬─────────┘         └────────┬────────┘   │
+└─────────┼───────────────────────────┼─────────────────────────────┼─────────────┘
+          │                           │                             │
+          ▼                           │                             │
+┌─────────────────────────────────────┼─────────────────────────────┼─────────────┐
+│              REVIEW ENGINE          │                             │             │
+│  ┌─────────────┐  ┌────────────────┐│                             │             │
+│  │   Chunker   │  │ Workflow Chain ││                             │             │
+│  │             │  │                ││                             │             │
+│  │ • Function  │  │ Stage 1: Review││                             │             │
+│  │ • Size      │  │ Stage 2: Valid.││                             │             │
+│  │ • Logic     │  │ Stage 3: Refine││                             │             │
+│  └─────────────┘  └───────┬────────┘│                             │             │
+└───────────────────────────┼─────────┼─────────────────────────────┼─────────────┘
+                            ▼         │                             │
+┌─────────────────────────────────────┼─────────────────────────────┼─────────────┐
+│                    REASONING LAYER  │                             │             │
+│  ┌──────────────────┐  ┌───────────────────┐  ┌────────────────┐  │             │
+│  │ Enhanced Review  │  │    Consensus      │  │    Comment     │  │             │
+│  │    Processor     │  │    Validator      │  │    Refiner     │  │             │
+│  │                  │  │                   │  │                │  │             │
+│  │ • Parallel Exec  │  │ • Context Valid   │  │ • Clarity      │  │             │
+│  │ • Module Cache   │  │ • Rule Compliance │  │ • Actionable   │  │             │
+│  │ • 120 Workers    │  │ • Impact Check    │  │ • Specificity  │  │             │
+│  └────────┬─────────┘  └─────────┬─────────┘  └────────────────┘  │             │
+└───────────┼──────────────────────┼────────────────────────────────┼─────────────┘
+            │                      │                                │
+            ▼                      ▼                                ▼
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                          INTELLIGENCE LAYER                                     │
+│  ┌────────────────────┐  ┌───────────────────┐  ┌────────────────────────────┐  │
+│  │   Sgrep Search     │  │     RAG Store     │  │   LLM Orchestration        │  │
+│  │                    │  │                   │  │       (DSPy-Go)            │  │
+│  │ • Semantic Search  │  │ • Guidelines      │  │                            │  │
+│  │ • Hybrid Search    │  │ • Code Patterns   │  │  • Anthropic / Gemini      │  │
+│  │ • Code Indexing    │  │ • Similarity      │  │  • Ollama / LLaMA.cpp      │  │
+│  └─────────┬──────────┘  └─────────┬─────────┘  └─────────────┬──────────────┘  │
+└────────────┼───────────────────────┼──────────────────────────┼─────────────────┘
+             │                       │                          │
+             ▼                       ▼                          │
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                             DATA LAYER                                          │
+│  ┌────────────────────────┐  ┌─────────────────────┐  ┌──────────────────────┐  │
+│  │   SQLite + sqlite-vec  │  │  Embedding Router   │  │   Embedding Cache    │  │
+│  │                        │  │                     │  │                      │  │
+│  │  • Vector Storage      │  │  • Local (Sgrep)    │  │  • LRU Cache         │  │
+│  │  • Metadata Index      │  │  • Cloud Fallback   │  │  • Hit Rate Stats    │  │
+│  │  • Pattern Matching    │  │  • Smart Routing    │  │                      │  │
+│  └────────────────────────┘  └─────────────────────┘  └──────────────────────┘  │
+└─────────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ## 🎯 Core Features
@@ -76,8 +110,24 @@ graph TB
 ### **GitHub Integration**
 - **Seamless PR Workflow**: Direct integration with GitHub pull request comments
 - **Bulk Processing**: Efficient handling of large PRs with parallel processing
-- **Modern TUI**: Bubbletea-based terminal UI with keyboard navigation and real-time updates
 - **Real-time Feedback**: Live processing status and progress indicators
+
+### **Terminal UI (TUI v2)**
+- **Modern Framework**: Built on Bubbletea v2 + Lipgloss v2 with real-time updates
+- **Vim-Style Navigation**: Full Vim keybindings with Normal, Insert, Visual, Command, and Search modes
+- **Multi-Mode Interface**: Input mode, Review mode, and Dashboard mode
+- **Fuzzy Command Palette**: Quick command access with autocomplete and history
+- **PR Review Display**: Inline comments grouped by file with severity-based color coding
+- **File Tree Explorer**: Navigate repository with expand/collapse and filtering
+- **Task Tracking**: Built-in TODO list for agent planning visibility
+- **Split-Pane Layout**: IDE-like interface with configurable panels
+
+### **Semantic Code Search (Sgrep)**
+- **Semantic Understanding**: Search code by meaning, not just keywords
+- **Hybrid Search**: Combine semantic + keyword matching for precise results
+- **Embedding Provider**: Local embeddings via nomic-embed-text model (768 dimensions)
+- **Guideline Discovery**: Semantic search for code guidelines and patterns
+- **Agent Integration**: Available as a tool for ReAct agents during reasoning
 
 ### **AI CLI Tool Integration**
 - **Claude Code CLI**: Direct integration with Anthropic's official Claude Code CLI
@@ -109,7 +159,7 @@ graph TB
 ## 📦 Getting Started
 
 ### **Prerequisites**
-- Go 1.24.1 or higher  
+- Go 1.24.2 or higher
 - SQLite with sqlite-vec extension
 - GitHub API access token
 - Supported LLM backend (Claude, Gemini, or local model)
@@ -210,6 +260,13 @@ MAESTRO_LLM_RESPONSE_DEBUG=true          # LLM response debugging
 MAESTRO_SIMILARITY_LOGGING=true          # Similarity score logging
 ```
 
+#### **Sgrep / Local Embeddings**
+```bash
+MAESTRO_LOCAL_EMBEDDING_ENABLED=true     # Enable local embeddings
+MAESTRO_LOCAL_EMBEDDING_PROVIDER=sgrep   # Provider: sgrep, ollama, llamacpp
+MAESTRO_LOCAL_EMBEDDING_MODEL=nomic-embed-text  # Embedding model (768 dims for sgrep)
+```
+
 #### **Feature Toggles**
 ```bash
 MAESTRO_ENHANCED_REASONING=true          # Enhanced reasoning capabilities
@@ -238,6 +295,38 @@ MAESTRO_CONSENSUS_VALIDATION=true        # Consensus validation
 - `/list`: List all available sessions
 - `/tools setup`: Install and configure CLI tools
 - `/ask <question>`: Ask questions about the repository
+- `/clear`: Clear conversation history
+- `/exit`, `/quit`: Exit the TUI
+
+### **TUI Keybindings**
+
+#### **Normal Mode**
+| Key | Action |
+|-----|--------|
+| `h/j/k/l` or arrows | Navigate |
+| `i` | Enter Insert mode |
+| `v` | Enter Visual mode |
+| `:` | Enter Command mode |
+| `/` | Enter Search mode |
+| `g` / `G` | Jump to top / bottom |
+| `ctrl+u` / `ctrl+d` | Page up / down |
+| `tab` | Cycle focus between panes |
+| `ctrl+b` | Toggle file tree |
+| `ctrl+t` | Toggle TODO panel |
+| `enter` | Select / expand item |
+| `space` | Expand/collapse in file tree |
+| `x` | Mark TODO complete |
+| `q` / `ctrl+c` | Quit |
+
+#### **Review Mode**
+| Key | Action |
+|-----|--------|
+| `j/k` | Navigate comments |
+| `space` | Expand/collapse file groups |
+| `enter` / `l` | Toggle detail view |
+| `h` | Close detail view |
+| `tab` | Switch to input |
+| `esc` | Clear review results |
 
 ### **Model Selection**
 
@@ -258,13 +347,15 @@ MAESTRO_CONSENSUS_VALIDATION=true        # Consensus validation
 ## 📊 Performance & Metrics
 
 ### **Current Scale**
-- **Codebase**: 19,552+ lines across 27 Go modules
-- **Dependencies**: DSPy-Go v0.36.0, SQLite-vec, GitHub API v68, Claude Code CLI, Gemini CLI
+- **Codebase**: 27,000+ lines across 17 internal packages
+- **Dependencies**: DSPy-Go v0.65.1, SQLite-vec, GitHub API v68, Claude Code CLI, Gemini CLI
 - **Processing**: Handles 300+ chunks per PR with file-level aggregation
 - **Performance**: ~500ms average per chunk with parallel processing
 - **AI Integration**: Seamless switching between multiple AI tools and sessions
 
 ### **Recent Improvements**
+- **TUI v2**: Modern Bubbletea v2 interface with Vim keybindings and multi-mode support
+- **Sgrep Integration**: Semantic code search for intelligent code understanding
 - **AI CLI Integration**: Direct Claude Code and Gemini CLI integration
 - **Session Management**: Multi-session AI workflow support
 - **File Aggregation**: 371 chunks → 21 files (proper grouping)
