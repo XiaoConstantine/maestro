@@ -1,6 +1,6 @@
 # Maestro - Advanced AI-Powered Code Review Assistant
 
-Maestro is an intelligent code review assistant built with DSPy-Go that provides comprehensive, file-level code analysis for GitHub pull requests. It combines advanced AST parsing, semantic analysis, and LLM-powered reasoning to deliver high-quality, actionable code review feedback. Additionally, Maestro features seamless integration with Claude Code and Gemini CLI tools for enhanced AI-powered development workflows.
+Maestro is an intelligent code review assistant built with DSPy-Go that provides comprehensive, file-level code analysis for GitHub pull requests. It combines advanced AST parsing, semantic analysis, and LLM-powered reasoning to deliver high-quality, actionable code review feedback.
 
 
 ## 🏗️ Architecture Overview
@@ -19,56 +19,38 @@ Maestro is an intelligent code review assistant built with DSPy-Go that provides
 │           │           └──────────────┬──────────────┘             │             │
 └───────────┼──────────────────────────┼────────────────────────────┼─────────────┘
             │                          │                            │
-            ▼                          ▼                            │
+            ▼                          ▼                            ▼
 ┌─────────────────────────────────────────────────────────────────────────────────┐
-│                              BRIDGE LAYER                                       │
-│  ┌─────────────────────────┐      ┌─────────────────────────────┐              │
-│  │   Console Interface     │      │   TUI Backend Adapter       │              │
-│  │   (Spinner, Prompts)    │      │   (Async Progress, Bridge)  │              │
-│  └────────────┬────────────┘      └──────────────┬──────────────┘              │
-└───────────────┼──────────────────────────────────┼──────────────────────────────┘
-                │                                  │
-                └─────────────┬────────────────────┘
-                              ▼
-┌─────────────────────────────────────────────────────────────────────────────────┐
-│                         UNIFIED REACT AGENT                                     │
-│  ┌───────────────────────────────────────────────────────────────────────────┐  │
-│  │  • Dynamic Tool Selection    • Iterative Reasoning    • Query Routing    │  │
-│  │  • Context Management        • Quality Tracking       • XML Tool Config  │  │
-│  └───────────────────────────────────────────────────────────────────────────┘  │
-│         │                              │                           │            │
-│         ▼                              ▼                           ▼            │
-│  ┌─────────────┐            ┌──────────────────┐         ┌─────────────────┐   │
-│  │   /review   │            │      /ask        │         │    /search      │   │
-│  │  PR Review  │            │  Question Answer │         │  Code Search    │   │
-│  └──────┬──────┘            └────────┬─────────┘         └────────┬────────┘   │
-└─────────┼───────────────────────────┼─────────────────────────────┼─────────────┘
-          │                           │                             │
-          ▼                           │                             │
-┌─────────────────────────────────────┼─────────────────────────────┼─────────────┐
-│              REVIEW ENGINE          │                             │             │
-│  ┌─────────────┐  ┌────────────────┐│                             │             │
-│  │   Chunker   │  │ Workflow Chain ││                             │             │
-│  │             │  │                ││                             │             │
-│  │ • Function  │  │ Stage 1: Review││                             │             │
-│  │ • Size      │  │ Stage 2: Valid.││                             │             │
-│  │ • Logic     │  │ Stage 3: Refine││                             │             │
-│  └─────────────┘  └───────┬────────┘│                             │             │
-└───────────────────────────┼─────────┼─────────────────────────────┼─────────────┘
-                            ▼         │                             │
-┌─────────────────────────────────────┼─────────────────────────────┼─────────────┐
-│                    REASONING LAYER  │                             │             │
-│  ┌──────────────────┐  ┌───────────────────┐  ┌────────────────┐  │             │
-│  │ Enhanced Review  │  │    Consensus      │  │    Comment     │  │             │
-│  │    Processor     │  │    Validator      │  │    Refiner     │  │             │
-│  │                  │  │                   │  │                │  │             │
-│  │ • Parallel Exec  │  │ • Context Valid   │  │ • Clarity      │  │             │
-│  │ • Module Cache   │  │ • Rule Compliance │  │ • Actionable   │  │             │
-│  │ • 120 Workers    │  │ • Impact Check    │  │ • Specificity  │  │             │
-│  └────────┬─────────┘  └─────────┬─────────┘  └────────────────┘  │             │
-└───────────┼──────────────────────┼────────────────────────────────┼─────────────┘
-            │                      │                                │
-            ▼                      ▼                                ▼
+│                           MAESTRO SERVICE                                       │
+│               (Singleton - created once per session)                            │
+│                                                                                 │
+│  ┌─────────────────────────────────────────────────────────────────────────┐   │
+│  │                         AgentPool (Persistent)                          │   │
+│  │  ┌─────────────────────┐              ┌─────────────────────────────┐   │   │
+│  │  │   PRReviewAgent     │              │   UnifiedReActAgent (QA)    │   │   │
+│  │  │   (persistent)      │              │   (persistent, shared mem)  │   │   │
+│  │  └─────────────────────┘              └─────────────────────────────┘   │   │
+│  └─────────────────────────────────────────────────────────────────────────┘   │
+│                                     │                                           │
+│  ┌──────────────────────────────────┴───────────────────────────────────────┐  │
+│  │                      ProcessRequest Router                                │  │
+│  │         /review → ReviewAgent        /ask → QAAgent (ReAct)              │  │
+│  └──────────────────────────────────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────────────────────────┘
+                                      │
+          ┌───────────────────────────┼───────────────────────────┐
+          ▼                           ▼                           ▼
+┌─────────────────────┐    ┌──────────────────────┐    ┌─────────────────────┐
+│    REVIEW ENGINE    │    │   UNIFIED REACT      │    │   SEARCH ENGINE     │
+│                     │    │      AGENT           │    │                     │
+│ • Chunker           │    │ • Iterative Search   │    │ • Semantic Search   │
+│ • Workflow Chain    │    │ • Tool Selection     │    │ • Hybrid Matching   │
+│ • Parallel Review   │    │ • Context Management │    │ • Code Indexing     │
+│ • 120 Workers       │    │ • Quality Tracking   │    │                     │
+└─────────────────────┘    └──────────────────────┘    └─────────────────────┘
+          │                           │                           │
+          └───────────────────────────┼───────────────────────────┘
+                                      ▼
 ┌─────────────────────────────────────────────────────────────────────────────────┐
 │                          INTELLIGENCE LAYER                                     │
 │  ┌────────────────────┐  ┌───────────────────┐  ┌────────────────────────────┐  │
@@ -80,14 +62,14 @@ Maestro is an intelligent code review assistant built with DSPy-Go that provides
 │  └─────────┬──────────┘  └─────────┬─────────┘  └─────────────┬──────────────┘  │
 └────────────┼───────────────────────┼──────────────────────────┼─────────────────┘
              │                       │                          │
-             ▼                       ▼                          │
+             ▼                       ▼                          ▼
 ┌─────────────────────────────────────────────────────────────────────────────────┐
 │                             DATA LAYER                                          │
 │  ┌────────────────────────┐  ┌─────────────────────┐  ┌──────────────────────┐  │
-│  │   SQLite + sqlite-vec  │  │  Embedding Router   │  │   Embedding Cache    │  │
-│  │                        │  │                     │  │                      │  │
-│  │  • Vector Storage      │  │  • Local (Sgrep)    │  │  • LRU Cache         │  │
-│  │  • Metadata Index      │  │  • Cloud Fallback   │  │  • Hit Rate Stats    │  │
+│  │   SQLite + sqlite-vec  │  │  Embedding Router   │  │   Shared Memory      │  │
+│  │                        │  │                     │  │   (Configurable)     │  │
+│  │  • Vector Storage      │  │  • Local (Sgrep)    │  │  • InMemory          │  │
+│  │  • Metadata Index      │  │  • Cloud Fallback   │  │  • SQLite (optional) │  │
 │  │  • Pattern Matching    │  │  • Smart Routing    │  │                      │  │
 │  └────────────────────────┘  └─────────────────────┘  └──────────────────────┘  │
 └─────────────────────────────────────────────────────────────────────────────────┘
@@ -129,12 +111,11 @@ Maestro is an intelligent code review assistant built with DSPy-Go that provides
 - **Guideline Discovery**: Semantic search for code guidelines and patterns
 - **Agent Integration**: Available as a tool for ReAct agents during reasoning
 
-### **AI CLI Tool Integration**
-- **Claude Code CLI**: Direct integration with Anthropic's official Claude Code CLI
-- **Gemini CLI**: Integration with Google's Gemini CLI for web search and general queries
-- **Session Management**: Create and manage multiple isolated AI sessions
-- **Smart Routing**: Automatic delegation of tasks to the most appropriate AI tool
-- **Tool Auto-Setup**: Automatic installation and configuration of CLI tools
+### **Unified Agent Architecture**
+- **MaestroService**: Singleton service created once per session for unified request handling
+- **Persistent Agents**: Agent pool maintains persistent agents across requests (no ad-hoc creation)
+- **Shared Memory**: Configurable memory backend (InMemory or SQLite) shared across agents
+- **Request Routing**: Single entry point (`ProcessRequest`) routes `/review` and `/ask` commands
 
 ### **Flexible Model Support**
 - **Multiple Backends**: Anthropic Claude, Google Gemini, Local models (Ollama, LLaMA.cpp)
@@ -215,16 +196,9 @@ tmux attach -t llm        # LLM server logs
 # Direct CLI usage for a specific PR
 ./maestro --owner=username --repo=repository --pr=123
 
-# Use integrated Claude Code CLI
-maestro> /claude help
-maestro> /claude create a react component
-
-# Use integrated Gemini CLI for web search
-maestro> /gemini search for latest Go best practices
-
-# Create and manage AI sessions
-maestro> /sessions create frontend "react development"
-maestro> /enter frontend
+# In TUI mode, use slash commands:
+maestro> /review 123          # Review PR #123
+maestro> /ask how does auth work?  # Ask about the codebase
 
 # With enhanced debugging
 export MAESTRO_LOG_LEVEL=debug
@@ -288,13 +262,7 @@ MAESTRO_CONSENSUS_VALIDATION=true        # Consensus validation
 ### **TUI Commands**
 - `/help`: Show available commands
 - `/review <pr>`: Review a pull request
-- `/claude [args]`: Access Claude Code CLI directly
-- `/gemini [args]`: Access Gemini CLI for web search
-- `/sessions create <name> <purpose>`: Create new AI session
-- `/enter <session>`: Enter interactive Claude session
-- `/list`: List all available sessions
-- `/tools setup`: Install and configure CLI tools
-- `/ask <question>`: Ask questions about the repository
+- `/ask <question>`: Ask questions about the repository (uses ReAct agent)
 - `/clear`: Clear conversation history
 - `/exit`, `/quit`: Exit the TUI
 
@@ -348,16 +316,15 @@ MAESTRO_CONSENSUS_VALIDATION=true        # Consensus validation
 
 ### **Current Scale**
 - **Codebase**: 27,000+ lines across 17 internal packages
-- **Dependencies**: DSPy-Go v0.65.1, SQLite-vec, GitHub API v68, Claude Code CLI, Gemini CLI
+- **Dependencies**: DSPy-Go v0.65.1, SQLite-vec, GitHub API v68
 - **Processing**: Handles 300+ chunks per PR with file-level aggregation
 - **Performance**: ~500ms average per chunk with parallel processing
-- **AI Integration**: Seamless switching between multiple AI tools and sessions
 
 ### **Recent Improvements**
+- **Unified Architecture**: MaestroService singleton with persistent AgentPool
 - **TUI v2**: Modern Bubbletea v2 interface with Vim keybindings and multi-mode support
 - **Sgrep Integration**: Semantic code search for intelligent code understanding
-- **AI CLI Integration**: Direct Claude Code and Gemini CLI integration
-- **Session Management**: Multi-session AI workflow support
+- **Shared Memory**: Configurable memory backend for cross-request context
 - **File Aggregation**: 371 chunks → 21 files (proper grouping)
 - **Context Enhancement**: 5 → 15+ lines of chunk context
 - **Debug Visibility**: Comprehensive RAG and processing metrics
@@ -387,24 +354,6 @@ export MAESTRO_DEDUPLICATION_THRESHOLD=0.9
 export MAESTRO_CHUNK_CONTEXT_LINES=20
 export MAESTRO_DEDUPLICATION_THRESHOLD=0.7
 export MAESTRO_ENABLE_DEPENDENCY_ANALYSIS=true
-```
-
-### **AI Workflow Examples**
-```bash
-# Multi-session development workflow
-./maestro -i
-maestro> /sessions create backend "API development"
-maestro> /sessions create frontend "React components"
-maestro> /enter backend
-# Work in Claude Code for backend
-maestro> /exit
-maestro> /enter frontend  
-# Work in Claude Code for frontend
-
-# Mixed AI tool usage
-maestro> /gemini search for Go error handling best practices
-maestro> /claude implement error handling based on search results
-maestro> /ask how does this compare to our current codebase?
 ```
 
 ## 📄 License

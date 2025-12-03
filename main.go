@@ -18,6 +18,7 @@ import (
 	"github.com/XiaoConstantine/dspy-go/pkg/logging"
 	"github.com/XiaoConstantine/maestro/internal/agent"
 	"github.com/XiaoConstantine/maestro/internal/github"
+	"github.com/XiaoConstantine/maestro/internal/orchestration"
 	"github.com/XiaoConstantine/maestro/internal/review"
 	"github.com/XiaoConstantine/maestro/internal/search"
 	"github.com/XiaoConstantine/maestro/internal/types"
@@ -712,6 +713,78 @@ func (c *tuiProgressConsole) Color() bool                          { return fals
 func (c *tuiProgressConsole) Spinner() *spinner.Spinner            { return nil }
 func (c *tuiProgressConsole) IsInteractive() bool                  { return false }
 
+// TUIServiceAdapter wraps MaestroService for terminal.MaestroBackend.
+type TUIServiceAdapter struct {
+	service     *orchestration.MaestroService
+	githubTools types.GitHubInterface
+	owner       string
+	repo        string
+}
+
+func NewTUIServiceAdapter(service *orchestration.MaestroService, githubTools types.GitHubInterface, owner, repo string) *TUIServiceAdapter {
+	return &TUIServiceAdapter{
+		service:     service,
+		githubTools: githubTools,
+		owner:       owner,
+		repo:        repo,
+	}
+}
+
+func (a *TUIServiceAdapter) ReviewPR(ctx context.Context, prNumber int, onProgress func(status string)) ([]terminal.ReviewComment, error) {
+	response, err := a.service.ProcessRequest(ctx, orchestration.Request{
+		Type:       orchestration.RequestReview,
+		PRNumber:   prNumber,
+		OnProgress: onProgress,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	result := make([]terminal.ReviewComment, 0, len(response.Comments))
+	for _, c := range response.Comments {
+		result = append(result, terminal.ReviewComment{
+			FilePath:   c.FilePath,
+			LineNumber: c.LineNumber,
+			Content:    c.Content,
+			Severity:   c.Severity,
+			Suggestion: c.Suggestion,
+			Category:   c.Category,
+		})
+	}
+	return result, nil
+}
+
+func (a *TUIServiceAdapter) AskQuestion(ctx context.Context, question string) (string, error) {
+	response, err := a.service.ProcessRequest(ctx, orchestration.Request{
+		Type:     orchestration.RequestAsk,
+		Question: question,
+	})
+	if err != nil {
+		return "", err
+	}
+
+	result := response.Answer
+	if sources, ok := response.Metadata["sources"].([]string); ok && len(sources) > 0 {
+		result += "\n\nSources:\n"
+		for _, s := range sources {
+			result += fmt.Sprintf("  - %s\n", s)
+		}
+	}
+	return result, nil
+}
+
+func (a *TUIServiceAdapter) GetRepoInfo() terminal.RepoInfo {
+	return terminal.RepoInfo{
+		Owner:  a.owner,
+		Repo:   a.repo,
+		Branch: "main",
+	}
+}
+
+func (a *TUIServiceAdapter) IsReady() bool {
+	return a.service != nil && a.service.IsReady()
+}
+
 func runModernUI(cfg *config) error {
 	ctx := core.WithExecutionState(context.Background())
 
@@ -754,26 +827,41 @@ func runModernUI(cfg *config) error {
 		return fmt.Errorf("failed to configure LLM: %w", err)
 	}
 
-	// Initialize GitHub tools and agent for real functionality
+	// Initialize GitHub tools
 	githubTools := github.NewTools(cfg.githubToken, cfg.owner, cfg.repo)
 	dbPath, err := util.CreateStoragePath(ctx, cfg.owner, cfg.repo)
 	if err != nil {
 		return fmt.Errorf("failed to create storage path: %w", err)
 	}
 
-	// Create agent to enable real reviews
-	agent, err := review.NewPRReviewAgent(ctx, githubTools, dbPath, &types.AgentConfig{
+	// Create MaestroService (singleton for this session)
+	service, err := orchestration.NewMaestroService(ctx, &orchestration.ServiceConfig{
+		MemoryType:    orchestration.MemoryInMemory,
+		MemoryPath:    dbPath,
+		Owner:         cfg.owner,
+		Repo:          cfg.repo,
+		GitHubToken:   cfg.githubToken,
 		IndexWorkers:  cfg.indexWorkers,
 		ReviewWorkers: cfg.reviewWorkers,
-	})
+	}, githubTools)
 	if err != nil {
-		return fmt.Errorf("failed to initialize agent: %w", err)
+		return fmt.Errorf("failed to create service: %w", err)
 	}
 	defer func() {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		agent.Stop(shutdownCtx)
+		_ = service.Shutdown(shutdownCtx)
 	}()
+
+	// Create review agent and register with service
+	reviewAgent, err := review.NewPRReviewAgent(ctx, githubTools, dbPath, &types.AgentConfig{
+		IndexWorkers:  cfg.indexWorkers,
+		ReviewWorkers: cfg.reviewWorkers,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to initialize review agent: %w", err)
+	}
+	service.SetReviewAgent(reviewAgent)
 
 	// Create TUI config
 	tuiConfig := &terminal.MaestroConfig{
@@ -785,8 +873,8 @@ func runModernUI(cfg *config) error {
 		ReviewWorkers: cfg.reviewWorkers,
 	}
 
-	// Create real backend adapter wrapping the agent
-	backend := NewTUIBackendAdapter(agent, githubTools, cfg.owner, cfg.repo)
+	// Create service adapter for TUI
+	backend := NewTUIServiceAdapter(service, githubTools, cfg.owner, cfg.repo)
 
 	// Start the unified Maestro TUI
 	return terminal.RunMaestro(tuiConfig, backend)

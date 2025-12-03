@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/XiaoConstantine/dspy-go/pkg/agents"
 	"github.com/XiaoConstantine/dspy-go/pkg/agents/react"
 	"github.com/XiaoConstantine/dspy-go/pkg/core"
 	"github.com/XiaoConstantine/dspy-go/pkg/interceptors"
@@ -29,8 +30,8 @@ type UnifiedReActAgent struct {
 	logger     *logging.Logger
 	status     types.AgentStatus
 	mu         sync.RWMutex
+	memory     agents.Memory
 
-	// Dynamic configuration
 	currentMode       react.ExecutionMode
 	queryAnalyzer     *QueryAnalyzer
 	searchContext     *SearchContext
@@ -124,9 +125,13 @@ func (st *SearchTool) InputSchema() models.InputSchema             { return mode
 
 // NewUnifiedReActAgent creates a new unified ReAct agent.
 func NewUnifiedReActAgent(id string, searchTool *search.SimpleSearchTool, logger *logging.Logger) (*UnifiedReActAgent, error) {
+	return NewUnifiedReActAgentWithMemory(id, searchTool, nil, logger)
+}
+
+// NewUnifiedReActAgentWithMemory creates a unified ReAct agent with shared memory.
+func NewUnifiedReActAgentWithMemory(id string, searchTool *search.SimpleSearchTool, memory agents.Memory, logger *logging.Logger) (*UnifiedReActAgent, error) {
 	llm := core.GetDefaultLLM()
 
-	// Create ReAct agent with flexible configuration
 	reactAgent := react.NewReActAgent(
 		fmt.Sprintf("unified-search-%s", id),
 		"Adaptive search agent that specializes dynamically based on query type and complexity",
@@ -141,6 +146,7 @@ func NewUnifiedReActAgent(id string, searchTool *search.SimpleSearchTool, logger
 		reactAgent: reactAgent,
 		searchTool: searchTool,
 		logger:     logger,
+		memory:     memory,
 		status: types.AgentStatus{
 			State:      "idle",
 			LastUpdate: time.Now(),

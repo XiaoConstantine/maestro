@@ -17,7 +17,6 @@ import (
 	"github.com/XiaoConstantine/dspy-go/pkg/agents"
 	"github.com/XiaoConstantine/dspy-go/pkg/core"
 	"github.com/XiaoConstantine/dspy-go/pkg/logging"
-	"github.com/XiaoConstantine/maestro/internal/agent"
 	"github.com/XiaoConstantine/maestro/internal/chunk"
 	"github.com/XiaoConstantine/maestro/internal/metrics"
 	"github.com/XiaoConstantine/maestro/internal/rag"
@@ -213,101 +212,6 @@ func NewPRReviewAgent(ctx context.Context, githubTool GitHubInterface, dbPath st
 	memory := agents.NewInMemoryStore()
 	stopper := NewStopper()
 	indexStatus := types.NewIndexingStatus()
-
-	logger.Debug(ctx, "Creating orchestrator configuration")
-	analyzerConfig := agents.AnalyzerConfig{
-		BaseInstruction: `Analyze the input and determine the appropriate task type:
-		First, examine if this is new code or follow-up interaction:
-
-		For new code review:
-		- Create a review_chain task to handle both issue detection and validation
-		- Only after review_chain completes successfully, create a code_review task
-
-		For interaction with existing reviews:
-		- Create a comment_response task when processing replies to previous comments
-
-		For repository exploration:
-		- Create a repo_qa task when answering questions about code patterns
-
-
-		IMPORTANT FORMAT RULES:
-                0.Always ensure review_chain task completes before creating code_review/comment_response tasks.
-		1. Start fields exactly with 'analysis:' or 'tasks:' (no markdown formatting)
-		2. Provide raw XML directly after 'tasks:' without any wrapping
-		3. Keep the exact field prefix format - no decorations or modifications
-		4. Ensure proper indentation and structure in the XML
-		5. When thread_id is present in the context, always create a comment_response task.
-		6. FOR ALL TEXT CONTENT IN THE XML (including description, metadata items like file_content, original_comment, etc.):
-		- Before inserting text into the XML, replace the following special characters to ensure well-formed XML:
-			* Replace every '&' with '&amp;'
-			* Replace every '<' with '&lt;'
-			* Replace every '>' with '&gt;'
-		- This applies to all fields that contain text content, such as description, file_content, original_comment, etc.
-		- For attribute values (if any), additionally replace '"' with '&quot;' if the attribute is enclosed in double quotes, or ''' with '&apos;' if enclosed in single quotes.
-			- **Examples:**
-			* If file_content is:
-				if (a < b && b > c) { ... }
-			Then in the XML, it should be:
-				<item key="file_content">if (a < b && b > c) { ... }</item>
-			* If description is:
-			Check for errors & warnings in <file>.xml
-			Then in the XML, it should be:
-				<description>Check for errors & warnings in <file>.xml</description>
-			- **Important Notes:**
-			* Always replace '&' with '&amp;', even if it appears in code or text (e.g., '&&' should become '&amp;&amp;').
-			* Failing to escape these characters will result in invalid XML that cannot be parsed.
-		`,
-
-		FormatInstructions: `Format tasks section in following XML format:
-	   <tasks>
-	       <task id="1" type="{task_type}" processor="{task_type}" priority="1">
-	           <description>Review {file_path} for code quality</description>
-	           <metadata>
-	               <item key="file_path">{file_path}</item>
-	               <item key="file_content">{file_content}</item>
-	               <item key="changes">{changes}</item>
-	               <item key="category">{category}</item>
-                       <item key="original_comment">{original_comment}</item>
-                       <item key="thread_id">{thread_id}</item>
-		       <item key="line_range">{line_range}</item>
-		       <item key="chunk_start">{chunk_start}</item>
-		       <item key="chunk_end">{chunk_end}</item>
-                       <item key="chunk_number">{chunk_number}</item>
-                       <item key="total_chunks">{total_chunks}</item>
-			<!-- Additional metadata -->
-	           </metadata>
-	       </task>
-	   </tasks>`,
-	}
-
-	qaProcessor := agent.NewRepoQAProcessor(store)
-	streamHandler := util.CreateStreamHandler(ctx, logger)
-	orchConfig := agents.OrchestrationConfig{
-		MaxConcurrent:  5,
-		TaskParser:     &agents.XMLTaskParser{},
-		PlanCreator:    &agents.DependencyPlanCreator{},
-		AnalyzerConfig: analyzerConfig,
-		RetryConfig: &agents.RetryConfig{
-			MaxAttempts:       5,
-			BackoffMultiplier: 2.0,
-		},
-		CustomProcessors: map[string]agents.TaskProcessor{
-			"code_review":      &CodeReviewProcessor{metrics: metricsCollector},
-			"comment_response": &CommentResponseProcessor{metrics: metricsCollector},
-			"repo_qa":          qaProcessor,
-			"review_chain":     NewReviewChainProcessor(ctx, metricsCollector, logger),
-		},
-		Options: core.WithOptions(
-			core.WithGenerateOptions(
-				core.WithTemperature(0.3),
-				core.WithMaxTokens(8192),
-			),
-			core.WithStreamHandler(streamHandler),
-		),
-	}
-
-	// Suppress unused variable warning - orchConfig may be used for future orchestrator needs
-	_ = orchConfig
 
 	// Create high-performance parallel review processor
 	reviewProcessor := reasoning.NewEnhancedCodeReviewProcessor(metricsCollector, logger)
