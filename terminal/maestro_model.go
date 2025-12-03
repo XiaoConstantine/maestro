@@ -43,6 +43,10 @@ type MaestroModel struct {
 	selectedFileIdx    int             // Currently selected file group index
 	selectedCommentIdx int             // Index within current file group (-1 if file header selected)
 
+	// Session picker state
+	sessionPickerSessions []SessionInfo
+	sessionPickerIdx      int
+
 	// Dimensions
 	width  int
 	height int
@@ -168,6 +172,15 @@ func (m *MaestroModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.commandPalette.Hide()
 				return m, nil
 			}
+			// Exit session picker
+			if m.mode == ModeSessionPicker {
+				m.mode = ModeInput
+				m.sessionPickerSessions = nil
+				m.sessionPickerIdx = 0
+				m.statusBar.SetMode(ModeInput.String())
+				m.inputModel.Focus() // Re-focus input after exiting picker
+				return m, nil
+			}
 			// Close review detail view
 			if m.showReviewDetail {
 				m.showReviewDetail = false
@@ -190,6 +203,35 @@ func (m *MaestroModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.changeFocus()
 				m.renderMessages()
 				return m, nil
+			}
+		}
+
+		// Handle session picker navigation
+		if m.mode == ModeSessionPicker && len(m.sessionPickerSessions) > 0 {
+			switch msg.String() {
+			case "j", "down":
+				m.sessionPickerIdx++
+				if m.sessionPickerIdx >= len(m.sessionPickerSessions) {
+					m.sessionPickerIdx = 0
+				}
+				m.renderMessages()
+				return m, nil
+			case "k", "up":
+				m.sessionPickerIdx--
+				if m.sessionPickerIdx < 0 {
+					m.sessionPickerIdx = len(m.sessionPickerSessions) - 1
+				}
+				m.renderMessages()
+				return m, nil
+			case "enter":
+				// Switch to selected session
+				selected := m.sessionPickerSessions[m.sessionPickerIdx]
+				m.mode = ModeInput
+				m.sessionPickerSessions = nil
+				m.sessionPickerIdx = 0
+				m.statusBar.SetMode(ModeInput.String())
+				m.inputModel.Focus() // Re-focus input after exiting picker
+				return m, m.cmdSessionSwitch(selected.Name)
 			}
 		}
 
@@ -259,6 +301,22 @@ func (m *MaestroModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.addMessage("assistant", msg.Content)
 		m.statusBar.SetMessage("")
 		m.progressModel.Hide() // Ensure progress is hidden when response arrives
+
+	case SessionPickerMsg:
+		// Enter session picker mode
+		m.sessionPickerSessions = msg.Sessions
+		m.sessionPickerIdx = 0
+		// Find current session and select it
+		for i, s := range msg.Sessions {
+			if s.IsCurrent {
+				m.sessionPickerIdx = i
+				break
+			}
+		}
+		m.mode = ModeSessionPicker
+		m.statusBar.SetMode(ModeSessionPicker.String())
+		m.inputModel.Blur()
+		m.renderMessages()
 
 	case ReviewResultMsg:
 		// Store review results for inline display (Crush-style)
@@ -483,6 +541,14 @@ func (m *MaestroModel) handleModeTransition(transition ModeTransition) {
 func (m *MaestroModel) handleCommand(cmd string, args []string) tea.Cmd {
 	m.addMessage("user", "/"+cmd+" "+strings.Join(args, " "))
 
+	// Handle multi-word commands from command palette (e.g., "session list")
+	// by splitting into base command and prepending extra parts to args
+	cmdParts := strings.Fields(cmd)
+	if len(cmdParts) > 1 {
+		cmd = cmdParts[0]
+		args = append(cmdParts[1:], args...)
+	}
+
 	switch cmd {
 	case "help":
 		return m.cmdHelp()
@@ -527,6 +593,34 @@ func (m *MaestroModel) handleCommand(cmd string, args []string) tea.Cmd {
 		m.messages = []Message{}
 		m.addMessage("assistant", "Conversation cleared.")
 		return nil
+	case "session":
+		if len(args) == 0 {
+			return func() tea.Msg {
+				return ErrorMsg{Error: fmt.Errorf("usage: /session <new|switch|list> [name]")}
+			}
+		}
+		switch args[0] {
+		case "new":
+			// Name is optional - will auto-generate if not provided
+			name := ""
+			if len(args) >= 2 {
+				name = args[1]
+			}
+			return m.cmdSessionNew(name)
+		case "switch":
+			if len(args) < 2 {
+				return func() tea.Msg {
+					return ErrorMsg{Error: fmt.Errorf("usage: /session switch <name>")}
+				}
+			}
+			return m.cmdSessionSwitch(args[1])
+		case "list":
+			return m.cmdSessionList()
+		default:
+			return func() tea.Msg {
+				return ErrorMsg{Error: fmt.Errorf("unknown session subcommand: %s", args[0])}
+			}
+		}
 	default:
 		return func() tea.Msg {
 			return ErrorMsg{Error: fmt.Errorf("unknown command: /%s", cmd)}
@@ -564,21 +658,31 @@ func (m *MaestroModel) handleQuestion(question string) tea.Cmd {
 // Command implementations
 
 func (m *MaestroModel) cmdHelp() tea.Cmd {
-	help := `Available commands:
-  /help              Show this help message
-  /review <PR#>      Review a pull request
-  /ask <question>    Ask a question about the repository
-  /claude <prompt>   Send prompt to Claude CLI subagent
-  /gemini <prompt>   Send prompt to Gemini CLI subagent
-  /gemini search <q> Search the web with Gemini
-  /clear             Clear the conversation
-  /exit, /quit       Exit Maestro
+	currentSession := "unknown"
+	if m.backend != nil {
+		currentSession = m.backend.GetCurrentSession()
+	}
+
+	help := fmt.Sprintf(`Available commands:
+  /help                  Show this help message
+  /review <PR#>          Review a pull request
+  /ask <question>        Ask a question about the repository
+  /claude <prompt>       Send prompt to Claude CLI subagent
+  /gemini <prompt>       Send prompt to Gemini CLI subagent
+  /gemini search <q>     Search the web with Gemini
+  /session new [name]    Create a new session (auto-generates name if omitted)
+  /session switch <name> Switch to an existing session
+  /session list          List all available sessions
+  /clear                 Clear the conversation
+  /exit, /quit           Exit Maestro
+
+Current session: %s
 
 Keyboard shortcuts:
-  Ctrl+P             Open command palette
-  Ctrl+C             Exit
-  Up/Down            Scroll conversation
-  Enter              Submit input`
+  Ctrl+P                 Open command palette
+  Ctrl+C                 Exit
+  Up/Down                Scroll conversation
+  Enter                  Submit input`, currentSession)
 
 	return func() tea.Msg {
 		return ResponseMsg{Content: help}
@@ -721,6 +825,81 @@ func (m *MaestroModel) cmdGemini(prompt string, taskType string) tea.Cmd {
 	return tea.Batch(startCmd, geminiCmd)
 }
 
+func (m *MaestroModel) cmdSessionNew(name string) tea.Cmd {
+	startCmd := m.progressModel.Start("Creating session...")
+	prog := m.program
+
+	createCmd := func() tea.Msg {
+		if m.backend == nil {
+			prog.Send(ProgressMsg{Status: ""})
+			return ErrorMsg{Error: fmt.Errorf("backend not ready")}
+		}
+
+		err := m.backend.CreateSession(m.ctx, name)
+		prog.Send(ProgressMsg{Status: ""})
+		if err != nil {
+			return ErrorMsg{Error: err}
+		}
+		// Get the actual session name (may have been auto-generated)
+		actualName := m.backend.GetCurrentSession()
+		return ResponseMsg{Content: fmt.Sprintf("Created and switched to session: %s", actualName)}
+	}
+
+	return tea.Batch(startCmd, createCmd)
+}
+
+func (m *MaestroModel) cmdSessionSwitch(name string) tea.Cmd {
+	startCmd := m.progressModel.Start("Switching session...")
+	prog := m.program
+
+	switchCmd := func() tea.Msg {
+		if m.backend == nil {
+			prog.Send(ProgressMsg{Status: ""})
+			return ErrorMsg{Error: fmt.Errorf("backend not ready")}
+		}
+
+		err := m.backend.SwitchSession(m.ctx, name)
+		prog.Send(ProgressMsg{Status: ""})
+		if err != nil {
+			return ErrorMsg{Error: err}
+		}
+		return ResponseMsg{Content: fmt.Sprintf("Switched to session: %s", name)}
+	}
+
+	return tea.Batch(startCmd, switchCmd)
+}
+
+// SessionPickerMsg is sent when sessions are loaded for the picker.
+type SessionPickerMsg struct {
+	Sessions []SessionInfo
+}
+
+func (m *MaestroModel) cmdSessionList() tea.Cmd {
+	startCmd := m.progressModel.Start("Loading sessions...")
+	prog := m.program
+
+	listCmd := func() tea.Msg {
+		if m.backend == nil {
+			prog.Send(ProgressMsg{Status: ""})
+			return ErrorMsg{Error: fmt.Errorf("backend not ready")}
+		}
+
+		sessions, err := m.backend.ListSessions(m.ctx)
+		prog.Send(ProgressMsg{Status: ""})
+		if err != nil {
+			return ErrorMsg{Error: err}
+		}
+
+		if len(sessions) == 0 {
+			return ResponseMsg{Content: "No sessions found."}
+		}
+
+		return SessionPickerMsg{Sessions: sessions}
+	}
+
+	return tea.Batch(startCmd, listCmd)
+}
+
 // registerCommands sets up command palette commands.
 func (m *MaestroModel) registerCommands() {
 	// Commands are already registered in NewCommandPalette
@@ -790,7 +969,66 @@ func (m *MaestroModel) renderMessages() {
 		sb.WriteString(m.renderInlineReview())
 	}
 
+	// Add session picker if in session picker mode
+	if m.mode == ModeSessionPicker && len(m.sessionPickerSessions) > 0 {
+		sb.WriteString(m.renderSessionPicker())
+	}
+
 	m.viewport.SetContent(sb.String())
+}
+
+// renderSessionPicker renders the interactive session selector.
+func (m *MaestroModel) renderSessionPicker() string {
+	var sb strings.Builder
+
+	// Header
+	header := lipgloss.NewStyle().
+		Foreground(m.theme.Accent).
+		Bold(true).
+		Render("Select a session")
+	hint := lipgloss.NewStyle().
+		Foreground(m.theme.TextMuted).
+		Render(" (↑/↓ navigate, enter select, esc cancel)")
+	sb.WriteString(header + hint + "\n\n")
+
+	// Session list
+	for i, session := range m.sessionPickerSessions {
+		isSelected := i == m.sessionPickerIdx
+
+		// Selection indicator
+		indicator := "  "
+		if isSelected {
+			indicator = lipgloss.NewStyle().
+				Foreground(m.theme.Accent).
+				Bold(true).
+				Render("> ")
+		}
+
+		// Current session marker
+		currentMarker := ""
+		if session.IsCurrent {
+			currentMarker = lipgloss.NewStyle().
+				Foreground(m.theme.StatusHighlight).
+				Render(" (current)")
+		}
+
+		// Session name
+		nameStyle := lipgloss.NewStyle().Foreground(m.theme.TextSecondary)
+		if isSelected {
+			nameStyle = lipgloss.NewStyle().
+				Foreground(m.theme.TextPrimary).
+				Bold(true)
+		}
+		name := nameStyle.Render(session.Name)
+
+		// Created date
+		dateStyle := lipgloss.NewStyle().Foreground(m.theme.TextMuted)
+		date := dateStyle.Render(fmt.Sprintf(" (%s)", session.CreatedAt))
+
+		sb.WriteString(indicator + name + currentMarker + date + "\n")
+	}
+
+	return sb.String()
 }
 
 // renderInlineReview renders review comments inline in the conversation.

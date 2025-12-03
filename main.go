@@ -818,6 +818,36 @@ func (a *TUIServiceAdapter) Gemini(ctx context.Context, prompt string, taskType 
 	return response.Answer, nil
 }
 
+func (a *TUIServiceAdapter) CreateSession(ctx context.Context, name string) error {
+	return a.service.CreateSession(ctx, name)
+}
+
+func (a *TUIServiceAdapter) SwitchSession(ctx context.Context, name string) error {
+	return a.service.SwitchSession(ctx, name)
+}
+
+func (a *TUIServiceAdapter) ListSessions(ctx context.Context) ([]terminal.SessionInfo, error) {
+	sessions, err := a.service.ListSessions(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	currentSession := a.service.GetCurrentSession()
+	result := make([]terminal.SessionInfo, len(sessions))
+	for i, s := range sessions {
+		result[i] = terminal.SessionInfo{
+			Name:      s.ID,
+			CreatedAt: s.CreatedAt.Format("2006-01-02 15:04:05"),
+			IsCurrent: s.ID == currentSession,
+		}
+	}
+	return result, nil
+}
+
+func (a *TUIServiceAdapter) GetCurrentSession() string {
+	return a.service.GetCurrentSession()
+}
+
 func runModernUI(cfg *config) error {
 	ctx := core.WithExecutionState(context.Background())
 

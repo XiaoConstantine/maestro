@@ -96,6 +96,7 @@ func getBuiltinCommands() []Command {
 		{Name: "ask", Description: "Ask a question about the repository", Category: "Maestro"},
 		{Name: "claude", Description: "Send prompt to Claude Sonnet 4.5", Category: "Subagent"},
 		{Name: "gemini", Description: "Send prompt to Gemini 3 Pro", Category: "Subagent"},
+		{Name: "session", Description: "Manage sessions (new/switch/list)", Category: "Session"},
 		{Name: "clear", Description: "Clear the conversation", Category: "System"},
 		{Name: "exit", Description: "Exit Maestro", Category: "System"},
 		{Name: "quit", Description: "Exit Maestro", Category: "System"},

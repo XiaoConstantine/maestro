@@ -2,10 +2,13 @@ package orchestration
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"github.com/XiaoConstantine/dspy-go/pkg/agents"
 	"github.com/XiaoConstantine/dspy-go/pkg/logging"
@@ -14,6 +17,29 @@ import (
 	"github.com/briandowns/spinner"
 	gh "github.com/google/go-github/v68/github"
 )
+
+// generateSessionName creates a unique session name based on datetime, pwd, and random bits.
+func generateSessionName() string {
+	// Get current datetime
+	now := time.Now().Format("20060102-150405")
+
+	// Get current working directory basename
+	pwd, err := os.Getwd()
+	if err != nil {
+		pwd = "unknown"
+	} else {
+		pwd = filepath.Base(pwd)
+	}
+
+	// Generate random bits
+	randomBytes := make([]byte, 4)
+	if _, err := rand.Read(randomBytes); err != nil {
+		randomBytes = []byte{0, 0, 0, 0}
+	}
+	randomHex := hex.EncodeToString(randomBytes)
+
+	return fmt.Sprintf("%s-%s-%s", now, pwd, randomHex)
+}
 
 type MemoryType int
 
@@ -67,6 +93,7 @@ type MaestroService struct {
 	sessionManager *subagent.SessionManager
 	claudeProc     *subagent.ClaudeProcessor
 	geminiProc     *subagent.GeminiProcessor
+	currentSession string
 
 	mu          sync.RWMutex
 	initialized bool
@@ -111,11 +138,12 @@ func NewMaestroService(ctx context.Context, config *ServiceConfig, githubTools t
 		logger.Warn(ctx, "Failed to create session manager: %v", err)
 	}
 
-	// Create default session for subagents
+	// Create session for subagents with unique name
 	var claudeProc *subagent.ClaudeProcessor
 	var geminiProc *subagent.GeminiProcessor
+	sessionName := generateSessionName()
 	if sessionManager != nil {
-		defaultSession, err := sessionManager.GetOrCreateSession(ctx, "default", map[string]interface{}{
+		defaultSession, err := sessionManager.GetOrCreateSession(ctx, sessionName, map[string]interface{}{
 			"owner":   config.Owner,
 			"repo":    config.Repo,
 			"purpose": "Maestro CLI subagent communication",
@@ -144,6 +172,7 @@ func NewMaestroService(ctx context.Context, config *ServiceConfig, githubTools t
 		sessionManager: sessionManager,
 		claudeProc:     claudeProc,
 		geminiProc:     geminiProc,
+		currentSession: sessionName,
 		initialized:    true,
 	}, nil
 }
@@ -332,6 +361,105 @@ func (s *MaestroService) Shutdown(ctx context.Context) error {
 
 func (s *MaestroService) SetReviewAgent(agent types.ReviewAgent) {
 	s.pool.SetReviewAgent(agent)
+}
+
+// Session management methods
+
+// CreateSession creates a new session and switches to it.
+// If name is empty, a unique name will be auto-generated.
+func (s *MaestroService) CreateSession(ctx context.Context, name string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.sessionManager == nil {
+		return fmt.Errorf("session manager not initialized")
+	}
+
+	// Auto-generate name if not provided
+	if name == "" {
+		name = generateSessionName()
+	}
+
+	initialContext := map[string]interface{}{
+		"owner":   s.config.Owner,
+		"repo":    s.config.Repo,
+		"purpose": fmt.Sprintf("Maestro session: %s", name),
+	}
+
+	session, err := s.sessionManager.CreateSession(ctx, name, initialContext)
+	if err != nil {
+		return fmt.Errorf("failed to create session: %w", err)
+	}
+
+	// Reinitialize processors with new session
+	if err := s.switchToSession(ctx, session.Dir); err != nil {
+		return err
+	}
+
+	s.currentSession = name
+	s.logger.Info(ctx, "Created and switched to session: %s", name)
+	return nil
+}
+
+// SwitchSession switches to an existing session.
+func (s *MaestroService) SwitchSession(ctx context.Context, name string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.sessionManager == nil {
+		return fmt.Errorf("session manager not initialized")
+	}
+
+	session, err := s.sessionManager.GetSession(name)
+	if err != nil {
+		return fmt.Errorf("session not found: %s", name)
+	}
+
+	if err := s.switchToSession(ctx, session.Dir); err != nil {
+		return err
+	}
+
+	s.currentSession = name
+	s.logger.Info(ctx, "Switched to session: %s", name)
+	return nil
+}
+
+// switchToSession reinitializes processors for a session directory.
+func (s *MaestroService) switchToSession(ctx context.Context, sessionDir string) error {
+	// Try to create Claude processor
+	claudeProc, err := subagent.NewClaudeProcessor(s.logger, sessionDir, "")
+	if err != nil {
+		s.logger.Info(ctx, "Claude subagent not available: %v", err)
+	}
+	s.claudeProc = claudeProc
+
+	// Try to create Gemini processor
+	geminiProc, err := subagent.NewGeminiProcessor(s.logger, sessionDir, "")
+	if err != nil {
+		s.logger.Info(ctx, "Gemini subagent not available: %v", err)
+	}
+	s.geminiProc = geminiProc
+
+	return nil
+}
+
+// ListSessions returns all available sessions.
+func (s *MaestroService) ListSessions(ctx context.Context) ([]subagent.Session, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if s.sessionManager == nil {
+		return nil, fmt.Errorf("session manager not initialized")
+	}
+
+	return s.sessionManager.ListSessions()
+}
+
+// GetCurrentSession returns the name of the current session.
+func (s *MaestroService) GetCurrentSession() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.currentSession
 }
 
 type serviceProgressConsole struct {

@@ -22,6 +22,26 @@ type MaestroBackend interface {
 
 	// IsReady returns true if the backend is initialized and ready.
 	IsReady() bool
+
+	// Session management
+	// CreateSession creates a new session with the given name.
+	CreateSession(ctx context.Context, name string) error
+
+	// SwitchSession switches to an existing session.
+	SwitchSession(ctx context.Context, name string) error
+
+	// ListSessions returns all available sessions.
+	ListSessions(ctx context.Context) ([]SessionInfo, error)
+
+	// GetCurrentSession returns the current session name.
+	GetCurrentSession() string
+}
+
+// SessionInfo contains metadata about a session.
+type SessionInfo struct {
+	Name      string
+	CreatedAt string
+	IsCurrent bool
 }
 
 // RepoInfo contains repository metadata.
@@ -82,4 +102,20 @@ func (b *NoOpBackend) GetRepoInfo() RepoInfo {
 
 func (b *NoOpBackend) IsReady() bool {
 	return false
+}
+
+func (b *NoOpBackend) CreateSession(ctx context.Context, name string) error {
+	return nil
+}
+
+func (b *NoOpBackend) SwitchSession(ctx context.Context, name string) error {
+	return nil
+}
+
+func (b *NoOpBackend) ListSessions(ctx context.Context) ([]SessionInfo, error) {
+	return nil, nil
+}
+
+func (b *NoOpBackend) GetCurrentSession() string {
+	return "default"
 }

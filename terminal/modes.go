@@ -10,6 +10,8 @@ const (
 	ModeReview
 	// ModeDashboard is the full IDE-like dashboard mode.
 	ModeDashboard
+	// ModeSessionPicker is for selecting sessions with arrow keys.
+	ModeSessionPicker
 )
 
 // InputFocus represents which area has keyboard focus in input mode.
@@ -31,6 +33,8 @@ func (m MaestroMode) String() string {
 		return "REVIEW"
 	case ModeDashboard:
 		return "DASHBOARD"
+	case ModeSessionPicker:
+		return "SESSION"
 	default:
 		return "UNKNOWN"
 	}

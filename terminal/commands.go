@@ -138,44 +138,26 @@ func (cp *CommandPaletteModel) registerDefaultCommands() {
 		Category:    "Tools",
 	})
 
-	// Sessions and coordination
+	// Session management
 	cp.RegisterCommand(Command{
-		Name:        "sessions",
-		Aliases:     []string{"/sessions"},
-		Description: "Manage Claude sessions",
-		Category:    "Sessions",
+		Name:        "session new",
+		Aliases:     []string{"/session new"},
+		Description: "Create a new session (auto-generates name if not provided)",
+		Category:    "Session",
+		Args:        []CommandArg{{Name: "name", Description: "Session name (optional)", Required: false}},
 	})
 	cp.RegisterCommand(Command{
-		Name:        "dashboard",
-		Aliases:     []string{"/dashboard"},
-		Description: "Show sessions dashboard",
-		Category:    "Sessions",
+		Name:        "session switch",
+		Aliases:     []string{"/session switch"},
+		Description: "Switch to an existing session",
+		Category:    "Session",
+		Args:        []CommandArg{{Name: "name", Description: "Session name", Required: true}},
 	})
 	cp.RegisterCommand(Command{
-		Name:        "coordinate",
-		Aliases:     []string{"/coordinate"},
-		Description: "Coordinate multi-session tasks",
-		Category:    "Sessions",
-		Args:        []CommandArg{{Name: "task", Description: "Task description", Required: true}},
-	})
-	cp.RegisterCommand(Command{
-		Name:        "switch",
-		Aliases:     []string{"/switch"},
-		Description: "Switch between sessions",
-		Category:    "Sessions",
-		Args:        []CommandArg{{Name: "session", Description: "Name or ID", Required: true}},
-	})
-	cp.RegisterCommand(Command{
-		Name:        "enter",
-		Aliases:     []string{"/enter"},
-		Description: "Enter interactive mode with a session",
-		Category:    "Sessions",
-	})
-	cp.RegisterCommand(Command{
-		Name:        "list",
-		Aliases:     []string{"/list"},
-		Description: "List available sessions",
-		Category:    "Sessions",
+		Name:        "session list",
+		Aliases:     []string{"/session list"},
+		Description: "List all available sessions",
+		Category:    "Session",
 	})
 }
 
