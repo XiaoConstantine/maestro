@@ -105,18 +105,24 @@ func (cp *CommandPaletteModel) registerDefaultCommands() {
 		},
 	})
 
-	// Tool CLIs
+	// Subagents
 	cp.RegisterCommand(Command{
 		Name:        "claude",
 		Aliases:     []string{"/claude"},
-		Description: "Interact with Claude Code CLI",
-		Category:    "Tools",
+		Description: "Send prompt to Claude Sonnet 4.5",
+		Category:    "Subagent",
+		Args: []CommandArg{
+			{Name: "prompt", Description: "Prompt text", Required: true},
+		},
 	})
 	cp.RegisterCommand(Command{
 		Name:        "gemini",
 		Aliases:     []string{"/gemini"},
-		Description: "Interact with Gemini CLI",
-		Category:    "Tools",
+		Description: "Send prompt to Gemini 3 Pro",
+		Category:    "Subagent",
+		Args: []CommandArg{
+			{Name: "prompt", Description: "Prompt text", Required: true},
+		},
 	})
 	// Tools management as multi-word commands (to match `tools setup|status`)
 	cp.RegisterCommand(Command{

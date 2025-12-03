@@ -30,11 +30,16 @@ Maestro is an intelligent code review assistant built with DSPy-Go that provides
 │  │  │   PRReviewAgent     │              │   UnifiedReActAgent (QA)    │   │   │
 │  │  │   (persistent)      │              │   (persistent, shared mem)  │   │   │
 │  │  └─────────────────────┘              └─────────────────────────────┘   │   │
+│  │                                                                          │   │
+│  │  ┌─────────────────────┐              ┌─────────────────────────────┐   │   │
+│  │  │   ClaudeProcessor   │              │   GeminiProcessor           │   │   │
+│  │  │   (Sonnet 4.5)      │              │   (Gemini 3 Pro Preview)    │   │   │
+│  │  └─────────────────────┘              └─────────────────────────────┘   │   │
 │  └─────────────────────────────────────────────────────────────────────────┘   │
 │                                     │                                           │
 │  ┌──────────────────────────────────┴───────────────────────────────────────┐  │
 │  │                      ProcessRequest Router                                │  │
-│  │         /review → ReviewAgent        /ask → QAAgent (ReAct)              │  │
+│  │   /review → ReviewAgent    /ask → QAAgent    /claude    /gemini          │  │
 │  └──────────────────────────────────────────────────────────────────────────┘  │
 └─────────────────────────────────────────────────────────────────────────────────┘
                                       │
@@ -115,7 +120,8 @@ Maestro is an intelligent code review assistant built with DSPy-Go that provides
 - **MaestroService**: Singleton service created once per session for unified request handling
 - **Persistent Agents**: Agent pool maintains persistent agents across requests (no ad-hoc creation)
 - **Shared Memory**: Configurable memory backend (InMemory or SQLite) shared across agents
-- **Request Routing**: Single entry point (`ProcessRequest`) routes `/review` and `/ask` commands
+- **Request Routing**: Single entry point (`ProcessRequest`) routes `/review`, `/ask`, `/claude`, and `/gemini` commands
+- **Multi-Model Subagents**: Claude (Sonnet 4.5) and Gemini (3 Pro Preview) available as subagents with file-based context sharing
 
 ### **Flexible Model Support**
 - **Multiple Backends**: Anthropic Claude, Google Gemini, Local models (Ollama, LLaMA.cpp)
@@ -214,6 +220,8 @@ export MAESTRO_RAG_DEBUG_ENABLED=true
 ```bash
 MAESTRO_GITHUB_TOKEN=your_token          # GitHub API access
 MAESTRO_LOG_LEVEL=debug                  # Logging level (debug, info, warn, error)
+ANTHROPIC_API_KEY=your_key               # For /claude subagent (Claude Sonnet 4.5)
+GOOGLE_API_KEY=your_key                  # For /gemini subagent (Gemini 3 Pro Preview)
 ```
 
 #### **Enhanced Processing (Phase 4.1)**
@@ -263,6 +271,8 @@ MAESTRO_CONSENSUS_VALIDATION=true        # Consensus validation
 - `/help`: Show available commands
 - `/review <pr>`: Review a pull request
 - `/ask <question>`: Ask questions about the repository (uses ReAct agent)
+- `/claude <prompt>`: Send prompt to Claude Sonnet 4.5 subagent
+- `/gemini <prompt>`: Send prompt to Gemini 3 Pro Preview subagent
 - `/clear`: Clear conversation history
 - `/exit`, `/quit`: Exit the TUI
 
@@ -316,11 +326,12 @@ MAESTRO_CONSENSUS_VALIDATION=true        # Consensus validation
 
 ### **Current Scale**
 - **Codebase**: 27,000+ lines across 17 internal packages
-- **Dependencies**: DSPy-Go v0.65.1, SQLite-vec, GitHub API v68
+- **Dependencies**: DSPy-Go v0.66.0, SQLite-vec, GitHub API v68
 - **Processing**: Handles 300+ chunks per PR with file-level aggregation
 - **Performance**: ~500ms average per chunk with parallel processing
 
 ### **Recent Improvements**
+- **Multi-Model Subagents**: `/claude` (Sonnet 4.5) and `/gemini` (Gemini 3 Pro Preview) commands with file-based context sharing
 - **Unified Architecture**: MaestroService singleton with persistent AgentPool
 - **TUI v2**: Modern Bubbletea v2 interface with Vim keybindings and multi-mode support
 - **Sgrep Integration**: Semantic code search for intelligent code understanding

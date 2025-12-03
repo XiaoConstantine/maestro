@@ -4,10 +4,12 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sync"
 
 	"github.com/XiaoConstantine/dspy-go/pkg/agents"
 	"github.com/XiaoConstantine/dspy-go/pkg/logging"
+	"github.com/XiaoConstantine/maestro/internal/subagent"
 	"github.com/XiaoConstantine/maestro/internal/types"
 	"github.com/briandowns/spinner"
 	gh "github.com/google/go-github/v68/github"
@@ -25,6 +27,8 @@ type RequestType string
 const (
 	RequestReview RequestType = "review"
 	RequestAsk    RequestType = "ask"
+	RequestClaude RequestType = "claude"
+	RequestGemini RequestType = "gemini"
 )
 
 type ServiceConfig struct {
@@ -41,6 +45,8 @@ type Request struct {
 	Type       RequestType
 	PRNumber   int
 	Question   string
+	Prompt     string // For Claude/Gemini requests
+	TaskType   string // e.g., "search", "generate", "review"
 	Context    map[string]interface{}
 	OnProgress func(status string)
 }
@@ -53,11 +59,14 @@ type Response struct {
 }
 
 type MaestroService struct {
-	pool        *AgentPool
-	memory      agents.Memory
-	githubTools types.GitHubInterface
-	config      *ServiceConfig
-	logger      *logging.Logger
+	pool           *AgentPool
+	memory         agents.Memory
+	githubTools    types.GitHubInterface
+	config         *ServiceConfig
+	logger         *logging.Logger
+	sessionManager *subagent.SessionManager
+	claudeProc     *subagent.ClaudeProcessor
+	geminiProc     *subagent.GeminiProcessor
 
 	mu          sync.RWMutex
 	initialized bool
@@ -84,13 +93,58 @@ func NewMaestroService(ctx context.Context, config *ServiceConfig, githubTools t
 
 	pool := NewAgentPool(config, memory, githubTools, logger)
 
+	// Setup session directory for subagent context sharing
+	// MemoryPath is typically a .db file, so use its parent directory
+	var sessionDir string
+	if config.MemoryPath != "" {
+		sessionDir = filepath.Join(filepath.Dir(config.MemoryPath), "sessions")
+	} else {
+		homeDir, err := os.UserHomeDir()
+		if err != nil {
+			homeDir = os.TempDir()
+		}
+		sessionDir = filepath.Join(homeDir, ".maestro", "sessions")
+	}
+
+	sessionManager, err := subagent.NewSessionManager(sessionDir, logger)
+	if err != nil {
+		logger.Warn(ctx, "Failed to create session manager: %v", err)
+	}
+
+	// Create default session for subagents
+	var claudeProc *subagent.ClaudeProcessor
+	var geminiProc *subagent.GeminiProcessor
+	if sessionManager != nil {
+		defaultSession, err := sessionManager.GetOrCreateSession(ctx, "default", map[string]interface{}{
+			"owner":   config.Owner,
+			"repo":    config.Repo,
+			"purpose": "Maestro CLI subagent communication",
+		})
+		if err == nil {
+			// Initialize Claude processor (uses ANTHROPIC_API_KEY env var)
+			claudeProc, err = subagent.NewClaudeProcessor(logger, defaultSession.Dir, "")
+			if err != nil {
+				logger.Info(ctx, "Claude subagent not available: %v", err)
+			}
+
+			// Initialize Gemini processor (uses GOOGLE_API_KEY or GEMINI_API_KEY env var)
+			geminiProc, err = subagent.NewGeminiProcessor(logger, defaultSession.Dir, "")
+			if err != nil {
+				logger.Info(ctx, "Gemini subagent not available: %v", err)
+			}
+		}
+	}
+
 	return &MaestroService{
-		pool:        pool,
-		memory:      memory,
-		githubTools: githubTools,
-		config:      config,
-		logger:      logger,
-		initialized: true,
+		pool:           pool,
+		memory:         memory,
+		githubTools:    githubTools,
+		config:         config,
+		logger:         logger,
+		sessionManager: sessionManager,
+		claudeProc:     claudeProc,
+		geminiProc:     geminiProc,
+		initialized:    true,
 	}, nil
 }
 
@@ -100,6 +154,10 @@ func (s *MaestroService) ProcessRequest(ctx context.Context, request Request) (*
 		return s.handleReview(ctx, request)
 	case RequestAsk:
 		return s.handleAsk(ctx, request)
+	case RequestClaude:
+		return s.handleClaude(ctx, request)
+	case RequestGemini:
+		return s.handleGemini(ctx, request)
 	default:
 		return nil, fmt.Errorf("unknown request type: %s", request.Type)
 	}
@@ -168,6 +226,97 @@ func (s *MaestroService) handleAsk(ctx context.Context, request Request) (*Respo
 			"sources":    sources,
 		},
 	}, nil
+}
+
+func (s *MaestroService) handleClaude(ctx context.Context, request Request) (*Response, error) {
+	if s.claudeProc == nil {
+		return nil, fmt.Errorf("claude processor not initialized")
+	}
+
+	// Build task context
+	taskContext := s.buildTaskContext(ctx)
+	if request.Context != nil {
+		for k, v := range request.Context {
+			taskContext[k] = v
+		}
+	}
+
+	task := agents.Task{
+		ID:            fmt.Sprintf("claude-%d", ctx.Value("request_id")),
+		Type:          "claude",
+		ProcessorType: "claude",
+		Metadata: map[string]interface{}{
+			"prompt": request.Prompt,
+			"type":   request.TaskType,
+		},
+	}
+
+	result, err := s.claudeProc.Process(ctx, task, taskContext)
+	if err != nil {
+		return nil, fmt.Errorf("claude processing failed: %w", err)
+	}
+
+	resultMap, _ := result.(map[string]interface{})
+	response, _ := resultMap["response"].(string)
+
+	return &Response{
+		Type:     RequestClaude,
+		Answer:   response,
+		Metadata: resultMap,
+	}, nil
+}
+
+func (s *MaestroService) handleGemini(ctx context.Context, request Request) (*Response, error) {
+	if s.geminiProc == nil {
+		return nil, fmt.Errorf("gemini processor not initialized")
+	}
+
+	taskContext := s.buildTaskContext(ctx)
+	if request.Context != nil {
+		for k, v := range request.Context {
+			taskContext[k] = v
+		}
+	}
+
+	task := agents.Task{
+		ID:            fmt.Sprintf("gemini-%d", ctx.Value("request_id")),
+		Type:          "gemini",
+		ProcessorType: "gemini",
+		Metadata: map[string]interface{}{
+			"prompt": request.Prompt,
+			"type":   request.TaskType,
+		},
+	}
+
+	result, err := s.geminiProc.Process(ctx, task, taskContext)
+	if err != nil {
+		return nil, fmt.Errorf("gemini processing failed: %w", err)
+	}
+
+	resultMap, _ := result.(map[string]interface{})
+	response, _ := resultMap["response"].(string)
+
+	return &Response{
+		Type:     RequestGemini,
+		Answer:   response,
+		Metadata: resultMap,
+	}, nil
+}
+
+func (s *MaestroService) buildTaskContext(ctx context.Context) map[string]interface{} {
+	taskContext := map[string]interface{}{
+		"owner": s.config.Owner,
+		"repo":  s.config.Repo,
+	}
+
+	// Try to get repo path from review agent
+	if reviewAgent, err := s.pool.GetReviewAgent(ctx); err == nil {
+		if repoPath := reviewAgent.ClonedRepoPath(); repoPath != "" {
+			taskContext["repo_path"] = repoPath
+		}
+	}
+
+	return taskContext
 }
 
 func (s *MaestroService) IsReady() bool {

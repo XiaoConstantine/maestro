@@ -94,6 +94,8 @@ func getBuiltinCommands() []Command {
 		{Name: "help", Description: "Show available commands", Category: "Help"},
 		{Name: "review", Description: "Review a pull request", Category: "GitHub"},
 		{Name: "ask", Description: "Ask a question about the repository", Category: "Maestro"},
+		{Name: "claude", Description: "Send prompt to Claude Sonnet 4.5", Category: "Subagent"},
+		{Name: "gemini", Description: "Send prompt to Gemini 3 Pro", Category: "Subagent"},
 		{Name: "clear", Description: "Clear the conversation", Category: "System"},
 		{Name: "exit", Description: "Exit Maestro", Category: "System"},
 		{Name: "quit", Description: "Exit Maestro", Category: "System"},

@@ -491,6 +491,27 @@ func (m *MaestroModel) handleCommand(cmd string, args []string) tea.Cmd {
 			}
 		}
 		return m.cmdAsk(strings.Join(args, " "))
+	case "claude":
+		if len(args) == 0 {
+			return func() tea.Msg {
+				return ErrorMsg{Error: fmt.Errorf("usage: /claude <prompt>")}
+			}
+		}
+		return m.cmdClaude(strings.Join(args, " "))
+	case "gemini":
+		if len(args) == 0 {
+			return func() tea.Msg {
+				return ErrorMsg{Error: fmt.Errorf("usage: /gemini <prompt> or /gemini search <query>")}
+			}
+		}
+		// Check if first arg is a task type
+		taskType := ""
+		prompt := strings.Join(args, " ")
+		if args[0] == "search" && len(args) > 1 {
+			taskType = "search"
+			prompt = strings.Join(args[1:], " ")
+		}
+		return m.cmdGemini(prompt, taskType)
 	case "exit", "quit":
 		return tea.Quit
 	case "clear":
@@ -538,6 +559,9 @@ func (m *MaestroModel) cmdHelp() tea.Cmd {
   /help              Show this help message
   /review <PR#>      Review a pull request
   /ask <question>    Ask a question about the repository
+  /claude <prompt>   Send prompt to Claude CLI subagent
+  /gemini <prompt>   Send prompt to Gemini CLI subagent
+  /gemini search <q> Search the web with Gemini
   /clear             Clear the conversation
   /exit, /quit       Exit Maestro
 
@@ -640,6 +664,52 @@ func (m *MaestroModel) cmdAsk(question string) tea.Cmd {
 	}
 
 	return tea.Batch(startCmd, askCmd)
+}
+
+func (m *MaestroModel) cmdClaude(prompt string) tea.Cmd {
+	startCmd := m.progressModel.Start("Asking Claude...")
+	prog := m.program
+
+	claudeCmd := func() tea.Msg {
+		if m.backend == nil || !m.backend.IsReady() {
+			prog.Send(ProgressMsg{Status: ""})
+			return ResponseMsg{Content: "Backend not ready."}
+		}
+
+		response, err := m.backend.Claude(m.ctx, prompt)
+		prog.Send(ProgressMsg{Status: ""})
+		if err != nil {
+			return ErrorMsg{Error: err}
+		}
+		return ResponseMsg{Content: response}
+	}
+
+	return tea.Batch(startCmd, claudeCmd)
+}
+
+func (m *MaestroModel) cmdGemini(prompt string, taskType string) tea.Cmd {
+	msg := "Asking Gemini..."
+	if taskType == "search" {
+		msg = "Searching with Gemini..."
+	}
+	startCmd := m.progressModel.Start(msg)
+	prog := m.program
+
+	geminiCmd := func() tea.Msg {
+		if m.backend == nil || !m.backend.IsReady() {
+			prog.Send(ProgressMsg{Status: ""})
+			return ResponseMsg{Content: "Backend not ready."}
+		}
+
+		response, err := m.backend.Gemini(m.ctx, prompt, taskType)
+		prog.Send(ProgressMsg{Status: ""})
+		if err != nil {
+			return ErrorMsg{Error: err}
+		}
+		return ResponseMsg{Content: response}
+	}
+
+	return tea.Batch(startCmd, geminiCmd)
 }
 
 // registerCommands sets up command palette commands.

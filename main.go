@@ -653,6 +653,16 @@ func (a *TUIBackendAdapter) IsReady() bool {
 	return a.agent != nil
 }
 
+// Claude implements terminal.MaestroBackend (not supported in legacy adapter).
+func (a *TUIBackendAdapter) Claude(ctx context.Context, prompt string) (string, error) {
+	return "", fmt.Errorf("claude CLI not available in legacy mode - use TUI service adapter")
+}
+
+// Gemini implements terminal.MaestroBackend (not supported in legacy adapter).
+func (a *TUIBackendAdapter) Gemini(ctx context.Context, prompt string, taskType string) (string, error) {
+	return "", fmt.Errorf("gemini CLI not available in legacy mode - use TUI service adapter")
+}
+
 // tuiProgressConsole adapts progress callbacks to ConsoleInterface.
 type tuiProgressConsole struct {
 	onProgress func(status string)
@@ -783,6 +793,29 @@ func (a *TUIServiceAdapter) GetRepoInfo() terminal.RepoInfo {
 
 func (a *TUIServiceAdapter) IsReady() bool {
 	return a.service != nil && a.service.IsReady()
+}
+
+func (a *TUIServiceAdapter) Claude(ctx context.Context, prompt string) (string, error) {
+	response, err := a.service.ProcessRequest(ctx, orchestration.Request{
+		Type:   orchestration.RequestClaude,
+		Prompt: prompt,
+	})
+	if err != nil {
+		return "", err
+	}
+	return response.Answer, nil
+}
+
+func (a *TUIServiceAdapter) Gemini(ctx context.Context, prompt string, taskType string) (string, error) {
+	response, err := a.service.ProcessRequest(ctx, orchestration.Request{
+		Type:     orchestration.RequestGemini,
+		Prompt:   prompt,
+		TaskType: taskType,
+	})
+	if err != nil {
+		return "", err
+	}
+	return response.Answer, nil
 }
 
 func runModernUI(cfg *config) error {

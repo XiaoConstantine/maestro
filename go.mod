@@ -9,7 +9,7 @@ require (
 	charm.land/bubbletea/v2 v2.0.0-rc.2
 	charm.land/lipgloss/v2 v2.0.0-beta.3.0.20251106193318-19329a3e8410
 	github.com/AlecAivazis/survey/v2 v2.3.7
-	github.com/XiaoConstantine/dspy-go v0.65.1
+	github.com/XiaoConstantine/dspy-go v0.66.0
 	github.com/XiaoConstantine/mcp-go v0.3.1
 	github.com/XiaoConstantine/sgrep v0.5.2
 	github.com/asg017/sqlite-vec-go-bindings v0.1.6
@@ -65,7 +65,7 @@ require (
 )
 
 require (
-	github.com/XiaoConstantine/anthropic-go v0.0.8 // indirect
+	github.com/XiaoConstantine/anthropic-go v0.0.9 // indirect
 	github.com/fatih/color v1.7.0 // indirect
 	github.com/google/go-querystring v1.1.0 // indirect
 	github.com/mattn/go-colorable v0.1.7 // indirect
