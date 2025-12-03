@@ -206,10 +206,16 @@ func (cp *CommandPaletteModel) Update(msg tea.Msg) (CommandPaletteModel, tea.Cmd
 
 		case "enter":
 			if cp.selected >= 0 && cp.selected < len(cp.filteredCmds) {
-				// Execute selected command
 				cmd := cp.filteredCmds[cp.selected]
 				cp.addToHistory(cp.input.Value())
 				cp.Hide()
+				// If command has required args, insert into input for user to complete
+				if len(cmd.Args) > 0 && cmd.Args[0].Required {
+					return *cp, func() tea.Msg {
+						return InsertCommandMsg{Command: "/" + cmd.Name + " "}
+					}
+				}
+				// Otherwise execute directly
 				return *cp, cp.executeCommand(cmd)
 			}
 			// Try to parse and execute typed command
@@ -501,22 +507,24 @@ func (cp *CommandPaletteModel) parseAndExecute(input string) tea.Cmd {
 	return cp.executeCommandWithArgs(*matched, argMap)
 }
 
-// executeCommand executes a command.
+// executeCommand executes a command by sending it to handleCommand.
 func (cp *CommandPaletteModel) executeCommand(cmd Command) tea.Cmd {
-	return cp.executeCommandWithArgs(cmd, make(map[string]string))
+	return func() tea.Msg {
+		return ExecuteCommandMsg{Command: cmd.Name, Args: []string{}}
+	}
 }
 
 // executeCommandWithArgs executes a command with arguments.
 func (cp *CommandPaletteModel) executeCommandWithArgs(cmd Command, args map[string]string) tea.Cmd {
-	return func() tea.Msg {
-		if cmd.Handler != nil {
-			result, err := cmd.Handler(args)
-			if err != nil {
-				return CommandResultMsg{Error: err}
-			}
-			return CommandResultMsg{Result: result}
+	// Convert args map to slice for handleCommand
+	var argSlice []string
+	for _, arg := range cmd.Args {
+		if val, ok := args[arg.Name]; ok {
+			argSlice = append(argSlice, val)
 		}
-		return CommandResultMsg{Result: fmt.Sprintf("Executed: %s", cmd.Name)}
+	}
+	return func() tea.Msg {
+		return ExecuteCommandMsg{Command: cmd.Name, Args: argSlice}
 	}
 }
 
@@ -578,4 +586,15 @@ func (cp *CommandPaletteModel) SetHandler(name string, handler CommandHandler) {
 type CommandResultMsg struct {
 	Result string
 	Error  error
+}
+
+// ExecuteCommandMsg is sent when a command should be executed via handleCommand.
+type ExecuteCommandMsg struct {
+	Command string
+	Args    []string
+}
+
+// InsertCommandMsg is sent when a command should be inserted into the input field.
+type InsertCommandMsg struct {
+	Command string
 }

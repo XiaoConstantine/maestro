@@ -245,6 +245,15 @@ func (m *MaestroModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.addMessage("assistant", msg.Result)
 		}
 
+	case ExecuteCommandMsg:
+		// Execute command from palette via handleCommand
+		return m, m.handleCommand(msg.Command, msg.Args)
+
+	case InsertCommandMsg:
+		// Insert command into input field for user to complete with args
+		m.inputModel.SetValue(msg.Command)
+		m.inputModel.Focus()
+
 	case ResponseMsg:
 		// Handle async response from backend
 		m.addMessage("assistant", msg.Content)
