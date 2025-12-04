@@ -327,17 +327,28 @@ func runCLIWithoutBanner(cfg *config) error {
 	}
 
 	dbPath, err := util.CreateStoragePath(ctx, cfg.owner, cfg.repo)
-	// Check if we already have an index for this commit
 	if err != nil {
-		panic(err)
+		logger.Error(ctx, "Failed to create storage path: %v", err)
+		return fmt.Errorf("failed to create storage path: %w", err)
 	}
 	agent, err := review.NewPRReviewAgent(ctx, githubTools, dbPath, &types.AgentConfig{
 		IndexWorkers:  cfg.indexWorkers,
 		ReviewWorkers: cfg.reviewWorkers,
 	})
 	if err != nil {
-		panic(err)
+		logger.Error(ctx, "Failed to initialize review agent: %v", err)
+		return fmt.Errorf("failed to initialize review agent: %w", err)
 	}
+	// Register for cleanup on signal (Ctrl+C)
+	registerCleanup(func() {
+		logger.Debug(context.Background(), "Signal handler: cleaning up review agent")
+		agent.Close()
+	})
+	defer func() {
+		if err := agent.Close(); err != nil {
+			logger.Warn(ctx, "Error closing review agent: %v", err)
+		}
+	}()
 
 	// Validate PR number
 	if cfg.prNumber <= 0 {

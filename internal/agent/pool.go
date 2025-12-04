@@ -76,33 +76,40 @@ func NewLifecycleManager(logger *logging.Logger) *LifecycleManager {
 
 // SpawnUnifiedAgent creates a new unified ReAct search agent.
 func (ap *Pool) SpawnUnifiedAgent(ctx context.Context, parentQuery string) (*UnifiedReActAgent, error) {
-	ap.mu.Lock()
-	defer ap.mu.Unlock()
+	tokensPerAgent := 100000 // 100K tokens per agent
 
-	// Check if we can spawn more agents
+	// Reserve resources while holding lock
+	ap.mu.Lock()
 	if ap.activeCount >= ap.maxAgents {
+		ap.mu.Unlock()
 		return nil, fmt.Errorf("agent pool at capacity (%d/%d)", ap.activeCount, ap.maxAgents)
 	}
-
-	// Check token budget
-	tokensPerAgent := 100000 // 100K tokens per agent
 	if ap.totalTokensUsed+tokensPerAgent > ap.maxTotalTokens {
+		ap.mu.Unlock()
 		return nil, fmt.Errorf("insufficient token budget for new agent")
 	}
 
-	// Create agent ID
+	// Reserve resources BEFORE creating agent to prevent race conditions
 	agentID := fmt.Sprintf("unified-%s", uuid.New().String()[:8])
+	ap.activeCount++
+	ap.totalTokensUsed += tokensPerAgent
+	ap.mu.Unlock()
 
-	// Create the unified ReAct agent
+	// Create agent outside lock (can be slow)
 	agent, err := NewUnifiedReActAgent(agentID, ap.searchTool, ap.logger)
 	if err != nil {
+		// Rollback reservation on failure
+		ap.mu.Lock()
+		ap.activeCount--
+		ap.totalTokensUsed -= tokensPerAgent
+		ap.mu.Unlock()
 		return nil, fmt.Errorf("failed to create unified ReAct agent: %w", err)
 	}
 
-	// Register with pool
+	// Register agent with pool
+	ap.mu.Lock()
 	ap.agents[agentID] = agent
-	ap.activeCount++
-	ap.totalTokensUsed += tokensPerAgent
+	ap.mu.Unlock()
 
 	// Register lifecycle event
 	ap.lifecycle.OnSpawn(agentID, types.SearchAgentType("unified"))

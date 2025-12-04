@@ -389,6 +389,13 @@ func (a *PRReviewAgent) startBackgroundIndexing(ctx context.Context, githubTool 
 func (a *PRReviewAgent) cloneAndIndexWithSgrep(ctx context.Context, repoFullName, branch string) error {
 	logger := logging.GetLogger()
 
+	// Check for cancellation before starting
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
+
 	// Check if sgrep is available
 	sgrepTool := search.NewSgrepTool(logger, "")
 	if !sgrepTool.IsAvailable(ctx) {
@@ -404,9 +411,17 @@ func (a *PRReviewAgent) cloneAndIndexWithSgrep(ctx context.Context, repoFullName
 		return fmt.Errorf("failed to create temp directory: %w", err)
 	}
 
+	// Ensure cleanup on error or cancellation
+	cleanupOnError := true
+	defer func() {
+		if cleanupOnError {
+			os.RemoveAll(tmpDir)
+		}
+	}()
+
 	logger.Info(ctx, "📦 Cloning %s to %s", repoFullName, tmpDir)
 
-	// Clone using gh CLI
+	// Clone using gh CLI with context for cancellation
 	args := []string{"repo", "clone", repoFullName, tmpDir}
 	if branch != "" {
 		args = append(args, "--", "-b", branch)
@@ -414,8 +429,18 @@ func (a *PRReviewAgent) cloneAndIndexWithSgrep(ctx context.Context, repoFullName
 
 	cmd := exec.CommandContext(ctx, "gh", args...)
 	if output, err := cmd.CombinedOutput(); err != nil {
-		os.RemoveAll(tmpDir)
+		// Check if error was due to cancellation
+		if ctx.Err() != nil {
+			return fmt.Errorf("clone cancelled: %w", ctx.Err())
+		}
 		return fmt.Errorf("failed to clone repo: %w (output: %s)", err, string(output))
+	}
+
+	// Check for cancellation after clone
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
 	}
 
 	// Only set clonedRepoPath AFTER clone completes successfully
@@ -438,7 +463,10 @@ func (a *PRReviewAgent) cloneAndIndexWithSgrep(ctx context.Context, repoFullName
 	// Capture output to show progress
 	output, err := indexCmd.CombinedOutput()
 	if err != nil {
-		os.RemoveAll(tmpDir)
+		// Check if error was due to cancellation
+		if ctx.Err() != nil {
+			return fmt.Errorf("indexing cancelled: %w", ctx.Err())
+		}
 		return fmt.Errorf("sgrep indexing failed: %w (output: %s)", err, string(output))
 	}
 
@@ -450,6 +478,9 @@ func (a *PRReviewAgent) cloneAndIndexWithSgrep(ctx context.Context, repoFullName
 	// Update progress: indexing complete
 	a.indexStatus.SetProgress(0.9)
 
+	// Success - don't cleanup
+	cleanupOnError = false
+
 	logger.Info(ctx, "🔍 sgrep indexing completed for %s", repoFullName)
 	return nil
 }
@@ -459,9 +490,6 @@ func (a *PRReviewAgent) GetIndexingStatus() *IndexingStatus {
 }
 
 func (a *PRReviewAgent) GetGitHubTools() GitHubInterface {
-	if a.githubTools == nil {
-		panic("GitHub tools not initialized")
-	}
 	return a.githubTools
 }
 
@@ -514,11 +542,24 @@ func (a *PRReviewAgent) WaitForClone(ctx context.Context, timeout time.Duration)
 }
 
 func (a *PRReviewAgent) Close() error {
+	logger := logging.GetLogger()
+	ctx := context.Background()
+
+	// Stop background processes
+	a.stopper.Stop()
+
 	// Clean up cloned repo directory
 	if a.clonedRepoPath != "" {
-		os.RemoveAll(a.clonedRepoPath)
+		logger.Debug(ctx, "Cleaning up cloned repository: %s", a.clonedRepoPath)
+		if err := os.RemoveAll(a.clonedRepoPath); err != nil {
+			logger.Warn(ctx, "Failed to cleanup cloned repo %s: %v", a.clonedRepoPath, err)
+		} else {
+			logger.Debug(ctx, "Successfully cleaned up cloned repository")
+		}
+		a.clonedRepoPath = ""
 	}
 
+	// Close RAG store
 	if a.rag != nil {
 		return a.rag.Close()
 	}
