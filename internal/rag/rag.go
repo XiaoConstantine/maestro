@@ -18,6 +18,7 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 
 	"github.com/XiaoConstantine/dspy-go/pkg/logging"
+	"github.com/XiaoConstantine/maestro/internal/config"
 	"github.com/XiaoConstantine/maestro/internal/guideline"
 	"github.com/XiaoConstantine/maestro/internal/types"
 	"github.com/XiaoConstantine/maestro/internal/util"
@@ -212,12 +213,7 @@ func (s *sqliteRAGStore) init() error {
 
 // GetVectorDimensions returns the configured vector dimensions.
 func GetVectorDimensions() int {
-	if dimensions := os.Getenv("MAESTRO_VECTOR_DIMENSIONS"); dimensions != "" {
-		if dims, err := strconv.Atoi(dimensions); err == nil && dims > 0 && dims <= 2048 {
-			return dims
-		}
-	}
-	return 768 // Default for text-embedding-004
+	return config.GetVectorDimensions()
 }
 
 // StoreContent implements RAGStore interface.

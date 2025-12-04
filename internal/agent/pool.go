@@ -165,16 +165,16 @@ func (ap *Pool) ReleaseAgent(ctx context.Context, agentID string) error {
 	}
 
 	// Get token usage before releasing
-	tokensUsed := 100000 // Estimate for now
+	tokensPerAgent := 100000 // 100K tokens per agent
 
 	// Update lifecycle
 	status := agent.GetStatus()
-	ap.lifecycle.OnComplete(agentID, tokensUsed, status.ResultCount)
+	ap.lifecycle.OnComplete(agentID, tokensPerAgent, status.ResultCount)
 
 	// Clean up
 	delete(ap.agents, agentID)
 	ap.activeCount--
-	ap.totalTokensUsed -= 100000
+	ap.totalTokensUsed -= tokensPerAgent
 
 	ap.logger.Info(ctx, "Released agent %s - Pool: %d/%d agents", agentID, ap.activeCount, ap.maxAgents)
 
