@@ -56,14 +56,8 @@ func (f *Fetcher) FetchGuidelines(ctx context.Context) ([]types.GuidelineContent
 	errorChan := make(chan error, len(sources))
 
 	for _, source := range sources {
-		wg.Add(1)
-		go func(src struct {
-			URL      string
-			Parser   func([]byte) ([]types.GuidelineContent, error)
-			Language string
-		}) {
-			defer wg.Done()
-
+		src := source // Go 1.25: capture for wg.Go()
+		wg.Go(func() {
 			// Fetch the content
 			content, err := f.fetchContent(ctx, src.URL)
 			if err != nil {
@@ -87,7 +81,7 @@ func (f *Fetcher) FetchGuidelines(ctx context.Context) ([]types.GuidelineContent
 			mu.Lock()
 			allGuidelines = append(allGuidelines, guidelines...)
 			mu.Unlock()
-		}(source)
+		})
 	}
 
 	// Wait for all fetches to complete

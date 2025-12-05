@@ -1,6 +1,6 @@
 module github.com/XiaoConstantine/maestro
 
-go 1.25
+go 1.25.5
 
 require (
 	charm.land/bubbles/v2 v2.0.0-rc.1

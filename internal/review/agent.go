@@ -84,6 +84,11 @@ func (s *Stopper) Done_() {
 	s.wg.Done()
 }
 
+// Go starts a goroutine with automatic WaitGroup management (Go 1.25+).
+func (s *Stopper) Go(f func()) {
+	s.wg.Go(f)
+}
+
 // StopChannel returns the stop channel.
 func (s *Stopper) StopChannel() <-chan struct{} {
 	return s.stop

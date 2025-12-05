@@ -604,19 +604,17 @@ func (a *PRReviewAgent) ReviewPRWithChanges(ctx context.Context, prNumber int, t
 
 	a.metrics.StartReviewSession(ctx, prNumber)
 
-	a.stopper.wg.Add(1)
 	monitorCtx, cancel := context.WithCancel(ctx)
-
 	a.stopper.cancel = cancel
 
-	go func() {
-		defer a.stopper.wg.Done()
+	// Go 1.25: Use wg.Go() for automatic Add/Done management
+	a.stopper.Go(func() {
 		if err := a.monitorAndRespond(monitorCtx, prNumber, console); err != nil {
 			if !errors.Is(err, context.Canceled) {
 				console.FileError("monitoring", fmt.Errorf("monitoring error: %w", err))
 			}
 		}
-	}()
+	})
 
 	var (
 		myOpenThreads      []*ThreadTracker // Threads I started that need follow-up

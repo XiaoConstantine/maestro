@@ -262,17 +262,15 @@ func ChunkFile(ctx context.Context, content string, changes string, config *type
 
 		for i := range finalChunks {
 			if EstimateTokens(finalChunks[i].Content) < 1000 {
-				wg.Add(1)
-				go func(idx int, content string) {
-					defer wg.Done()
-
+				idx, content := i, finalChunks[i].Content // Go 1.25: capture for wg.Go()
+				wg.Go(func() {
 					// Acquire semaphore
 					semaphore <- struct{}{}
 					defer func() { <-semaphore }()
 
 					description, err := generateChunkDescription(ctx, content)
 					descChan <- descResult{idx: idx, desc: description, err: err}
-				}(i, finalChunks[i].Content)
+				})
 			}
 		}
 

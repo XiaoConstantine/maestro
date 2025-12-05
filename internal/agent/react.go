@@ -5,8 +5,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime/trace"
 	"strings"
 	"sync"
 	"time"
@@ -39,7 +41,8 @@ type UnifiedReActAgent struct {
 	queryAnalyzer     *QueryAnalyzer
 	searchContext     *SearchContext
 	qualityTracker    *QualityTracker
-	contextManager    *agentctx.Manager // Manus-inspired context engineering
+	contextManager    *agentctx.Manager  // Manus-inspired context engineering
+	flightRecorder    *trace.FlightRecorder // Go 1.25: lightweight continuous tracing
 	xmlFactory        *xml.ConfigFactory
 	toolCallParser    *xml.ToolCallParser
 	xmlEnabledModules map[string]*modules.Predict
@@ -169,6 +172,16 @@ func NewUnifiedReActAgentWithMemory(id string, searchTool *search.SimpleSearchTo
 		contextMgr = nil
 	}
 
+	// Go 1.25: Initialize FlightRecorder for lightweight continuous tracing
+	// Keeps last ~10 seconds of trace data for debugging rare issues
+	fr := trace.NewFlightRecorder(trace.FlightRecorderConfig{
+		MinAge: 10 * time.Second,
+	})
+	if err := fr.Start(); err != nil {
+		logger.Warn(context.Background(), "Failed to start flight recorder, continuing without: %v", err)
+		fr = nil
+	}
+
 	agent := &UnifiedReActAgent{
 		ID:         id,
 		reactAgent: reactAgent,
@@ -191,6 +204,7 @@ func NewUnifiedReActAgentWithMemory(id string, searchTool *search.SimpleSearchTo
 		},
 		qualityTracker:    &QualityTracker{},
 		contextManager:    contextMgr,
+		flightRecorder:    fr,
 		xmlFactory:        xml.NewConfigFactory(),
 		toolCallParser:    xml.NewToolCallParser(),
 		xmlEnabledModules: make(map[string]*modules.Predict),
@@ -963,17 +977,56 @@ func (ura *UnifiedReActAgent) updateTodoProgress(ctx context.Context, status str
 
 // recordErrorForLearning stores errors in the context manager for implicit learning.
 func (ura *UnifiedReActAgent) recordErrorForLearning(ctx context.Context, err error, action string) {
-	if ura.contextManager == nil {
+	if ura.contextManager != nil {
+		// Record error with context for pattern learning
+		ura.contextManager.RecordError(ctx, action, err.Error(), agentctx.SeverityMedium, map[string]interface{}{
+			"query":     ura.currentQuery,
+			"iteration": ura.searchContext.IterationCount,
+		})
+	}
+
+	// Go 1.25: Snapshot flight recorder trace on errors for debugging
+	ura.snapshotTrace(ctx, action)
+
+	ura.logger.Debug(ctx, "Recorded error for implicit learning: %v", err)
+}
+
+// snapshotTrace writes the current flight recorder buffer to disk for debugging.
+func (ura *UnifiedReActAgent) snapshotTrace(ctx context.Context, reason string) {
+	if ura.flightRecorder == nil || !ura.flightRecorder.Enabled() {
 		return
 	}
 
-	// Record error with context for pattern learning
-	ura.contextManager.RecordError(ctx, action, err.Error(), agentctx.SeverityMedium, map[string]interface{}{
-		"query":     ura.currentQuery,
-		"iteration": ura.searchContext.IterationCount,
-	})
+	// Write trace to .maestro/traces directory
+	traceDir := filepath.Join(ura.searchTool.RootPath(), ".maestro", "traces")
+	if err := os.MkdirAll(traceDir, 0755); err != nil {
+		ura.logger.Warn(ctx, "Failed to create trace directory: %v", err)
+		return
+	}
 
-	ura.logger.Debug(ctx, "Recorded error for implicit learning: %v", err)
+	traceFile := filepath.Join(traceDir, fmt.Sprintf("trace-%s-%s-%d.out",
+		ura.ID, reason, time.Now().UnixMilli()))
+
+	f, err := os.Create(traceFile)
+	if err != nil {
+		ura.logger.Warn(ctx, "Failed to create trace file: %v", err)
+		return
+	}
+	defer f.Close()
+
+	if _, err := ura.flightRecorder.WriteTo(f); err != nil {
+		ura.logger.Warn(ctx, "Failed to write trace: %v", err)
+		return
+	}
+
+	ura.logger.Info(ctx, "Trace snapshot saved to %s", traceFile)
+}
+
+// Close stops the flight recorder and releases resources.
+func (ura *UnifiedReActAgent) Close() {
+	if ura.flightRecorder != nil {
+		ura.flightRecorder.Stop()
+	}
 }
 
 func (ura *UnifiedReActAgent) calculateResultConfidence(results []*search.EnhancedSearchResult) float64 {
