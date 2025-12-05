@@ -575,8 +575,12 @@ func (ura *UnifiedReActAgent) ExecuteSearch(ctx context.Context, request *search
 	// Execute progressive search with quality monitoring
 	response, err := ura.executeProgressiveSearch(ctx, request, analysis)
 	if err != nil {
+		// Record error for context engineering learning
+		ura.recordErrorForLearning(ctx, err, "progressive_search")
+
 		recoveryResponse, recoveryErr := ura.executeErrorRecovery(ctx, request, analysis, err)
 		if recoveryErr != nil {
+			ura.recordErrorForLearning(ctx, recoveryErr, "error_recovery")
 			ura.updateStatus("failed", 0.0, recoveryErr)
 			return nil, fmt.Errorf("search failed with recovery error: %w", recoveryErr)
 		}
@@ -621,6 +625,7 @@ func (ura *UnifiedReActAgent) executeProgressiveSearch(ctx context.Context, requ
 		phaseInput := ura.preparePhaseInput(request, phase, allResults)
 		phaseResult, err := ura.executePhase(ctx, phaseInput, phase, analysis.MaxIterations)
 		if err != nil {
+			ura.recordErrorForLearning(ctx, err, fmt.Sprintf("phase_%d_execution", phase.PhaseNumber))
 			ura.recordDecisionPoint(ura.searchContext.IterationCount,
 				fmt.Sprintf("Phase %d failed: %v", phase.PhaseNumber, err),
 				"Attempting next phase or recovery")
