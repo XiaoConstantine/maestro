@@ -21,3 +21,8 @@ maestro-test
 *.test
 *.out
 coverage.html
+
+# Agent memory (context engineering)
+memory/
+agent_memory/
+.maestro/

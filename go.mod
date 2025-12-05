@@ -7,7 +7,7 @@ require (
 	charm.land/bubbletea/v2 v2.0.0-rc.2
 	charm.land/lipgloss/v2 v2.0.0-beta.3.0.20251106193318-19329a3e8410
 	github.com/AlecAivazis/survey/v2 v2.3.7
-	github.com/XiaoConstantine/dspy-go v0.71.0
+	github.com/XiaoConstantine/dspy-go v0.72.1
 	github.com/XiaoConstantine/mcp-go v0.3.1
 	github.com/XiaoConstantine/sgrep v0.7.0
 	github.com/asg017/sqlite-vec-go-bindings v0.1.6

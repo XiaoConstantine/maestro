@@ -6,11 +6,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/XiaoConstantine/dspy-go/pkg/agents"
+	agentctx "github.com/XiaoConstantine/dspy-go/pkg/agents/context"
 	"github.com/XiaoConstantine/dspy-go/pkg/agents/react"
 	"github.com/XiaoConstantine/dspy-go/pkg/core"
 	"github.com/XiaoConstantine/dspy-go/pkg/interceptors"
@@ -33,9 +35,11 @@ type UnifiedReActAgent struct {
 	memory     agents.Memory
 
 	currentMode       react.ExecutionMode
+	currentQuery      string // Current query being processed
 	queryAnalyzer     *QueryAnalyzer
 	searchContext     *SearchContext
 	qualityTracker    *QualityTracker
+	contextManager    *agentctx.Manager // Manus-inspired context engineering
 	xmlFactory        *xml.ConfigFactory
 	toolCallParser    *xml.ToolCallParser
 	xmlEnabledModules map[string]*modules.Predict
@@ -145,6 +149,26 @@ func NewUnifiedReActAgentWithMemory(id string, searchTool *search.SimpleSearchTo
 		}),
 	)
 
+	// Initialize Manus-inspired context manager for optimized context engineering
+	ctxConfig := agentctx.DefaultConfig()
+	ctxConfig.Cache.StablePrefix = "You are an intelligent code search agent that finds relevant code, documentation, and patterns in codebases."
+	ctxConfig.Cache.TimestampGranularity = "hour" // Hour-level for code search sessions
+	ctxConfig.Todo.MaxActiveTasks = 3
+	ctxConfig.Todo.MaxPendingTasks = 10
+
+	// Use .maestro directory for context memory storage
+	maestroDir := filepath.Join(searchTool.RootPath(), ".maestro", "context")
+	contextMgr, err := agentctx.NewManager(
+		fmt.Sprintf("session-%s", id),
+		fmt.Sprintf("agent-%s", id),
+		maestroDir,
+		ctxConfig,
+	)
+	if err != nil {
+		logger.Warn(context.Background(), "Failed to create context manager, continuing without: %v", err)
+		contextMgr = nil
+	}
+
 	agent := &UnifiedReActAgent{
 		ID:         id,
 		reactAgent: reactAgent,
@@ -166,6 +190,7 @@ func NewUnifiedReActAgentWithMemory(id string, searchTool *search.SimpleSearchTo
 			CurrentPhase:      1,
 		},
 		qualityTracker:    &QualityTracker{},
+		contextManager:    contextMgr,
 		xmlFactory:        xml.NewConfigFactory(),
 		toolCallParser:    xml.NewToolCallParser(),
 		xmlEnabledModules: make(map[string]*modules.Predict),
@@ -509,8 +534,14 @@ func (ura *UnifiedReActAgent) ExecuteSearch(ctx context.Context, request *search
 	startTime := time.Now()
 	ura.updateStatus("analyzing", 0.1, nil)
 	ura.resetSearchContext()
+	ura.currentQuery = request.Query // Store for use in quality assessment
 
 	ura.logger.Info(ctx, "Unified ReAct Agent %s starting search: %s", ura.ID, request.Query)
+
+	// Initialize context engineering: add search task to TodoManager
+	if ura.contextManager != nil {
+		ura.syncTodoFromQuery(ctx, request.Query)
+	}
 
 	// Analyze the query to determine optimal configuration
 	analysis, err := ura.queryAnalyzer.AnalyzeQuery(ctx, request.Query, request.Context)
@@ -533,6 +564,11 @@ func (ura *UnifiedReActAgent) ExecuteSearch(ctx context.Context, request *search
 	ura.configureForQuery(analysis, request)
 	ura.searchContext.QueryEvolution = append(ura.searchContext.QueryEvolution,
 		fmt.Sprintf("Initial analysis: %s query with complexity %d", analysis.PrimaryType, analysis.Complexity))
+
+	// Sync query evolution with context manager
+	if ura.contextManager != nil {
+		ura.updateTodoProgress(ctx, "Analyzing query", 0.2)
+	}
 
 	ura.updateStatus("searching", 0.3, nil)
 
@@ -695,21 +731,23 @@ func (ura *UnifiedReActAgent) processPhaseResults(result map[string]interface{},
 		if data, exists := result[key]; exists {
 			ura.logger.Info(context.Background(), "processPhaseResults: found key '%s', type=%T", key, data)
 			if dataStr, ok := data.(string); ok && dataStr != "" {
-				ura.logger.Info(context.Background(), "Found result in key '%s': %d chars", key, len(dataStr))
+				// Calculate relevance based on answer quality indicators
+				relevance := ura.calculateAnswerRelevance(dataStr, ura.currentQuery)
+				ura.logger.Info(context.Background(), "Found result in key '%s': %d chars, relevance: %.2f", key, len(dataStr), relevance)
 				enhancedResult := &search.EnhancedSearchResult{
 					SearchResult: &search.SearchResult{
 						FilePath:   fmt.Sprintf("phase-%d-output", phase.PhaseNumber),
 						LineNumber: 1,
 						Line:       dataStr,
 						MatchType:  "phase_result",
-						Score:      0.7,
+						Score:      relevance,
 					},
-					Relevance:   0.7,
+					Relevance:   relevance,
 					Explanation: fmt.Sprintf("Result from %s", phase.Description),
 					Category:    phase.Description,
 				}
 				results = append(results, enhancedResult)
-				ura.recordFinding(dataStr, 0.7, phase.Description)
+				ura.recordFinding(dataStr, relevance, phase.Description)
 				break // Found a result, don't check other keys
 			}
 		}
@@ -748,25 +786,84 @@ func (ura *UnifiedReActAgent) validateResultQuality(response *search.SearchRespo
 	assessment := &QualityAssessment{}
 
 	if len(response.Results) > 0 {
-		completeness := float64(len(response.Results)) / float64(analysis.Complexity*2)
-		if completeness > 1.0 {
-			completeness = 1.0
+		// Completeness based on having substantive results, not quantity
+		// A single comprehensive answer is complete
+		totalContentLength := 0
+		for _, result := range response.Results {
+			totalContentLength += len(result.Line)
 		}
-		assessment.Completeness = completeness
+
+		// Base completeness on content richness
+		switch {
+		case totalContentLength > 1000:
+			assessment.Completeness = 0.95
+		case totalContentLength > 500:
+			assessment.Completeness = 0.85
+		case totalContentLength > 200:
+			assessment.Completeness = 0.75
+		case totalContentLength > 100:
+			assessment.Completeness = 0.65
+		default:
+			assessment.Completeness = 0.5
+		}
 	}
 
-	assessment.Consistency = 0.8
+	assessment.Consistency = 0.85
 
+	// Calculate relevance from results
 	totalRelevance := 0.0
 	for _, result := range response.Results {
 		totalRelevance += result.Relevance
 	}
+
+	// Build combined answer content from results for quality assessment
+	var combinedContent strings.Builder
+	for _, result := range response.Results {
+		combinedContent.WriteString(result.Line)
+	}
+	answerContent := combinedContent.String()
+
 	if len(response.Results) > 0 {
-		assessment.Relevance = totalRelevance / float64(len(response.Results))
+		resultRelevance := totalRelevance / float64(len(response.Results))
+		// Boost relevance with answer quality from actual result content
+		if answerContent != "" {
+			answerRelevance := ura.calculateAnswerRelevance(answerContent, ura.currentQuery)
+			// Weight: 40% from result relevance, 60% from answer quality
+			assessment.Relevance = (resultRelevance * 0.4) + (answerRelevance * 0.6)
+		} else {
+			assessment.Relevance = resultRelevance
+		}
+	} else if response.Synthesis != "" {
+		// No results but have synthesis - use synthesis for relevance
+		assessment.Relevance = ura.calculateAnswerRelevance(response.Synthesis, ura.currentQuery)
 	}
 
-	if response.Synthesis != "" {
-		assessment.Actionability = 0.7
+	// Calculate actionability based on whether content is actionable
+	// (has specific references, code, clear guidance)
+	assessment.Actionability = 0.6 // Base score
+	contentToCheck := answerContent + response.Synthesis
+
+	// Specific file references are highly actionable
+	if strings.Contains(contentToCheck, ".go") || strings.Contains(contentToCheck, ".ts") ||
+		strings.Contains(contentToCheck, ".py") || strings.Contains(contentToCheck, ".js") {
+		assessment.Actionability += 0.10
+	}
+
+	// Code blocks are actionable
+	if strings.Contains(contentToCheck, "```") || strings.Contains(contentToCheck, "func ") ||
+		strings.Contains(contentToCheck, "function") {
+		assessment.Actionability += 0.10
+	}
+
+	// Step-by-step or structured guidance is actionable
+	if strings.Contains(contentToCheck, "1.") || strings.Contains(contentToCheck, "Step") ||
+		strings.Contains(contentToCheck, "First") || strings.Contains(contentToCheck, "Then") {
+		assessment.Actionability += 0.10
+	}
+
+	// Cap at 0.95
+	if assessment.Actionability > 0.95 {
+		assessment.Actionability = 0.95
 	}
 
 	assessment.OverallScore = (assessment.Completeness + assessment.Consistency +
@@ -825,6 +922,55 @@ func (ura *UnifiedReActAgent) recordDecisionPoint(iteration int, reason string, 
 	ura.searchContext.DecisionPoints = append(ura.searchContext.DecisionPoints, decision)
 }
 
+// Context engineering helpers for Manus-inspired patterns.
+
+// syncTodoFromQuery initializes the TodoManager with the current search task.
+func (ura *UnifiedReActAgent) syncTodoFromQuery(ctx context.Context, query string) {
+	if ura.contextManager == nil {
+		return
+	}
+
+	// Add the main search task with high priority
+	err := ura.contextManager.AddTodo(ctx, fmt.Sprintf("Search: %s", query), 10)
+	if err != nil {
+		ura.logger.Warn(ctx, "Failed to add search task to TodoManager: %v", err)
+		return
+	}
+
+	ura.logger.Debug(ctx, "Synced search query to TodoManager")
+}
+
+// updateTodoProgress updates the TodoManager with evolution steps.
+func (ura *UnifiedReActAgent) updateTodoProgress(ctx context.Context, status string, progress float64) {
+	if ura.contextManager == nil {
+		return
+	}
+
+	// Add evolution step as a sub-task if significant
+	if len(ura.searchContext.QueryEvolution) > 0 {
+		latestEvolution := ura.searchContext.QueryEvolution[len(ura.searchContext.QueryEvolution)-1]
+		err := ura.contextManager.AddTodo(ctx, latestEvolution, 5)
+		if err != nil {
+			ura.logger.Debug(ctx, "Failed to add evolution step: %v", err)
+		}
+	}
+}
+
+// recordErrorForLearning stores errors in the context manager for implicit learning.
+func (ura *UnifiedReActAgent) recordErrorForLearning(ctx context.Context, err error, action string) {
+	if ura.contextManager == nil {
+		return
+	}
+
+	// Record error with context for pattern learning
+	ura.contextManager.RecordError(ctx, action, err.Error(), agentctx.SeverityMedium, map[string]interface{}{
+		"query":     ura.currentQuery,
+		"iteration": ura.searchContext.IterationCount,
+	})
+
+	ura.logger.Debug(ctx, "Recorded error for implicit learning: %v", err)
+}
+
 func (ura *UnifiedReActAgent) calculateResultConfidence(results []*search.EnhancedSearchResult) float64 {
 	if len(results) == 0 {
 		return 0.0
@@ -840,6 +986,69 @@ func (ura *UnifiedReActAgent) calculateResultConfidence(results []*search.Enhanc
 		return 0.95
 	}
 	return result
+}
+
+// calculateAnswerRelevance scores an answer based on meaningful quality indicators.
+func (ura *UnifiedReActAgent) calculateAnswerRelevance(answer string, query string) float64 {
+	if answer == "" {
+		return 0.0
+	}
+
+	baseScore := 0.5
+	lowerAnswer := strings.ToLower(answer)
+	lowerQuery := strings.ToLower(query)
+
+	// Query term matching: does the answer address what was asked?
+	queryTerms := strings.Fields(lowerQuery)
+	matchedTerms := 0
+	for _, term := range queryTerms {
+		if len(term) > 2 && strings.Contains(lowerAnswer, term) {
+			matchedTerms++
+		}
+	}
+	if len(queryTerms) > 0 {
+		matchRatio := float64(matchedTerms) / float64(len(queryTerms))
+		baseScore += matchRatio * 0.20 // Up to 0.20 for full query coverage
+	}
+
+	// Specific references: file paths, function names (concrete answers)
+	hasFilePath := strings.Contains(answer, ".go") || strings.Contains(answer, ".ts") ||
+		strings.Contains(answer, ".py") || strings.Contains(answer, "/")
+	hasLineRef := strings.Contains(answer, "line") || strings.Contains(answer, "Line")
+	hasFuncRef := strings.Contains(answer, "func ") || strings.Contains(answer, "function") ||
+		strings.Contains(answer, "()") || strings.Contains(answer, "method")
+
+	if hasFilePath {
+		baseScore += 0.10
+	}
+	if hasLineRef {
+		baseScore += 0.05
+	}
+	if hasFuncRef {
+		baseScore += 0.05
+	}
+
+	// Structured explanation: organized response
+	hasHeaders := strings.Contains(answer, "##") || strings.Contains(answer, "**")
+	hasList := strings.Contains(answer, "1.") || strings.Contains(answer, "- ") || strings.Contains(answer, "* ")
+	hasCodeBlock := strings.Contains(answer, "```") || strings.Contains(answer, "`")
+
+	if hasHeaders {
+		baseScore += 0.05
+	}
+	if hasList {
+		baseScore += 0.05
+	}
+	if hasCodeBlock {
+		baseScore += 0.05
+	}
+
+	// Cap at 0.95
+	if baseScore > 0.95 {
+		baseScore = 0.95
+	}
+
+	return baseScore
 }
 
 func (ura *UnifiedReActAgent) synthesizeProgressiveResults(results []*search.EnhancedSearchResult, request *search.SearchRequest, analysis *QueryAnalysis) *search.SearchResponse {
