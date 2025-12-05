@@ -139,6 +139,10 @@ func NewUnifiedReActAgentWithMemory(id string, searchTool *search.SimpleSearchTo
 		react.WithReflection(false, 0),
 		react.WithMaxIterations(15),
 		react.WithTimeout(120*time.Second),
+		react.WithNativeFunctionCalling(interceptors.FunctionCallingConfig{
+			IncludeFinishTool:     true,
+			FinishToolDescription: "Call this tool when you have completed the search and have the final answer. Pass the answer as the 'answer' argument.",
+		}),
 	)
 
 	agent := &UnifiedReActAgent{
@@ -640,10 +644,36 @@ func (ura *UnifiedReActAgent) executePhase(ctx context.Context, input map[string
 
 	result, err := ura.reactAgent.Execute(phaseCtx, input)
 	if err != nil {
+		// Check if we hit timeout but agent may have found answer
+		if ctx.Err() == context.DeadlineExceeded {
+			ura.logger.Warn(ctx, "Phase execution timed out, attempting to extract any partial results")
+		}
 		return nil, err
 	}
 
 	ura.searchContext.IterationCount++
+
+	// Log result for debugging - verbose to trace integration issues
+	keys := make([]string, 0, len(result))
+	for k := range result {
+		keys = append(keys, k)
+	}
+	ura.logger.Info(ctx, "Phase execution completed, result keys: %v", keys)
+
+	// Log each key's value type and preview
+	for k, v := range result {
+		switch val := v.(type) {
+		case string:
+			preview := val
+			if len(preview) > 200 {
+				preview = preview[:200] + "..."
+			}
+			ura.logger.Info(ctx, "  Key '%s' (string, %d chars): %s", k, len(val), preview)
+		default:
+			ura.logger.Info(ctx, "  Key '%s' (%T): %v", k, v, v)
+		}
+	}
+
 	return result, nil
 }
 
@@ -651,22 +681,37 @@ func (ura *UnifiedReActAgent) executePhase(ctx context.Context, input map[string
 func (ura *UnifiedReActAgent) processPhaseResults(result map[string]interface{}, phase ToolPhase) []*search.EnhancedSearchResult {
 	var results []*search.EnhancedSearchResult
 
-	if data, exists := result["answer"]; exists {
-		if dataStr, ok := data.(string); ok && dataStr != "" {
-			enhancedResult := &search.EnhancedSearchResult{
-				SearchResult: &search.SearchResult{
-					FilePath:   fmt.Sprintf("phase-%d-output", phase.PhaseNumber),
-					LineNumber: 1,
-					Line:       dataStr,
-					MatchType:  "phase_result",
-					Score:      0.7,
-				},
-				Relevance:   0.7,
-				Explanation: fmt.Sprintf("Result from %s", phase.Description),
-				Category:    phase.Description,
+	// Log all keys in result for debugging
+	keys := make([]string, 0, len(result))
+	for k := range result {
+		keys = append(keys, k)
+	}
+	ura.logger.Info(context.Background(), "processPhaseResults: checking keys %v", keys)
+
+	// Try multiple possible output keys
+	outputKeys := []string{"answer", "output", "result", "response", "final_answer"}
+	for _, key := range outputKeys {
+		ura.logger.Info(context.Background(), "processPhaseResults: checking for key '%s'", key)
+		if data, exists := result[key]; exists {
+			ura.logger.Info(context.Background(), "processPhaseResults: found key '%s', type=%T", key, data)
+			if dataStr, ok := data.(string); ok && dataStr != "" {
+				ura.logger.Info(context.Background(), "Found result in key '%s': %d chars", key, len(dataStr))
+				enhancedResult := &search.EnhancedSearchResult{
+					SearchResult: &search.SearchResult{
+						FilePath:   fmt.Sprintf("phase-%d-output", phase.PhaseNumber),
+						LineNumber: 1,
+						Line:       dataStr,
+						MatchType:  "phase_result",
+						Score:      0.7,
+					},
+					Relevance:   0.7,
+					Explanation: fmt.Sprintf("Result from %s", phase.Description),
+					Category:    phase.Description,
+				}
+				results = append(results, enhancedResult)
+				ura.recordFinding(dataStr, 0.7, phase.Description)
+				break // Found a result, don't check other keys
 			}
-			results = append(results, enhancedResult)
-			ura.recordFinding(dataStr, 0.7, phase.Description)
 		}
 	}
 
