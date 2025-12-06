@@ -12,7 +12,6 @@ import (
 	"syscall"
 	"time"
 
-	sqlite_vec "github.com/asg017/sqlite-vec-go-bindings/cgo"
 	"github.com/XiaoConstantine/dspy-go/pkg/core"
 	"github.com/XiaoConstantine/dspy-go/pkg/llms"
 	"github.com/XiaoConstantine/dspy-go/pkg/logging"
@@ -29,8 +28,6 @@ import (
 	"github.com/logrusorgru/aurora"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
-
-	_ "github.com/mattn/go-sqlite3"
 )
 
 // cleanupRegistry tracks resources that need cleanup on shutdown.
@@ -161,7 +158,6 @@ func printMaestroBanner() {
 
 func main() {
 	cfg := &config{}
-	sqlite_vec.Auto()
 
 	// Set up signal handler for graceful shutdown
 	setupSignalHandler()

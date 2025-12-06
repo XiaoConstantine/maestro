@@ -2,7 +2,6 @@ package review
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 	"os"
@@ -18,8 +17,9 @@ import (
 	"github.com/XiaoConstantine/dspy-go/pkg/core"
 	"github.com/XiaoConstantine/dspy-go/pkg/logging"
 	"github.com/XiaoConstantine/maestro/internal/chunk"
+	"github.com/XiaoConstantine/maestro/internal/guideline"
 	"github.com/XiaoConstantine/maestro/internal/metrics"
-	"github.com/XiaoConstantine/maestro/internal/rag"
+	"github.com/XiaoConstantine/maestro/internal/patterns"
 	"github.com/XiaoConstantine/maestro/internal/reasoning"
 	"github.com/XiaoConstantine/maestro/internal/search"
 	"github.com/XiaoConstantine/maestro/internal/types"
@@ -37,7 +37,7 @@ type PRReviewAgent struct {
 	reviewProcessor  *reasoning.EnhancedCodeReviewProcessor // High-performance parallel processor
 	declarativeChain *workflow.DeclarativeReviewChain       // Declarative workflow for complex reviews
 	memory           agents.Memory
-	rag              types.RAGStore
+	guidelineSearch  *guideline.Searcher      // Sgrep-based guideline search
 	activeThreads    map[int64]*ThreadTracker // Track active discussion threads
 	// TODO: should align with dspy agent interface
 	githubTools         types.GitHubInterface // Add this field
@@ -154,59 +154,34 @@ func ExtractRelevantChanges(changes string, startline, endline int) string {
 func NewPRReviewAgent(ctx context.Context, githubTool GitHubInterface, dbPath string, config *AgentConfig) (ReviewAgent, error) {
 	logger := logging.GetLogger()
 
-	logger.Debug(ctx, "Starting agent initialization with dbPath: %s", dbPath)
+	logger.Debug(ctx, "Starting agent initialization")
 	if config == nil {
 		config = defaultAgentConfig()
 	}
-	db, err := sql.Open("sqlite3", dbPath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to initialize sqlite db: %v", err)
-	}
 
-	logger.Debug(ctx, "Successfully opened database")
-
-	var store RAGStore
-	// Use traditional RAG system with SQLite
-	logger.Debug(ctx, "Using traditional RAG system")
-	var ragErr error
+	// Use dbPath directory for .maestro storage (even though we don't use SQLite anymore)
 	dataDir := filepath.Dir(dbPath)
-	store, ragErr = rag.NewSQLiteRAGStore(db, logger, dataDir)
-	if ragErr != nil {
-		db.Close()
-		return nil, fmt.Errorf("failed to initialize rag store: %v", ragErr)
-	}
 
-	// Populate guidelines asynchronously to avoid blocking TUI startup
-	// Detect primary language via GitHub API; default to Go
+	// Initialize sgrep-based guideline searcher with .maestro directory
+	maestroDir := filepath.Join(dataDir, ".maestro")
+	guidelineSearcher := guideline.NewSearcher(maestroDir, logger)
+
+	// Ensure guidelines are cached and indexed in background
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
-				logger.Warn(ctx, "guideline population panic recovered: %v", r)
+				logger.Warn(ctx, "guideline setup panic recovered: %v", r)
 			}
 		}()
-		repo := githubTool.GetRepositoryInfo(ctx)
-		langs, _, err := githubTool.ListLanguages(ctx, repo.Owner, repo.Name)
-		primary := "go"
-		if err == nil && len(langs) > 0 {
-			max := 0
-			for lang, count := range langs {
-				if count > max {
-					max = count
-					primary = strings.ToLower(lang)
-				}
-			}
-		}
-		if err := store.PopulateGuidelinesBackground(ctx, primary); err != nil {
-			logger.Warn(ctx, "Failed to populate guidelines for %s: %v", primary, err)
+		if err := guidelineSearcher.EnsureReady(ctx); err != nil {
+			logger.Warn(ctx, "Failed to setup guidelines: %v", err)
 		} else {
-			logger.Info(ctx, "Guidelines populated for language: %s", primary)
+			logger.Info(ctx, "Guidelines ready at %s", guidelineSearcher.GuidelinesDir())
 		}
 	}()
 
 	metricsCollector := metrics.NewBusinessMetrics(logger)
-
 	metricsCollector.StartOptimizationCycle(ctx)
-	logger.Debug(ctx, "Successfully created RAG store")
 
 	// Create agent components immediately - don't wait for indexing
 	memory := agents.NewInMemoryStore()
@@ -230,7 +205,7 @@ func NewPRReviewAgent(ctx context.Context, githubTool GitHubInterface, dbPath st
 		reviewProcessor:  reviewProcessor,
 		declarativeChain: declarativeChain,
 		memory:           memory,
-		rag:              store,
+		guidelineSearch:  guidelineSearcher,
 		githubTools:      githubTool,
 		stopper:          stopper,
 		metrics:          metricsCollector,
@@ -240,7 +215,7 @@ func NewPRReviewAgent(ctx context.Context, githubTool GitHubInterface, dbPath st
 
 	// Start background indexing AFTER agent creation
 	logger.Debug(ctx, "🚀 Agent ready! Starting background repository indexing...")
-	go agent.startBackgroundIndexing(ctx, githubTool, store, dbPath, config.IndexWorkers)
+	go agent.startBackgroundIndexing(ctx, githubTool, config.IndexWorkers)
 
 	return agent, nil
 }
@@ -360,7 +335,7 @@ func (a *PRReviewAgent) convertDeclarativeToOrchestratorResult(result interface{
 	}
 }
 
-func (a *PRReviewAgent) startBackgroundIndexing(ctx context.Context, githubTool GitHubInterface, store RAGStore, dbPath string, workers int) {
+func (a *PRReviewAgent) startBackgroundIndexing(ctx context.Context, githubTool GitHubInterface, workers int) {
 	logger := logging.GetLogger()
 
 	a.indexStatus.SetIndexing(true)
@@ -505,10 +480,6 @@ func (a *PRReviewAgent) ClonedRepoPath() string {
 	return a.clonedRepoPath
 }
 
-// GetRAGStore returns the RAG store for question answering.
-func (a *PRReviewAgent) GetRAGStore() RAGStore {
-	return a.rag
-}
 
 // WaitForClone waits for the repository clone to complete, with a timeout.
 // Returns the cloned repo path, or empty string if timeout or clone failed.
@@ -541,6 +512,34 @@ func (a *PRReviewAgent) WaitForClone(ctx context.Context, timeout time.Duration)
 	return ""
 }
 
+// extractSearchQuery extracts a meaningful search query from a code chunk.
+func extractSearchQuery(chunk string) string {
+	lines := strings.Split(chunk, "\n")
+
+	// Find the first meaningful line (not empty, not just a comment)
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if len(trimmed) < 10 {
+			continue
+		}
+		// Skip pure comment lines
+		if strings.HasPrefix(trimmed, "//") || strings.HasPrefix(trimmed, "#") || strings.HasPrefix(trimmed, "/*") {
+			continue
+		}
+		// Found a meaningful line - truncate if too long
+		if len(trimmed) > 100 {
+			trimmed = trimmed[:100]
+		}
+		return trimmed
+	}
+
+	// Fallback: use truncated chunk content
+	if len(chunk) > 100 {
+		return chunk[:100]
+	}
+	return chunk
+}
+
 func (a *PRReviewAgent) Close() error {
 	logger := logging.GetLogger()
 	ctx := context.Background()
@@ -559,10 +558,6 @@ func (a *PRReviewAgent) Close() error {
 		a.clonedRepoPath = ""
 	}
 
-	// Close RAG store
-	if a.rag != nil {
-		return a.rag.Close()
-	}
 	return nil
 }
 
@@ -823,7 +818,7 @@ func (a *PRReviewAgent) analyzePatterns(ctx context.Context, tasks []PRReviewTas
 			continue
 		}
 
-		chunks, err := rag.SplitContentForEmbedding(task.FileContent, 1024) // Keep under 10KB limit
+		chunks, err := patterns.SplitContentBySize(task.FileContent, 1024) // Keep under 10KB limit
 		if err != nil {
 			return repoPatterns, guidelineMatches, fmt.Errorf("failed to split content for %s: %w", task.FilePath, err)
 		}
@@ -836,11 +831,10 @@ func (a *PRReviewAgent) analyzePatterns(ctx context.Context, tasks []PRReviewTas
 		// This avoids redundant guideline searches for the same patterns across chunks
 		var allFilePatterns []types.SimpleCodePattern
 		seenPatterns := make(map[string]bool)
-		// Use empty dataDir since ExtractCodePatterns doesn't need guidelines directory
-		enhancer := rag.NewGuidelineSearchEnhancer(logger, "")
-		
+		extractor := patterns.NewExtractor(logger)
+
 		for _, chunk := range chunks {
-			chunkPatterns := enhancer.ExtractCodePatterns(ctx, chunk)
+			chunkPatterns := extractor.ExtractCodePatterns(ctx, chunk)
 			for _, p := range chunkPatterns {
 				if !seenPatterns[p.Name] {
 					seenPatterns[p.Name] = true
@@ -852,17 +846,17 @@ func (a *PRReviewAgent) analyzePatterns(ctx context.Context, tasks []PRReviewTas
 		logger.Debug(ctx, "File %s: extracted %d unique patterns from %d chunks", 
 			filepath.Base(task.FilePath), len(allFilePatterns), len(chunks))
 		
-		// Phase 2: Do single guideline search for all deduplicated patterns
+		// Phase 2: Do single guideline search for all deduplicated patterns using sgrep
 		var fileGuidelineMatches []*Content
-		if len(allFilePatterns) > 0 {
-			guidelineResults, err := a.rag.FindRelevantGuidelines(ctx, allFilePatterns, 10)
+		if len(allFilePatterns) > 0 && a.guidelineSearch != nil {
+			guidelineResults, err := a.guidelineSearch.SearchForPatterns(ctx, allFilePatterns, 10)
 			if err != nil {
-				logger.Warn(ctx, "Failed to use pattern-based guideline search: %v", err)
+				logger.Warn(ctx, "Failed to use sgrep guideline search: %v", err)
 			} else {
-				fileGuidelineMatches = rag.ConvertToContent(guidelineResults)
+				fileGuidelineMatches = patterns.ConvertToContent(guidelineResults)
 
 				if util.GetEnvBool("MAESTRO_RAG_DEBUG_ENABLED", false) {
-					logger.Debug(ctx, "File-level pattern search found %d results", len(guidelineResults))
+					logger.Debug(ctx, "Sgrep guideline search found %d results", len(guidelineResults))
 					for i, result := range guidelineResults {
 						logger.Debug(ctx, "  %d. %s (score: %.3f, pattern: %s)",
 							i+1, result.Content.ID, result.FinalScore, result.Pattern)
@@ -897,45 +891,50 @@ func (a *PRReviewAgent) analyzePatterns(ctx context.Context, tasks []PRReviewTas
 			// Track progress atomically
 			var processedCount atomic.Int32
 
-			// Use unified embedding model consistent with guidelines and code indexing
-			embeddingModel := os.Getenv("MAESTRO_UNIFIED_EMBEDDING_MODEL")
-			if embeddingModel == "" {
-				embeddingModel = rag.GetGuidelineEmbeddingModel()
-			}
-
-			// Start workers
+			// Start workers - use sgrep for semantic code pattern search
 			for w := 0; w < numWorkers; w++ {
 				wg.Add(1)
 				go func() {
 					defer wg.Done()
 					for work := range workChan {
-						embeddingStartTime := time.Now()
-						fileEmbedding, err := llm.CreateEmbedding(ctx, work.chunk, core.WithModel(embeddingModel))
-						embeddingTime := time.Since(embeddingStartTime)
-
-						if err != nil {
-							resultChan <- chunkResult{err: fmt.Errorf("failed to create file embedding: %w", err)}
-							continue
-						}
-
-						if util.GetEnvBool("MAESTRO_LLM_RESPONSE_DEBUG", false) {
-							fmt.Printf("Embedding generated for chunk in %v, dimensions: %d\n", embeddingTime, len(fileEmbedding.Vector))
-						}
-
 						var patterns []*Content
-						if util.GetEnvBool("MAESTRO_RAG_DEBUG_ENABLED", false) {
-							patterns, _, err = a.rag.FindSimilarWithDebug(ctx, fileEmbedding.Vector, 5, "repository")
-						} else {
-							patterns, err = a.rag.FindSimilar(ctx, fileEmbedding.Vector, 5, "repository")
-						}
 
-						if err != nil {
-							resultChan <- chunkResult{err: fmt.Errorf("failed to find similar patterns: %w", err)}
-							continue
+						// Use sgrep for semantic search if repo is indexed
+						if a.clonedRepoPath != "" && a.sgrepTool != nil && a.sgrepTool.IsPathIndexed(ctx, a.clonedRepoPath) {
+							// Extract a search query from the chunk (first meaningful line or truncated content)
+							query := extractSearchQuery(work.chunk)
+							if query != "" {
+								results, err := a.sgrepTool.SearchInPath(ctx, a.clonedRepoPath, query, 5)
+								if err != nil {
+									if util.GetEnvBool("MAESTRO_RAG_DEBUG_ENABLED", false) {
+										logger.Debug(ctx, "Sgrep search failed for chunk: %v", err)
+									}
+								} else {
+									// Convert sgrep results to Content
+									for _, r := range results {
+										relevance := 1.0 - r.Score
+										if relevance < 0 {
+											relevance = 0
+										}
+										patterns = append(patterns, &Content{
+											ID:   fmt.Sprintf("%s:%d-%d", r.FilePath, r.StartLine, r.EndLine),
+											Text: r.Content,
+											Metadata: map[string]string{
+												"file_path":    r.FilePath,
+												"start_line":   fmt.Sprintf("%d", r.StartLine),
+												"end_line":     fmt.Sprintf("%d", r.EndLine),
+												"relevance":    fmt.Sprintf("%.4f", relevance),
+												"content_type": "repository",
+												"source":       "sgrep",
+											},
+										})
+									}
+								}
+							}
 						}
 
 						resultChan <- chunkResult{patterns: patterns}
-						
+
 						// Update spinner progress
 						processed := processedCount.Add(1)
 						if s := console.Spinner(); s != nil {

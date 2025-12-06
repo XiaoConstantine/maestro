@@ -852,7 +852,6 @@ type ReviewAgent interface {
 	ClonedRepoPath() string
 	WaitForClone(ctx context.Context, timeout time.Duration) string
 	GetIndexingStatus() *IndexingStatus
-	GetRAGStore() RAGStore
 	Close() error
 }
 

@@ -463,3 +463,51 @@ func (s *SgrepTool) SearchToContent(ctx context.Context, query string, limit int
 func (s *SgrepTool) GetRootPath() string {
 	return s.rootPath
 }
+
+// SearchInPath searches in a specific directory (useful for guidelines search).
+func (s *SgrepTool) SearchInPath(ctx context.Context, path, query string, limit int) ([]SgrepSearchResult, error) {
+	args := []string{query, "--json", "-n", fmt.Sprintf("%d", limit)}
+
+	cmd := exec.CommandContext(ctx, "sgrep", args...)
+	cmd.Dir = path
+
+	output, err := cmd.Output()
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			stderr := string(exitErr.Stderr)
+			if strings.Contains(stderr, "not indexed") || strings.Contains(stderr, "no index found") {
+				return nil, fmt.Errorf("path not indexed: %s", path)
+			}
+			return nil, fmt.Errorf("sgrep search failed: %s", stderr)
+		}
+		return nil, fmt.Errorf("sgrep search failed: %w", err)
+	}
+
+	var results []SgrepSearchResult
+	if err := json.Unmarshal(output, &results); err != nil {
+		return nil, fmt.Errorf("failed to parse sgrep output: %w", err)
+	}
+
+	return results, nil
+}
+
+// IndexPath indexes a specific directory for semantic search.
+func (s *SgrepTool) IndexPath(ctx context.Context, path string) error {
+	cmd := exec.CommandContext(ctx, "sgrep", "index", ".")
+	cmd.Dir = path
+
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("sgrep index failed for %s: %s", path, string(output))
+	}
+
+	s.logger.Info(ctx, "Successfully indexed path: %s", path)
+	return nil
+}
+
+// IsPathIndexed checks if a specific path is indexed.
+func (s *SgrepTool) IsPathIndexed(ctx context.Context, path string) bool {
+	cmd := exec.CommandContext(ctx, "sgrep", "status")
+	cmd.Dir = path
+	return cmd.Run() == nil
+}

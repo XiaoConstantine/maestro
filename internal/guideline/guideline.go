@@ -4,9 +4,13 @@ package guideline
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
@@ -17,10 +21,29 @@ import (
 	"github.com/XiaoConstantine/maestro/internal/util"
 )
 
+// GuidelineSource defines a source for guidelines.
+type GuidelineSource struct {
+	Name     string // Short name for the file (e.g., "uber-go-style")
+	URL      string
+	Language string
+}
+
+// DefaultSources returns the default guideline sources.
+func DefaultSources() []GuidelineSource {
+	return []GuidelineSource{
+		{
+			Name:     "uber-go-style",
+			URL:      "https://raw.githubusercontent.com/uber-go/guide/master/style.md",
+			Language: "Go",
+		},
+	}
+}
+
 // Fetcher handles retrieving guidelines from external sources.
 type Fetcher struct {
-	client *http.Client
-	logger *logging.Logger
+	client  *http.Client
+	logger  *logging.Logger
+	baseDir string // Base directory for storing guidelines (.maestro/guidelines)
 }
 
 // NewFetcher creates a new guideline fetcher.
@@ -33,62 +56,184 @@ func NewFetcher(logger *logging.Logger) *Fetcher {
 	}
 }
 
-// FetchGuidelines retrieves guidelines from various sources and processes them.
-func (f *Fetcher) FetchGuidelines(ctx context.Context) ([]types.GuidelineContent, error) {
-	// Define our sources for Go guidelines
-	sources := []struct {
-		URL      string
-		Parser   func([]byte) ([]types.GuidelineContent, error)
-		Language string
-	}{
-		{
-			URL:      "https://raw.githubusercontent.com/uber-go/guide/master/style.md",
-			Parser:   ParseMarkdownGuidelines,
-			Language: "Go",
+// NewFetcherWithStorage creates a guideline fetcher that caches to disk.
+func NewFetcherWithStorage(logger *logging.Logger, baseDir string) *Fetcher {
+	return &Fetcher{
+		client: &http.Client{
+			Timeout: 30 * time.Second,
 		},
+		logger:  logger,
+		baseDir: baseDir,
 	}
+}
+
+// GuidelinesDir returns the directory where guidelines are stored.
+func (f *Fetcher) GuidelinesDir() string {
+	if f.baseDir == "" {
+		return ""
+	}
+	return filepath.Join(f.baseDir, "guidelines")
+}
+
+// EnsureGuidelines fetches and caches guidelines to disk, skipping if already cached.
+// Returns the path to the guidelines directory for sgrep indexing.
+func (f *Fetcher) EnsureGuidelines(ctx context.Context) (string, error) {
+	if f.baseDir == "" {
+		return "", fmt.Errorf("no base directory configured for guideline storage")
+	}
+
+	guidelinesDir := f.GuidelinesDir()
+	if err := os.MkdirAll(guidelinesDir, 0755); err != nil {
+		return "", fmt.Errorf("failed to create guidelines directory: %w", err)
+	}
+
+	sources := DefaultSources()
+	var wg sync.WaitGroup
+	errorChan := make(chan error, len(sources))
+
+	for _, source := range sources {
+		src := source
+		wg.Go(func() {
+			if err := f.ensureGuidelineFile(ctx, src, guidelinesDir); err != nil {
+				errorChan <- fmt.Errorf("failed to ensure %s: %w", src.Name, err)
+			}
+		})
+	}
+
+	wg.Wait()
+	close(errorChan)
+
+	var errors []error
+	for err := range errorChan {
+		errors = append(errors, err)
+	}
+
+	if len(errors) > 0 {
+		return guidelinesDir, fmt.Errorf("some guidelines failed to fetch: %v", errors)
+	}
+
+	return guidelinesDir, nil
+}
+
+// ensureGuidelineFile checks if a guideline file exists and is fresh, fetching if needed.
+func (f *Fetcher) ensureGuidelineFile(ctx context.Context, source GuidelineSource, dir string) error {
+	filename := source.Name + ".md"
+	filePath := filepath.Join(dir, filename)
+
+	// Check if file exists and is recent (less than 24 hours old)
+	if info, err := os.Stat(filePath); err == nil {
+		age := time.Since(info.ModTime())
+		if age < 24*time.Hour {
+			f.logger.Debug(ctx, "Using cached guideline %s (age: %v)", filename, age.Round(time.Minute))
+			return nil
+		}
+		f.logger.Debug(ctx, "Guideline %s is stale (age: %v), refreshing", filename, age.Round(time.Minute))
+	}
+
+	// Fetch fresh content
+	f.logger.Debug(ctx, "Fetching guideline from %s", source.URL)
+	content, err := f.fetchContent(ctx, source.URL)
+	if err != nil {
+		// If fetch fails but we have a cached version, use it
+		if _, statErr := os.Stat(filePath); statErr == nil {
+			f.logger.Warn(ctx, "Failed to refresh %s, using cached version: %v", filename, err)
+			return nil
+		}
+		return err
+	}
+
+	// Add metadata header to the file for sgrep context
+	header := fmt.Sprintf(`---
+source: %s
+language: %s
+fetched: %s
+---
+
+`, source.URL, source.Language, time.Now().Format(time.RFC3339))
+
+	fullContent := header + string(content)
+
+	// Write atomically using temp file
+	tmpFile := filePath + ".tmp"
+	if err := os.WriteFile(tmpFile, []byte(fullContent), 0644); err != nil {
+		return fmt.Errorf("failed to write temp file: %w", err)
+	}
+
+	if err := os.Rename(tmpFile, filePath); err != nil {
+		os.Remove(tmpFile)
+		return fmt.Errorf("failed to rename temp file: %w", err)
+	}
+
+	f.logger.Info(ctx, "Cached guideline %s (%d bytes)", filename, len(fullContent))
+	return nil
+}
+
+// GetGuidelineHash returns a hash of all cached guideline files for cache invalidation.
+func (f *Fetcher) GetGuidelineHash(ctx context.Context) (string, error) {
+	guidelinesDir := f.GuidelinesDir()
+	if guidelinesDir == "" {
+		return "", fmt.Errorf("no guidelines directory configured")
+	}
+
+	entries, err := os.ReadDir(guidelinesDir)
+	if err != nil {
+		return "", err
+	}
+
+	h := sha256.New()
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".md") {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+		fmt.Fprintf(h, "%s:%d", entry.Name(), info.ModTime().Unix())
+	}
+
+	return hex.EncodeToString(h.Sum(nil))[:16], nil
+}
+
+// FetchGuidelines retrieves guidelines from various sources and processes them.
+// Deprecated: Use EnsureGuidelines + sgrep search instead.
+func (f *Fetcher) FetchGuidelines(ctx context.Context) ([]types.GuidelineContent, error) {
+	sources := DefaultSources()
 
 	var allGuidelines []types.GuidelineContent
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 
-	// Create an error channel to collect any errors during fetching
 	errorChan := make(chan error, len(sources))
 
 	for _, source := range sources {
-		src := source // Go 1.25: capture for wg.Go()
+		src := source
 		wg.Go(func() {
-			// Fetch the content
 			content, err := f.fetchContent(ctx, src.URL)
 			if err != nil {
 				errorChan <- fmt.Errorf("failed to fetch from %s: %w", src.URL, err)
 				return
 			}
 
-			// Parse the guidelines
-			guidelines, err := src.Parser(content)
+			guidelines, err := ParseMarkdownGuidelines(content)
 			if err != nil {
 				errorChan <- fmt.Errorf("failed to parse content from %s: %w", src.URL, err)
 				return
 			}
 
-			// Add language information
 			for i := range guidelines {
 				guidelines[i].Language = src.Language
 			}
 
-			// Add to our collection
 			mu.Lock()
 			allGuidelines = append(allGuidelines, guidelines...)
 			mu.Unlock()
 		})
 	}
 
-	// Wait for all fetches to complete
 	wg.Wait()
 	close(errorChan)
 
-	// Check for any errors
 	var errors []error
 	for err := range errorChan {
 		errors = append(errors, err)
