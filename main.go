@@ -12,9 +12,11 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/XiaoConstantine/dspy-go/pkg/agents/ace"
 	"github.com/XiaoConstantine/dspy-go/pkg/core"
 	"github.com/XiaoConstantine/dspy-go/pkg/llms"
 	"github.com/XiaoConstantine/dspy-go/pkg/logging"
+	maestroace "github.com/XiaoConstantine/maestro/internal/ace"
 	"github.com/XiaoConstantine/maestro/internal/agent"
 	"github.com/XiaoConstantine/maestro/internal/github"
 	"github.com/XiaoConstantine/maestro/internal/orchestration"
@@ -327,10 +329,31 @@ func runCLIWithoutBanner(cfg *config) error {
 		logger.Error(ctx, "Failed to create storage path: %v", err)
 		return fmt.Errorf("failed to create storage path: %w", err)
 	}
-	agent, err := review.NewPRReviewAgent(ctx, githubTools, dbPath, &types.AgentConfig{
+
+	// Initialize ACE (Agentic Context Engineering) for self-improving reviews
+	aceConfig := maestroace.LoadConfigFromEnv()
+	aceBasePath := filepath.Dir(dbPath)
+	aceManager, err := maestroace.NewMaestroACEManager(aceBasePath, aceConfig, logger)
+	if err != nil {
+		logger.Warn(ctx, "Failed to initialize ACE manager: %v", err)
+	} else if aceManager.IsEnabled() {
+		logger.Info(ctx, "ACE enabled for self-improving reviews")
+		// Register ACE cleanup
+		registerCleanup(func() {
+			aceManager.Close()
+		})
+	}
+
+	// Get ACE review manager for trajectory recording
+	var aceReviewManager *ace.Manager
+	if aceManager != nil && aceManager.IsEnabled() {
+		aceReviewManager, _ = aceManager.GetReviewManager(ctx)
+	}
+
+	agent, err := review.NewPRReviewAgentWithACE(ctx, githubTools, dbPath, &types.AgentConfig{
 		IndexWorkers:  cfg.indexWorkers,
 		ReviewWorkers: cfg.reviewWorkers,
-	})
+	}, aceReviewManager)
 	if err != nil {
 		logger.Error(ctx, "Failed to initialize review agent: %v", err)
 		return fmt.Errorf("failed to initialize review agent: %w", err)
@@ -923,11 +946,16 @@ func runModernUI(cfg *config) error {
 		_ = service.Shutdown(shutdownCtx)
 	}()
 
-	// Create review agent and register with service
-	reviewAgent, err := review.NewPRReviewAgent(ctx, githubTools, dbPath, &types.AgentConfig{
+	// Create review agent with ACE integration and register with service
+	var aceReviewManager *ace.Manager
+	if aceManager := service.GetACEManager(); aceManager != nil && aceManager.IsEnabled() {
+		aceReviewManager, _ = aceManager.GetReviewManager(ctx)
+	}
+
+	reviewAgent, err := review.NewPRReviewAgentWithACE(ctx, githubTools, dbPath, &types.AgentConfig{
 		IndexWorkers:  cfg.indexWorkers,
 		ReviewWorkers: cfg.reviewWorkers,
-	})
+	}, aceReviewManager)
 	if err != nil {
 		return fmt.Errorf("failed to initialize review agent: %w", err)
 	}

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/XiaoConstantine/dspy-go/pkg/agents"
+	"github.com/XiaoConstantine/dspy-go/pkg/agents/ace"
 	agentctx "github.com/XiaoConstantine/dspy-go/pkg/agents/context"
 	"github.com/XiaoConstantine/dspy-go/pkg/agents/react"
 	"github.com/XiaoConstantine/dspy-go/pkg/core"
@@ -41,11 +42,16 @@ type UnifiedReActAgent struct {
 	queryAnalyzer     *QueryAnalyzer
 	searchContext     *SearchContext
 	qualityTracker    *QualityTracker
-	contextManager    *agentctx.Manager  // Manus-inspired context engineering
+	contextManager    *agentctx.Manager     // Manus-inspired context engineering
 	flightRecorder    *trace.FlightRecorder // Go 1.25: lightweight continuous tracing
 	xmlFactory        *xml.ConfigFactory
 	toolCallParser    *xml.ToolCallParser
 	xmlEnabledModules map[string]*modules.Predict
+
+	// ACE (Agentic Context Engineering) for self-improving search
+	aceManager           *ace.Manager
+	currentTrajectory    *ace.TrajectoryRecorder
+	aceEnabled           bool
 }
 
 // SearchContext tracks the evolution of a search.
@@ -133,6 +139,23 @@ func (st *SearchTool) InputSchema() models.InputSchema             { return mode
 // NewUnifiedReActAgent creates a new unified ReAct agent.
 func NewUnifiedReActAgent(id string, searchTool *search.SimpleSearchTool, logger *logging.Logger) (*UnifiedReActAgent, error) {
 	return NewUnifiedReActAgentWithMemory(id, searchTool, nil, logger)
+}
+
+// NewUnifiedReActAgentWithACE creates a unified ReAct agent with ACE support.
+func NewUnifiedReActAgentWithACE(id string, searchTool *search.SimpleSearchTool, memory agents.Memory, aceManager *ace.Manager, logger *logging.Logger) (*UnifiedReActAgent, error) {
+	agent, err := NewUnifiedReActAgentWithMemory(id, searchTool, memory, logger)
+	if err != nil {
+		return nil, err
+	}
+
+	// Configure ACE if manager is provided
+	if aceManager != nil {
+		agent.aceManager = aceManager
+		agent.aceEnabled = true
+		logger.Info(context.Background(), "ACE enabled for UnifiedReActAgent %s", id)
+	}
+
+	return agent, nil
 }
 
 // NewUnifiedReActAgentWithMemory creates a unified ReAct agent with shared memory.
@@ -552,6 +575,16 @@ func (ura *UnifiedReActAgent) ExecuteSearch(ctx context.Context, request *search
 
 	ura.logger.Info(ctx, "Unified ReAct Agent %s starting search: %s", ura.ID, request.Query)
 
+	// ACE: Start trajectory recording for self-improvement
+	if ura.aceEnabled && ura.aceManager != nil {
+		ura.currentTrajectory = ura.aceManager.StartTrajectory(ura.ID, "search", request.Query)
+		// Inject learnings into context
+		if learnings := ura.aceManager.LearningsContext(); learnings != "" {
+			request.Context = request.Context + "\n\n## Learned Strategies\n" + learnings
+			ura.logger.Debug(ctx, "ACE: Injected learnings context into search request")
+		}
+	}
+
 	// Initialize context engineering: add search task to TodoManager
 	if ura.contextManager != nil {
 		ura.syncTodoFromQuery(ctx, request.Query)
@@ -613,6 +646,29 @@ func (ura *UnifiedReActAgent) ExecuteSearch(ctx context.Context, request *search
 	response.Duration = time.Since(startTime)
 	response.AgentID = ura.ID
 	response.Confidence = qualityAssessment.OverallScore
+
+	// ACE: End trajectory with outcome based on quality
+	if ura.aceEnabled && ura.currentTrajectory != nil {
+		outcome := ace.OutcomeSuccess
+		if qualityAssessment.OverallScore < 0.5 {
+			outcome = ace.OutcomeFailure
+		} else if qualityAssessment.OverallScore < 0.7 {
+			outcome = ace.OutcomePartial
+		}
+
+		// Record final step with result summary
+		ura.currentTrajectory.RecordStep("complete", "", response.Synthesis,
+			map[string]any{"query": request.Query},
+			map[string]any{
+				"result_count": len(response.Results),
+				"confidence":   response.Confidence,
+				"duration_ms":  response.Duration.Milliseconds(),
+			}, nil)
+
+		ura.aceManager.EndTrajectory(ctx, ura.currentTrajectory, outcome)
+		ura.currentTrajectory = nil
+		ura.logger.Debug(ctx, "ACE: Trajectory recorded with outcome %s", outcome)
+	}
 
 	ura.updateStatus("complete", 1.0, nil)
 	ura.logger.Info(ctx, "Unified ReAct Agent %s completed search in %v with %d results, confidence: %.2f",
@@ -694,11 +750,26 @@ func (ura *UnifiedReActAgent) executePhase(ctx context.Context, input map[string
 		ura.recordToolUsage(tool, phase.PhaseNumber, "Phase execution", 0.0)
 	}
 
+	// ACE: Record phase start
+	if ura.aceEnabled && ura.currentTrajectory != nil {
+		ura.currentTrajectory.RecordStep("phase_start", "", phase.Description,
+			map[string]any{
+				"phase_number": phase.PhaseNumber,
+				"tools":        phase.Tools,
+			}, nil, nil)
+	}
+
 	phaseCtx, cancel := context.WithTimeout(ctx, 120*time.Second)
 	defer cancel()
 
 	result, err := ura.reactAgent.Execute(phaseCtx, input)
 	if err != nil {
+		// ACE: Record phase error
+		if ura.aceEnabled && ura.currentTrajectory != nil {
+			ura.currentTrajectory.RecordStep("phase_error", "", fmt.Sprintf("Phase %d failed", phase.PhaseNumber),
+				nil, nil, err)
+		}
+
 		// Check if we hit timeout but agent may have found answer
 		if ctx.Err() == context.DeadlineExceeded {
 			ura.logger.Warn(ctx, "Phase execution timed out, attempting to extract any partial results")
@@ -707,6 +778,12 @@ func (ura *UnifiedReActAgent) executePhase(ctx context.Context, input map[string
 	}
 
 	ura.searchContext.IterationCount++
+
+	// ACE: Record phase completion
+	if ura.aceEnabled && ura.currentTrajectory != nil {
+		ura.currentTrajectory.RecordStep("phase_complete", "", fmt.Sprintf("Phase %d completed", phase.PhaseNumber),
+			nil, map[string]any{"iteration": ura.searchContext.IterationCount}, nil)
+	}
 
 	// Log result for debugging - verbose to trace integration issues
 	keys := make([]string, 0, len(result))

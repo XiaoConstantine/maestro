@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/XiaoConstantine/dspy-go/pkg/agents"
+	"github.com/XiaoConstantine/dspy-go/pkg/agents/ace"
 	"github.com/XiaoConstantine/dspy-go/pkg/core"
 	"github.com/XiaoConstantine/dspy-go/pkg/logging"
 	"github.com/XiaoConstantine/maestro/internal/chunk"
@@ -48,6 +49,11 @@ type PRReviewAgent struct {
 	hadExistingComments bool                  // Track if any comments/reviews exist (including bots)
 	clonedRepoPath      string                // Path to cloned repo in /tmp for sgrep indexing
 	sgrepTool           *search.SgrepTool     // Sgrep tool for semantic search
+
+	// ACE (Agentic Context Engineering) for self-improving reviews
+	aceManager        *ace.Manager           // ACE manager for trajectory recording and learnings
+	currentTrajectory *ace.TrajectoryRecorder // Current review trajectory for learning
+	aceEnabled        bool                   // Whether ACE is enabled for this agent
 }
 
 type ThreadTracker struct {
@@ -216,6 +222,25 @@ func NewPRReviewAgent(ctx context.Context, githubTool GitHubInterface, dbPath st
 	// Start background indexing AFTER agent creation
 	logger.Debug(ctx, "🚀 Agent ready! Starting background repository indexing...")
 	go agent.startBackgroundIndexing(ctx, githubTool, config.IndexWorkers)
+
+	return agent, nil
+}
+
+// NewPRReviewAgentWithACE creates a new PR review agent with ACE (Agentic Context Engineering) enabled.
+func NewPRReviewAgentWithACE(ctx context.Context, githubTool GitHubInterface, dbPath string, config *AgentConfig, aceManager *ace.Manager) (ReviewAgent, error) {
+	agent, err := NewPRReviewAgent(ctx, githubTool, dbPath, config)
+	if err != nil {
+		return nil, err
+	}
+
+	// Enable ACE if manager is provided
+	if aceManager != nil {
+		if prAgent, ok := agent.(*PRReviewAgent); ok {
+			prAgent.aceManager = aceManager
+			prAgent.aceEnabled = true
+			logging.GetLogger().Info(ctx, "ACE enabled for PRReviewAgent - learnings will be recorded and applied")
+		}
+	}
 
 	return agent, nil
 }
@@ -572,6 +597,20 @@ func (a *PRReviewAgent) ReviewPRWithChanges(ctx context.Context, prNumber int, t
 	reviewStart := time.Now()
 	logger.Info(ctx, "🎬 Starting PR #%d review for %d files", prNumber, len(tasks))
 
+	// ACE: Start trajectory recording for self-improvement
+	if a.aceEnabled && a.aceManager != nil {
+		taskQuery := fmt.Sprintf("review PR #%d with %d files", prNumber, len(tasks))
+		a.currentTrajectory = a.aceManager.StartTrajectory("pr_review_agent", "code_review", taskQuery)
+		if a.currentTrajectory != nil {
+			// Record review initiation step
+			a.currentTrajectory.RecordStep("review_init", "", fmt.Sprintf("Starting review for PR #%d", prNumber), nil, map[string]any{
+				"pr_number":  prNumber,
+				"file_count": len(tasks),
+			}, nil)
+		}
+		logger.Debug(ctx, "ACE trajectory started for PR #%d review", prNumber)
+	}
+
 	// Reset state for new review to avoid stale data from previous reviews
 	a.activeThreads = make(map[int64]*ThreadTracker)
 	a.hadExistingComments = false
@@ -701,6 +740,28 @@ func (a *PRReviewAgent) ReviewPRWithChanges(ctx context.Context, prNumber int, t
 	logger.Info(ctx, "🏁 PR #%d review completed in %v | Generated %d comments for %d files",
 		prNumber, totalReviewDuration, len(allComments), len(tasks))
 
+	// ACE: End trajectory with outcome based on review results
+	if a.aceEnabled && a.aceManager != nil && a.currentTrajectory != nil {
+		// Record final step with summary
+		a.currentTrajectory.RecordStep("review_complete", "", fmt.Sprintf("Review completed: %d comments generated", len(allComments)), nil, map[string]any{
+			"comment_count":   len(allComments),
+			"duration_ms":     totalReviewDuration.Milliseconds(),
+			"files_reviewed":  len(tasks),
+			"threads_created": len(a.activeThreads),
+		}, nil)
+
+		// Determine outcome based on review quality
+		outcome := ace.OutcomeSuccess
+		if len(allComments) == 0 && len(tasks) > 0 {
+			// No comments for files with changes might indicate partial success
+			outcome = ace.OutcomePartial
+		}
+
+		a.aceManager.EndTrajectory(ctx, a.currentTrajectory, outcome)
+		logger.Debug(ctx, "ACE trajectory ended for PR #%d with outcome: %v", prNumber, outcome)
+		a.currentTrajectory = nil
+	}
+
 	return allComments, nil
 }
 
@@ -733,6 +794,15 @@ func (a *PRReviewAgent) performInitialReview(ctx context.Context, tasks []PRRevi
 	logger := logging.GetLogger()
 	totalStart := time.Now()
 
+	// ACE: Inject learnings context if available
+	var learningsContext string
+	if a.aceEnabled && a.aceManager != nil {
+		learningsContext = a.aceManager.LearningsContext()
+		if learningsContext != "" {
+			logger.Debug(ctx, "ACE: Injecting %d chars of learned strategies into review context", len(learningsContext))
+		}
+	}
+
 	// Phase 1: Pattern Matching - Keep this sequential as it's file-level analysis
 	phase1Start := time.Now()
 	logger.Info(ctx, "🔍 Phase 1: Starting pattern analysis for %d files", len(tasks))
@@ -747,6 +817,16 @@ func (a *PRReviewAgent) performInitialReview(ctx context.Context, tasks []PRRevi
 		logger.Info(ctx, "✅ Phase 1 completed in %v (no files to process)", phase1Duration)
 	}
 
+	// ACE: Record pattern analysis phase
+	if a.aceEnabled && a.currentTrajectory != nil {
+		a.currentTrajectory.RecordStep("pattern_analysis", "", fmt.Sprintf("Analyzed %d files, found %d patterns and %d guidelines", len(tasks), len(repoPatterns), len(guidelineMatches)), nil, map[string]any{
+			"file_count":       len(tasks),
+			"pattern_count":    len(repoPatterns),
+			"guideline_count":  len(guidelineMatches),
+			"duration_ms":      phase1Duration.Milliseconds(),
+		}, nil)
+	}
+
 	// Phase 2: Create chunks for all files
 	phase2Start := time.Now()
 	logger.Info(ctx, "🔧 Phase 2: Starting chunk preparation")
@@ -757,6 +837,21 @@ func (a *PRReviewAgent) performInitialReview(ctx context.Context, tasks []PRRevi
 	phase2Duration := time.Since(phase2Start)
 	logger.Info(ctx, "✅ Phase 2 completed in %v", phase2Duration)
 
+	// Calculate total chunks for recording
+	phase2TotalChunks := 0
+	for _, task := range processedTasks {
+		phase2TotalChunks += len(task.Chunks)
+	}
+
+	// ACE: Record chunk preparation phase
+	if a.aceEnabled && a.currentTrajectory != nil {
+		a.currentTrajectory.RecordStep("chunk_preparation", "", fmt.Sprintf("Prepared %d chunks from %d files", phase2TotalChunks, len(processedTasks)), nil, map[string]any{
+			"chunk_count":    phase2TotalChunks,
+			"file_count":     len(processedTasks),
+			"duration_ms":    phase2Duration.Milliseconds(),
+		}, nil)
+	}
+
 	// Phase 3: Parallel chunk processing
 	phase3Start := time.Now()
 	totalChunks := 0
@@ -764,7 +859,7 @@ func (a *PRReviewAgent) performInitialReview(ctx context.Context, tasks []PRRevi
 		totalChunks += len(task.Chunks)
 	}
 	logger.Info(ctx, "⚡ Phase 3: Starting parallel processing of %d chunks across %d files", totalChunks, len(processedTasks))
-	comments, err := a.processChunksParallel(ctx, processedTasks, repoPatterns, guidelineMatches, console)
+	comments, err := a.processChunksParallel(ctx, processedTasks, repoPatterns, guidelineMatches, console, learningsContext)
 	if err != nil {
 		return nil, fmt.Errorf("failed to process chunks: %w", err)
 	}
@@ -785,6 +880,16 @@ func (a *PRReviewAgent) performInitialReview(ctx context.Context, tasks []PRRevi
 			len(comments))
 	} else {
 		logger.Info(ctx, "🎉 Total review completed instantly | Generated %d comments", len(comments))
+	}
+
+	// ACE: Record chunk processing phase
+	if a.aceEnabled && a.currentTrajectory != nil {
+		a.currentTrajectory.RecordStep("chunk_processing", "", fmt.Sprintf("Processed %d chunks, generated %d comments", totalChunks, len(comments)), nil, map[string]any{
+			"chunk_count":     totalChunks,
+			"comment_count":   len(comments),
+			"duration_ms":     phase3Duration.Milliseconds(),
+			"had_learnings":   learningsContext != "",
+		}, nil)
 	}
 
 	return comments, nil
@@ -1039,14 +1144,14 @@ func (a *PRReviewAgent) Config() *AgentConfig {
 }
 
 // processChunksParallel handles parallel chunk processing with intelligent optimization.
-func (a *PRReviewAgent) processChunksParallel(ctx context.Context, tasks []PRReviewTask, repoPatterns []*Content, guidelineMatches []*Content, console ConsoleInterface) ([]PRReviewComment, error) {
+func (a *PRReviewAgent) processChunksParallel(ctx context.Context, tasks []PRReviewTask, repoPatterns []*Content, guidelineMatches []*Content, console ConsoleInterface, learningsContext string) ([]PRReviewComment, error) {
 	// Check if Phase 2.2 Intelligent Parallel Processing is available
 	if a.shouldUseIntelligentProcessing() {
-		return a.processChunksIntelligent(ctx, tasks, repoPatterns, guidelineMatches, console)
+		return a.processChunksIntelligent(ctx, tasks, repoPatterns, guidelineMatches, console, learningsContext)
 	}
 
 	// Fall back to manual parallel processing
-	return a.processChunksManual(ctx, tasks, repoPatterns, guidelineMatches, console)
+	return a.processChunksManual(ctx, tasks, repoPatterns, guidelineMatches, console, learningsContext)
 }
 
 // shouldUseIntelligentProcessing determines if intelligent processing should be used.
@@ -1063,13 +1168,13 @@ func (a *PRReviewAgent) shouldUseIntelligentProcessing() bool {
 }
 
 // processChunksIntelligent delegates to processChunksManual which uses the high-performance parallel processor.
-func (a *PRReviewAgent) processChunksIntelligent(ctx context.Context, tasks []PRReviewTask, repoPatterns []*Content, guidelineMatches []*Content, console ConsoleInterface) ([]PRReviewComment, error) {
+func (a *PRReviewAgent) processChunksIntelligent(ctx context.Context, tasks []PRReviewTask, repoPatterns []*Content, guidelineMatches []*Content, console ConsoleInterface, learningsContext string) ([]PRReviewComment, error) {
 	// Both paths now use the same high-performance modules.Parallel processor
-	return a.processChunksManual(ctx, tasks, repoPatterns, guidelineMatches, console)
+	return a.processChunksManual(ctx, tasks, repoPatterns, guidelineMatches, console, learningsContext)
 }
 
 // processChunksManual uses the high-performance parallel processor with modules.Parallel.
-func (a *PRReviewAgent) processChunksManual(ctx context.Context, tasks []PRReviewTask, repoPatterns []*Content, guidelineMatches []*Content, console ConsoleInterface) ([]PRReviewComment, error) {
+func (a *PRReviewAgent) processChunksManual(ctx context.Context, tasks []PRReviewTask, repoPatterns []*Content, guidelineMatches []*Content, console ConsoleInterface, learningsContext string) ([]PRReviewComment, error) {
 	logger := logging.GetLogger()
 
 	// Calculate total chunks
@@ -1125,10 +1230,16 @@ func (a *PRReviewAgent) processChunksManual(ctx context.Context, tasks []PRRevie
 		}
 	}
 
-	// Create task context with guidelines
+	// Create task context with guidelines and ACE learnings
 	taskContext := map[string]interface{}{
-		"guidelines":  guidelinesText,
+		"guidelines":   guidelinesText,
 		"repo_context": "Repository patterns and practices",
+	}
+
+	// ACE: Inject learned strategies into review context
+	if learningsContext != "" {
+		taskContext["ace_learnings"] = learningsContext
+		taskContext["guidelines"] = guidelinesText + "\n\n## Learned Strategies from Past Reviews\n" + learningsContext
 	}
 
 	// Process all chunks in parallel using the high-performance processor

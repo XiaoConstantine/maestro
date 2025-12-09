@@ -12,6 +12,7 @@ import (
 
 	"github.com/XiaoConstantine/dspy-go/pkg/agents"
 	"github.com/XiaoConstantine/dspy-go/pkg/logging"
+	maestroace "github.com/XiaoConstantine/maestro/internal/ace"
 	"github.com/XiaoConstantine/maestro/internal/subagent"
 	"github.com/XiaoConstantine/maestro/internal/types"
 	"github.com/briandowns/spinner"
@@ -94,6 +95,7 @@ type MaestroService struct {
 	claudeProc     *subagent.ClaudeProcessor
 	geminiProc     *subagent.GeminiProcessor
 	currentSession string
+	aceManager     *maestroace.MaestroACEManager
 
 	mu          sync.RWMutex
 	initialized bool
@@ -163,6 +165,26 @@ func NewMaestroService(ctx context.Context, config *ServiceConfig, githubTools t
 		}
 	}
 
+	// Initialize ACE (Agentic Context Engineering) manager for self-improving agents
+	aceConfig := maestroace.LoadConfigFromEnv()
+	var aceBasePath string
+	if config.MemoryPath != "" {
+		aceBasePath = filepath.Dir(config.MemoryPath)
+	} else {
+		homeDir, err := os.UserHomeDir()
+		if err != nil {
+			homeDir = os.TempDir()
+		}
+		aceBasePath = filepath.Join(homeDir, ".maestro")
+	}
+
+	aceManager, err := maestroace.NewMaestroACEManager(aceBasePath, aceConfig, logger)
+	if err != nil {
+		logger.Warn(ctx, "Failed to initialize ACE manager: %v", err)
+	} else if aceManager.IsEnabled() {
+		logger.Info(ctx, "ACE (Agentic Context Engineering) enabled for self-improving agents")
+	}
+
 	return &MaestroService{
 		pool:           pool,
 		memory:         memory,
@@ -173,6 +195,7 @@ func NewMaestroService(ctx context.Context, config *ServiceConfig, githubTools t
 		claudeProc:     claudeProc,
 		geminiProc:     geminiProc,
 		currentSession: sessionName,
+		aceManager:     aceManager,
 		initialized:    true,
 	}, nil
 }
@@ -356,7 +379,20 @@ func (s *MaestroService) IsReady() bool {
 
 func (s *MaestroService) Shutdown(ctx context.Context) error {
 	s.pool.Shutdown(ctx)
+
+	// Close ACE manager to flush pending learnings
+	if s.aceManager != nil {
+		if err := s.aceManager.Close(); err != nil {
+			s.logger.Warn(ctx, "Failed to close ACE manager: %v", err)
+		}
+	}
+
 	return nil
+}
+
+// GetACEManager returns the ACE manager for self-improving agent capabilities.
+func (s *MaestroService) GetACEManager() *maestroace.MaestroACEManager {
+	return s.aceManager
 }
 
 func (s *MaestroService) SetReviewAgent(agent types.ReviewAgent) {

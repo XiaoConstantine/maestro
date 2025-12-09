@@ -7,7 +7,7 @@ require (
 	charm.land/bubbletea/v2 v2.0.0-rc.2
 	charm.land/lipgloss/v2 v2.0.0-beta.3.0.20251106193318-19329a3e8410
 	github.com/AlecAivazis/survey/v2 v2.3.7
-	github.com/XiaoConstantine/dspy-go v0.72.1
+	github.com/XiaoConstantine/dspy-go v0.73.0
 	github.com/XiaoConstantine/mcp-go v0.3.1
 	github.com/briandowns/spinner v1.23.2
 	github.com/charmbracelet/glamour/v2 v2.0.0-20251106195642-800eb8175930
@@ -61,10 +61,10 @@ require (
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
 	github.com/yuin/goldmark v1.7.8 // indirect
 	github.com/yuin/goldmark-emoji v1.0.5 // indirect
-	golang.org/x/crypto v0.43.0 // indirect
-	golang.org/x/net v0.46.0 // indirect
-	golang.org/x/sync v0.18.0 // indirect
-	golang.org/x/text v0.30.0 // indirect
+	golang.org/x/crypto v0.45.0 // indirect
+	golang.org/x/net v0.47.0 // indirect
+	golang.org/x/sync v0.19.0 // indirect
+	golang.org/x/text v0.32.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
 
@@ -77,5 +77,5 @@ require (
 	go.uber.org/atomic v1.7.0
 	go.uber.org/multierr v1.11.0 // indirect
 	golang.org/x/sys v0.38.0 // indirect
-	golang.org/x/term v0.36.0
+	golang.org/x/term v0.37.0
 )
