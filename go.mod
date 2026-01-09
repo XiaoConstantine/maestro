@@ -7,7 +7,7 @@ require (
 	charm.land/bubbletea/v2 v2.0.0-rc.2
 	charm.land/lipgloss/v2 v2.0.0-beta.3.0.20251106193318-19329a3e8410
 	github.com/AlecAivazis/survey/v2 v2.3.7
-	github.com/XiaoConstantine/dspy-go v0.73.0
+	github.com/XiaoConstantine/dspy-go v0.75.1
 	github.com/XiaoConstantine/mcp-go v0.3.1
 	github.com/briandowns/spinner v1.23.2
 	github.com/charmbracelet/glamour/v2 v2.0.0-20251106195642-800eb8175930
@@ -36,10 +36,10 @@ require (
 	github.com/clipperhouse/uax29/v2 v2.3.0 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/dlclark/regexp2 v1.11.0 // indirect
-	github.com/gabriel-vasile/mimetype v1.4.10 // indirect
+	github.com/gabriel-vasile/mimetype v1.4.12 // indirect
 	github.com/go-playground/locales v0.14.1 // indirect
 	github.com/go-playground/universal-translator v0.18.1 // indirect
-	github.com/go-playground/validator/v10 v10.28.0 // indirect
+	github.com/go-playground/validator/v10 v10.30.1 // indirect
 	github.com/gorilla/css v1.0.1 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/kballard/go-shellquote v0.0.0-20180428030007-95032a82bc51 // indirect
@@ -61,7 +61,7 @@ require (
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
 	github.com/yuin/goldmark v1.7.8 // indirect
 	github.com/yuin/goldmark-emoji v1.0.5 // indirect
-	golang.org/x/crypto v0.45.0 // indirect
+	golang.org/x/crypto v0.46.0 // indirect
 	golang.org/x/net v0.47.0 // indirect
 	golang.org/x/sync v0.19.0 // indirect
 	golang.org/x/text v0.32.0 // indirect
@@ -76,6 +76,6 @@ require (
 	github.com/spf13/cobra v1.8.1
 	go.uber.org/atomic v1.7.0
 	go.uber.org/multierr v1.11.0 // indirect
-	golang.org/x/sys v0.38.0 // indirect
-	golang.org/x/term v0.37.0
+	golang.org/x/sys v0.39.0 // indirect
+	golang.org/x/term v0.38.0
 )
