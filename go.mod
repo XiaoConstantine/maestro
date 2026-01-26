@@ -2,6 +2,9 @@ module github.com/XiaoConstantine/maestro
 
 go 1.25.5
 
+// Use local dspy-go for RLM development
+replace github.com/XiaoConstantine/dspy-go => ../dspy-go
+
 require (
 	charm.land/bubbles/v2 v2.0.0-rc.1
 	charm.land/bubbletea/v2 v2.0.0-rc.2
@@ -58,6 +61,7 @@ require (
 	github.com/tidwall/match v1.2.0 // indirect
 	github.com/tidwall/pretty v1.2.1 // indirect
 	github.com/tidwall/sjson v1.2.5 // indirect
+	github.com/traefik/yaegi v0.16.1 // indirect
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
 	github.com/yuin/goldmark v1.7.8 // indirect
 	github.com/yuin/goldmark-emoji v1.0.5 // indirect
@@ -72,7 +76,7 @@ require (
 	github.com/fatih/color v1.7.0 // indirect
 	github.com/google/go-querystring v1.1.0 // indirect
 	github.com/mattn/go-colorable v0.1.7 // indirect
-	github.com/sourcegraph/conc v0.3.0 // indirect
+	github.com/sourcegraph/conc v0.3.0
 	github.com/spf13/cobra v1.8.1
 	go.uber.org/atomic v1.7.0
 	go.uber.org/multierr v1.11.0 // indirect

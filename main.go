@@ -17,16 +17,12 @@ import (
 	"github.com/XiaoConstantine/dspy-go/pkg/llms"
 	"github.com/XiaoConstantine/dspy-go/pkg/logging"
 	maestroace "github.com/XiaoConstantine/maestro/internal/ace"
-	"github.com/XiaoConstantine/maestro/internal/agent"
 	"github.com/XiaoConstantine/maestro/internal/github"
 	"github.com/XiaoConstantine/maestro/internal/orchestration"
 	"github.com/XiaoConstantine/maestro/internal/review"
-	"github.com/XiaoConstantine/maestro/internal/search"
 	"github.com/XiaoConstantine/maestro/internal/types"
 	"github.com/XiaoConstantine/maestro/internal/util"
 	"github.com/XiaoConstantine/maestro/terminal"
-	"github.com/briandowns/spinner"
-	gh "github.com/google/go-github/v68/github"
 	"github.com/logrusorgru/aurora"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
@@ -504,255 +500,6 @@ func runFullPRReview(ctx context.Context, prNumber int, cfg *config, console typ
 	return nil
 }
 
-// TUIBackendAdapter adapts ReviewAgent to terminal.MaestroBackend.
-type TUIBackendAdapter struct {
-	agent       types.ReviewAgent
-	githubTools types.GitHubInterface
-	owner       string
-	repo        string
-}
-
-// NewTUIBackendAdapter creates a new backend adapter.
-func NewTUIBackendAdapter(agent types.ReviewAgent, githubTools types.GitHubInterface, owner, repo string) *TUIBackendAdapter {
-	return &TUIBackendAdapter{
-		agent:       agent,
-		githubTools: githubTools,
-		owner:       owner,
-		repo:        repo,
-	}
-}
-
-// ReviewPR implements terminal.MaestroBackend.
-func (a *TUIBackendAdapter) ReviewPR(ctx context.Context, prNumber int, onProgress func(status string)) ([]terminal.ReviewComment, error) {
-	if a.agent == nil {
-		return nil, fmt.Errorf("agent not initialized")
-	}
-
-	// Create a progress console adapter
-	progressConsole := &tuiProgressConsole{onProgress: onProgress}
-
-	// Fetch PR changes (like runFullPRReview does)
-	if onProgress != nil {
-		onProgress("Fetching PR changes...")
-	}
-	changes, err := a.githubTools.GetPullRequestChanges(ctx, prNumber)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get PR changes: %w", err)
-	}
-
-	// Create review tasks from the changes
-	tasks := make([]types.PRReviewTask, 0, len(changes.Files))
-	for _, file := range changes.Files {
-		tasks = append(tasks, types.PRReviewTask{
-			FilePath:    file.FilePath,
-			FileContent: file.FileContent,
-			Changes:     file.Patch,
-		})
-	}
-
-	if onProgress != nil {
-		onProgress(fmt.Sprintf("Reviewing %d files...", len(tasks)))
-	}
-
-	// Call ReviewPRWithChanges with tasks and preloaded changes
-	comments, err := a.agent.ReviewPRWithChanges(ctx, prNumber, tasks, progressConsole, changes)
-	if err != nil {
-		return nil, err
-	}
-
-	result := make([]terminal.ReviewComment, 0, len(comments))
-	for _, c := range comments {
-		result = append(result, terminal.ReviewComment{
-			FilePath:   c.FilePath,
-			LineNumber: c.LineNumber,
-			Content:    c.Content,
-			Severity:   c.Severity,
-			Suggestion: c.Suggestion,
-			Category:   c.Category,
-		})
-	}
-
-	return result, nil
-}
-
-// AskQuestion implements terminal.MaestroBackend.
-// It uses the UnifiedReActAgent which can iteratively search and read files to answer questions.
-func (a *TUIBackendAdapter) AskQuestion(ctx context.Context, question string) (string, error) {
-	if a.agent == nil {
-		return "", fmt.Errorf("agent not initialized")
-	}
-
-	logger := logging.GetLogger()
-	logger.Info(ctx, "Processing question with ReAct agent: %s", question)
-
-	// Get the cloned repo path
-	repoPath := a.agent.ClonedRepoPath()
-	if repoPath == "" {
-		return "Repository is still being cloned. Please wait a moment and try again.", nil
-	}
-
-	// Create a SimpleSearchTool for the cloned repo
-	searchTool := search.NewSimpleSearchTool(logger, repoPath)
-
-	// Create a UnifiedReActAgent that can iteratively explore the codebase
-	reactAgent, err := agent.NewUnifiedReActAgent("qa-agent", searchTool, logger)
-	if err != nil {
-		logger.Error(ctx, "Failed to create ReAct agent: %v", err)
-		return "", fmt.Errorf("failed to initialize question answering: %w", err)
-	}
-
-	// Create search request with the question
-	searchRequest := &search.SearchRequest{
-		Query:         question,
-		Context:       fmt.Sprintf("Repository: %s/%s. Answer the user's question by exploring the codebase. For overview questions, start by reading README.md.", a.owner, a.repo),
-		MaxResults:    10,
-		RequiredDepth: 3,
-	}
-
-	// Execute the search using the ReAct agent
-	response, err := reactAgent.ExecuteSearch(ctx, searchRequest)
-	if err != nil {
-		logger.Error(ctx, "ReAct agent search failed: %v", err)
-		return "", fmt.Errorf("failed to answer question: %w", err)
-	}
-
-	// Format the response
-	var result strings.Builder
-
-	// Extract the answer from the ReAct agent results
-	// The agent's answer is stored in a result with FilePath like "phase-X-output"
-	var answer string
-	var sourceFiles []string
-	seenFiles := make(map[string]bool)
-
-	for _, r := range response.Results {
-		if r.SearchResult == nil {
-			continue
-		}
-		// Phase outputs contain the agent's synthesized answer
-		if strings.HasPrefix(r.FilePath, "phase-") || strings.HasPrefix(r.FilePath, "react-") {
-			if r.Line != "" && len(r.Line) > len(answer) {
-				answer = r.Line
-			}
-		} else if r.FilePath != "" {
-			// Track actual source files explored
-			if !seenFiles[r.FilePath] {
-				seenFiles[r.FilePath] = true
-				sourceFiles = append(sourceFiles, r.FilePath)
-			}
-		}
-	}
-
-	// Use the agent's answer, fall back to synthesis
-	if answer != "" {
-		result.WriteString(answer)
-	} else if response.Synthesis != "" {
-		result.WriteString(response.Synthesis)
-	} else {
-		return fmt.Sprintf("I couldn't find relevant information about \"%s\" in this repository.", question), nil
-	}
-
-	// Add source files if available
-	if len(sourceFiles) > 0 {
-		result.WriteString("\n\n📁 Sources explored:\n")
-		for _, f := range sourceFiles {
-			result.WriteString(fmt.Sprintf("  • %s\n", f))
-		}
-	}
-
-	// Add confidence indicator
-	if response.Confidence < 0.5 {
-		result.WriteString("\n⚠️  Low confidence answer - results may be incomplete")
-	}
-
-	logger.Info(ctx, "ReAct agent completed in %v with confidence %.2f", response.Duration, response.Confidence)
-	return result.String(), nil
-}
-
-// GetRepoInfo implements terminal.MaestroBackend.
-func (a *TUIBackendAdapter) GetRepoInfo() terminal.RepoInfo {
-	return terminal.RepoInfo{
-		Owner:  a.owner,
-		Repo:   a.repo,
-		Branch: "main",
-	}
-}
-
-// IsReady implements terminal.MaestroBackend.
-func (a *TUIBackendAdapter) IsReady() bool {
-	return a.agent != nil
-}
-
-// Claude implements terminal.MaestroBackend (not supported in legacy adapter).
-func (a *TUIBackendAdapter) Claude(ctx context.Context, prompt string) (string, error) {
-	return "", fmt.Errorf("claude CLI not available in legacy mode - use TUI service adapter")
-}
-
-// Gemini implements terminal.MaestroBackend (not supported in legacy adapter).
-func (a *TUIBackendAdapter) Gemini(ctx context.Context, prompt string, taskType string) (string, error) {
-	return "", fmt.Errorf("gemini CLI not available in legacy mode - use TUI service adapter")
-}
-
-// tuiProgressConsole adapts progress callbacks to ConsoleInterface.
-type tuiProgressConsole struct {
-	onProgress func(status string)
-}
-
-func (c *tuiProgressConsole) StartSpinner(message string) {
-	if c.onProgress != nil {
-		c.onProgress(message)
-	}
-}
-func (c *tuiProgressConsole) StopSpinner() {}
-func (c *tuiProgressConsole) WithSpinner(ctx context.Context, message string, fn func() error) error {
-	return fn()
-}
-func (c *tuiProgressConsole) ShowComments(comments []types.PRReviewComment, metric types.MetricsCollector) {}
-func (c *tuiProgressConsole) ShowCommentsInteractive(comments []types.PRReviewComment, onPost func([]types.PRReviewComment) error) error {
-	return nil
-}
-func (c *tuiProgressConsole) ShowSummary(comments []types.PRReviewComment, metric types.MetricsCollector) {}
-func (c *tuiProgressConsole) StartReview(pr *gh.PullRequest) {
-	if c.onProgress != nil && pr != nil {
-		c.onProgress(fmt.Sprintf("Starting review: %s", pr.GetTitle()))
-	}
-}
-func (c *tuiProgressConsole) ReviewingFile(file string, current, total int) {
-	if c.onProgress != nil {
-		c.onProgress(fmt.Sprintf("Reviewing %s (%d/%d)", file, current, total))
-	}
-}
-func (c *tuiProgressConsole) ConfirmReviewPost(commentCount int) (bool, error) { return false, nil }
-func (c *tuiProgressConsole) ReviewComplete() {
-	if c.onProgress != nil {
-		c.onProgress("Review complete")
-	}
-}
-func (c *tuiProgressConsole) UpdateSpinnerText(text string) {
-	if c.onProgress != nil {
-		c.onProgress(text)
-	}
-}
-func (c *tuiProgressConsole) ShowReviewMetrics(metrics types.MetricsCollector, comments []types.PRReviewComment) {
-}
-func (c *tuiProgressConsole) CollectAllFeedback(comments []types.PRReviewComment, metric types.MetricsCollector) error {
-	return nil
-}
-func (c *tuiProgressConsole) Confirm(opts types.PromptOptions) (bool, error) { return false, nil }
-func (c *tuiProgressConsole) FileError(filepath string, err error) {
-	if c.onProgress != nil {
-		c.onProgress(fmt.Sprintf("Error in %s: %v", filepath, err))
-	}
-}
-func (c *tuiProgressConsole) Printf(format string, a ...interface{})    {}
-func (c *tuiProgressConsole) Println(a ...interface{})                  {}
-func (c *tuiProgressConsole) PrintHeader(text string)                   {}
-func (c *tuiProgressConsole) NoIssuesFound(file string, chunkNumber, totalChunks int) {}
-func (c *tuiProgressConsole) SeverityIcon(severity string) string { return "" }
-func (c *tuiProgressConsole) Color() bool                          { return false }
-func (c *tuiProgressConsole) Spinner() *spinner.Spinner            { return nil }
-func (c *tuiProgressConsole) IsInteractive() bool                  { return false }
-
 // TUIServiceAdapter wraps MaestroService for terminal.MaestroBackend.
 type TUIServiceAdapter struct {
 	service     *orchestration.MaestroService
@@ -803,14 +550,32 @@ func (a *TUIServiceAdapter) AskQuestion(ctx context.Context, question string) (s
 		return "", err
 	}
 
-	result := response.Answer
-	if sources, ok := response.Metadata["sources"].([]string); ok && len(sources) > 0 {
-		result += "\n\nSources:\n"
+	return formatAskResponse(response.Answer, response.Metadata), nil
+}
+
+// formatAskResponse formats an ask response with sources and confidence.
+func formatAskResponse(answer string, metadata map[string]interface{}) string {
+	var result strings.Builder
+	result.WriteString(answer)
+
+	// Add source files if available
+	if sources, ok := metadata["sources"].([]string); ok && len(sources) > 0 {
+		result.WriteString("\n\n📁 Sources explored:\n")
 		for _, s := range sources {
-			result += fmt.Sprintf("  - %s\n", s)
+			result.WriteString(fmt.Sprintf("  • %s\n", s))
 		}
 	}
-	return result, nil
+
+	// Add confidence indicator
+	if confidence, ok := metadata["confidence"].(float64); ok {
+		if confidence < 0.5 {
+			result.WriteString(fmt.Sprintf("\n⚠️  Confidence: %.0f%% - results may be incomplete", confidence*100))
+		} else {
+			result.WriteString(fmt.Sprintf("\n✓ Confidence: %.0f%%", confidence*100))
+		}
+	}
+
+	return result.String()
 }
 
 func (a *TUIServiceAdapter) GetRepoInfo() terminal.RepoInfo {
@@ -846,6 +611,66 @@ func (a *TUIServiceAdapter) Gemini(ctx context.Context, prompt string, taskType 
 		return "", err
 	}
 	return response.Answer, nil
+}
+
+func (a *TUIServiceAdapter) AskWithRLM(ctx context.Context, question string, opts terminal.RLMOptions) (string, error) {
+	response, err := a.service.ProcessRequest(ctx, orchestration.Request{
+		Type:     orchestration.RequestRLM,
+		Question: question,
+		Context: map[string]interface{}{
+			"content_path":   opts.ContentPath,
+			"max_iterations": opts.MaxIterations,
+			"model_tier":     opts.ModelTier,
+		},
+		OnProgress: opts.OnProgress,
+	})
+	if err != nil {
+		return "", err
+	}
+
+	// Format response with statistics
+	result := response.Answer
+	if response.Metadata != nil {
+		result += "\n\n📊 RLM Statistics:\n"
+
+		if iterations, ok := response.Metadata["iterations"].(int); ok {
+			result += fmt.Sprintf("  • Iterations: %d\n", iterations)
+		}
+
+		// Token breakdown
+		totalTokens, _ := response.Metadata["total_tokens"].(int)
+		rootTokens, _ := response.Metadata["root_tokens"].(int)
+		subTokens, _ := response.Metadata["sub_tokens"].(int)
+		promptTokens, _ := response.Metadata["prompt_tokens"].(int)
+		completionTokens, _ := response.Metadata["completion_tokens"].(int)
+
+		if totalTokens > 0 {
+			result += fmt.Sprintf("  • Total tokens: %d (prompt: %d, completion: %d)\n",
+				totalTokens, promptTokens, completionTokens)
+			result += fmt.Sprintf("  • Token breakdown: root=%d, sub-agents=%d\n", rootTokens, subTokens)
+		}
+
+		// Token savings
+		if savings, ok := response.Metadata["token_savings"].(float64); ok && savings > 0 {
+			result += fmt.Sprintf("  • Token savings vs naive: %.1f%%\n", savings*100)
+		}
+
+		// Cost
+		if cost, ok := response.Metadata["cost_usd"].(float64); ok && cost > 0 {
+			result += fmt.Sprintf("  • Estimated cost: $%.4f\n", cost)
+		}
+
+		// Duration
+		if durationMs, ok := response.Metadata["duration_ms"].(int64); ok {
+			result += fmt.Sprintf("  • Duration: %.1fs\n", float64(durationMs)/1000)
+		}
+
+		// Status
+		if status, ok := response.Metadata["status"].(string); ok && status != "success" {
+			result += fmt.Sprintf("  • Status: %s\n", status)
+		}
+	}
+	return result, nil
 }
 
 func (a *TUIServiceAdapter) CreateSession(ctx context.Context, name string) error {

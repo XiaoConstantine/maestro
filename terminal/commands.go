@@ -124,6 +124,17 @@ func (cp *CommandPaletteModel) registerDefaultCommands() {
 			{Name: "prompt", Description: "Prompt text", Required: true},
 		},
 	})
+
+	// RLM (Recursive Language Model) for large-context analysis
+	cp.RegisterCommand(Command{
+		Name:        "rlm",
+		Aliases:     []string{"/rlm"},
+		Description: "Analyze large context using Recursive Language Model (40% token savings)",
+		Category:    "Analysis",
+		Args: []CommandArg{
+			{Name: "question", Description: "Analysis question", Required: true},
+		},
+	})
 	// Tools management as multi-word commands (to match `tools setup|status`)
 	cp.RegisterCommand(Command{
 		Name:        "tools setup",

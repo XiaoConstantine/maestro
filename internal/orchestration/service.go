@@ -13,6 +13,7 @@ import (
 	"github.com/XiaoConstantine/dspy-go/pkg/agents"
 	"github.com/XiaoConstantine/dspy-go/pkg/logging"
 	maestroace "github.com/XiaoConstantine/maestro/internal/ace"
+	"github.com/XiaoConstantine/maestro/internal/rlm"
 	"github.com/XiaoConstantine/maestro/internal/subagent"
 	"github.com/XiaoConstantine/maestro/internal/types"
 	"github.com/briandowns/spinner"
@@ -56,6 +57,7 @@ const (
 	RequestAsk    RequestType = "ask"
 	RequestClaude RequestType = "claude"
 	RequestGemini RequestType = "gemini"
+	RequestRLM    RequestType = "rlm"
 )
 
 type ServiceConfig struct {
@@ -210,6 +212,8 @@ func (s *MaestroService) ProcessRequest(ctx context.Context, request Request) (*
 		return s.handleClaude(ctx, request)
 	case RequestGemini:
 		return s.handleGemini(ctx, request)
+	case RequestRLM:
+		return s.handleRLM(ctx, request)
 	default:
 		return nil, fmt.Errorf("unknown request type: %s", request.Type)
 	}
@@ -352,6 +356,83 @@ func (s *MaestroService) handleGemini(ctx context.Context, request Request) (*Re
 		Type:     RequestGemini,
 		Answer:   response,
 		Metadata: resultMap,
+	}, nil
+}
+
+func (s *MaestroService) handleRLM(ctx context.Context, request Request) (*Response, error) {
+	s.logger.Info(ctx, "Processing RLM request: %s", request.Question)
+
+	// Get content path from request context or use cloned repo
+	contentPath := ""
+	if request.Context != nil {
+		if path, ok := request.Context["content_path"].(string); ok {
+			contentPath = path
+		}
+	}
+
+	if contentPath == "" {
+		// Try to get repo path from review agent
+		if reviewAgent, err := s.pool.GetReviewAgent(ctx); err == nil {
+			contentPath = reviewAgent.ClonedRepoPath()
+		}
+	}
+
+	if contentPath == "" {
+		return &Response{
+			Type:   RequestRLM,
+			Answer: "Repository is still being cloned. Please wait a moment and try again.",
+		}, nil
+	}
+
+	// Extract RLM options from context
+	modelTier := "smart"
+	maxIterations := 0
+	if request.Context != nil {
+		if tier, ok := request.Context["model_tier"].(string); ok {
+			modelTier = tier
+		}
+		// Handle both int and float64 (JSON decodes numbers as float64)
+		if iter, ok := request.Context["max_iterations"].(int); ok {
+			maxIterations = iter
+		} else if iterFloat, ok := request.Context["max_iterations"].(float64); ok {
+			maxIterations = int(iterFloat)
+		}
+	}
+
+	// Create RLM processor
+	processor, err := rlm.NewProcessor(rlm.ProcessorConfig{
+		ModelTier:     modelTier,
+		MaxIterations: maxIterations,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to create RLM processor: %w", err)
+	}
+
+	// Process the request
+	result, err := processor.Process(ctx, rlm.Request{
+		Query:       request.Question,
+		ContentPath: contentPath,
+		OnProgress:  request.OnProgress,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("RLM processing failed: %w", err)
+	}
+
+	return &Response{
+		Type:   RequestRLM,
+		Answer: result.Answer,
+		Metadata: map[string]interface{}{
+			"iterations":        result.Iterations,
+			"total_tokens":      result.TotalTokens,
+			"prompt_tokens":     result.PromptTokens,
+			"completion_tokens": result.CompletionTokens,
+			"root_tokens":       result.RootTokens,
+			"sub_tokens":        result.SubTokens,
+			"token_savings":     result.TokenSavings,
+			"cost_usd":          result.CostUSD,
+			"duration_ms":       result.Duration.Milliseconds(),
+			"status":            result.Status.String(),
+		},
 	}, nil
 }
 
