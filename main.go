@@ -16,10 +16,12 @@ import (
 	"github.com/XiaoConstantine/dspy-go/pkg/core"
 	"github.com/XiaoConstantine/dspy-go/pkg/llms"
 	"github.com/XiaoConstantine/dspy-go/pkg/logging"
+	"github.com/anthropics/anthropic-sdk-go"
 	maestroace "github.com/XiaoConstantine/maestro/internal/ace"
 	"github.com/XiaoConstantine/maestro/internal/github"
 	"github.com/XiaoConstantine/maestro/internal/orchestration"
 	"github.com/XiaoConstantine/maestro/internal/review"
+	"github.com/XiaoConstantine/maestro/internal/rlm"
 	"github.com/XiaoConstantine/maestro/internal/types"
 	"github.com/XiaoConstantine/maestro/internal/util"
 	"github.com/XiaoConstantine/maestro/terminal"
@@ -83,11 +85,19 @@ type config struct {
 
 	indexWorkers  int // Number of concurrent workers for indexing
 	reviewWorkers int // Number of concurrent workers for review
+
+	// RLM-specific provider configuration
+	rlmProvider string // "anthropic", "openai" for RLM processing
+	rlmModel    string // Model name for RLM (e.g., "gpt-4o", "claude-sonnet-4-5")
 }
 
 const (
 	DefaultModelProvider = "llamacpp:"
 	DefaultModelName     = "llamacpp:"
+
+	// RLM-specific defaults
+	DefaultRLMProvider = "anthropic"
+	DefaultRLMModel    = "" // Use provider default
 )
 
 func printMaestroBanner() {
@@ -224,13 +234,25 @@ Available slash commands in interactive mode:
 	// improves throughput by overlapping HTTP requests.
 	rootCmd.PersistentFlags().IntVar(&cfg.reviewWorkers, "review-workers", 120, "Number of concurrent workers for parallel review")
 
+	// RLM provider flags - these control which LLM provider is used for RLM processing
+	rootCmd.PersistentFlags().StringVar(&cfg.rlmProvider, "rlm-provider", DefaultRLMProvider, "LLM provider for RLM processing (anthropic, openai, codex, claude-code)")
+	rootCmd.PersistentFlags().StringVar(&cfg.rlmModel, "rlm-model", DefaultRLMModel, "Model name for RLM (e.g., gpt-4o, gpt-4o-mini, o3, o3-mini, claude-sonnet-4-5)")
+
 	// Mark required flags
 	rootCmd.PersistentPreRun = func(cmd *cobra.Command, args []string) {
+		// Skip github token check for benchmark command
+		if cmd.Name() == "benchmark" {
+			return
+		}
 		if cfg.githubToken == "" {
 			fmt.Fprintln(os.Stderr, "GitHub token required via --github-token or MAESTRO_GITHUB_TOKEN")
 			os.Exit(1)
 		}
 	}
+
+	// Add benchmark subcommand
+	benchmarkCmd := createBenchmarkCmd(cfg)
+	rootCmd.AddCommand(benchmarkCmd)
 
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
@@ -752,6 +774,39 @@ func runModernUI(cfg *config) error {
 		return fmt.Errorf("failed to create storage path: %w", err)
 	}
 
+	// Resolve RLM API key based on RLM provider (not main provider)
+	// This prevents using an incompatible key when providers differ
+	rlmProvider := strings.ToLower(cfg.rlmProvider)
+	mainProvider := strings.ToLower(cfg.modelProvider)
+	var rlmAPIKey string
+
+	switch rlmProvider {
+	case "openai", "codex":
+		// For OpenAI RLM, prefer OPENAI_API_KEY, fall back to main key only if main provider is also OpenAI
+		rlmAPIKey = os.Getenv("OPENAI_API_KEY")
+		if rlmAPIKey == "" && (mainProvider == "openai" || mainProvider == "codex") {
+			rlmAPIKey = cfg.apiKey
+		}
+	case "anthropic":
+		// For Anthropic RLM, prefer Anthropic env vars, fall back to main key only if main provider is also Anthropic
+		rlmAPIKey = util.FirstNonEmpty(
+			os.Getenv("ANTHROPIC_OAUTH_TOKEN"),
+			os.Getenv("ANTHROPIC_API_KEY"),
+			os.Getenv("CLAUDE_API_KEY"),
+		)
+		if rlmAPIKey == "" && mainProvider == "anthropic" {
+			rlmAPIKey = cfg.apiKey
+		}
+	case "claude-code", "cc":
+		// Claude Code uses CLI auth, no API key needed
+		rlmAPIKey = ""
+	default:
+		// For other providers, use main API key if providers match
+		if rlmProvider == mainProvider {
+			rlmAPIKey = cfg.apiKey
+		}
+	}
+
 	// Create MaestroService (singleton for this session)
 	service, err := orchestration.NewMaestroService(ctx, &orchestration.ServiceConfig{
 		MemoryType:    orchestration.MemoryInMemory,
@@ -761,6 +816,9 @@ func runModernUI(cfg *config) error {
 		GitHubToken:   cfg.githubToken,
 		IndexWorkers:  cfg.indexWorkers,
 		ReviewWorkers: cfg.reviewWorkers,
+		RLMProvider:   cfg.rlmProvider,
+		RLMModel:      cfg.rlmModel,
+		RLMAPIKey:     rlmAPIKey,
 	}, githubTools)
 	if err != nil {
 		return fmt.Errorf("failed to create service: %w", err)
@@ -803,3 +861,259 @@ func runModernUI(cfg *config) error {
 	return terminal.RunMaestro(tuiConfig, backend)
 }
 
+// createBenchmarkCmd creates the benchmark subcommand for RLM efficiency testing.
+func createBenchmarkCmd(cfg *config) *cobra.Command {
+	var (
+		benchMode   string
+		iterations  int
+		warmupRuns  int
+		outputDir   string
+		testDir     string
+		tags        []string
+		excludeTags []string
+		verbose     bool
+		contextFile string
+		query       string
+	)
+
+	cmd := &cobra.Command{
+		Use:   "benchmark",
+		Short: "Run RLM efficiency benchmarks",
+		Long: `Run benchmarks comparing Direct vs RLM approaches for context processing.
+
+Modes:
+  direct  - Run only direct context stuffing
+  rlm     - Run only RLM recursive processing
+  ab      - Run both and compare (default)
+
+Examples:
+  # Run A/B comparison with default test cases
+  maestro benchmark --rlm-provider anthropic
+
+  # Benchmark a specific file/directory
+  maestro benchmark --context ./src --query "Explain the architecture"
+
+  # Run with custom iterations
+  maestro benchmark --iterations 5 --warmup 2`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runBenchmark(cfg, benchMode, iterations, warmupRuns, outputDir, testDir, tags, excludeTags, verbose, contextFile, query)
+		},
+	}
+
+	cmd.Flags().StringVar(&benchMode, "mode", "ab", "Benchmark mode: direct, rlm, or ab (both)")
+	cmd.Flags().IntVar(&iterations, "iterations", 3, "Number of iterations per test")
+	cmd.Flags().IntVar(&warmupRuns, "warmup", 1, "Number of warmup runs before measurement")
+	cmd.Flags().StringVar(&outputDir, "output", "./benchmark_results", "Output directory for reports")
+	cmd.Flags().StringVar(&testDir, "test-dir", "", "Directory containing test case files")
+	cmd.Flags().StringSliceVar(&tags, "tags", nil, "Filter tests by tags (e.g., small,medium)")
+	cmd.Flags().StringSliceVar(&excludeTags, "exclude-tags", nil, "Exclude tests by tags")
+	cmd.Flags().BoolVar(&verbose, "verbose", true, "Verbose output")
+	cmd.Flags().StringVar(&contextFile, "context", "", "File or directory to use as context")
+	cmd.Flags().StringVar(&query, "query", "", "Query to run against the context")
+
+	return cmd
+}
+
+func runBenchmark(cfg *config, mode string, iterations, warmupRuns int, outputDir, testDir string, tags, excludeTags []string, verbose bool, contextFile, query string) error {
+	ctx := context.Background()
+
+	fmt.Println("═══════════════════════════════════════════")
+	fmt.Println("         MAESTRO RLM BENCHMARK             ")
+	fmt.Println("═══════════════════════════════════════════")
+	fmt.Printf("Provider: %s\n", cfg.rlmProvider)
+	fmt.Printf("Model: %s\n", cfg.rlmModel)
+	fmt.Printf("Mode: %s\n", mode)
+	fmt.Println()
+
+	// Resolve API key based on RLM provider
+	rlmProvider := strings.ToLower(cfg.rlmProvider)
+	var rlmAPIKey string
+	switch rlmProvider {
+	case "openai", "codex":
+		rlmAPIKey = os.Getenv("OPENAI_API_KEY")
+	case "anthropic":
+		rlmAPIKey = util.FirstNonEmpty(
+			os.Getenv("ANTHROPIC_API_KEY"),
+			os.Getenv("CLAUDE_API_KEY"),
+		)
+	case "claude-code", "cc":
+		// Claude Code doesn't need API key
+	default:
+		rlmAPIKey = cfg.apiKey
+	}
+
+	if rlmAPIKey == "" && rlmProvider != "claude-code" && rlmProvider != "cc" {
+		return fmt.Errorf("API key required for provider %s (set via environment variable)", rlmProvider)
+	}
+
+	// Create the direct LLM for comparison
+	var directLLM core.LLM
+	var err error
+	switch rlmProvider {
+	case "anthropic":
+		model := cfg.rlmModel
+		if model == "" {
+			model = "claude-sonnet-4-5-20250929"
+		}
+		directLLM, err = llms.NewAnthropicLLM(rlmAPIKey, anthropic.Model(model))
+	case "openai", "codex":
+		model := cfg.rlmModel
+		if model == "" {
+			model = "gpt-4o"
+		}
+		directLLM, err = llms.NewOpenAI(core.ModelID(model), rlmAPIKey)
+	default:
+		return fmt.Errorf("unsupported provider for benchmark: %s", rlmProvider)
+	}
+	if err != nil {
+		return fmt.Errorf("failed to create direct LLM: %w", err)
+	}
+
+	// Create the RLM processor
+	subClient, err := rlm.NewTieredSubClientFromConfig(rlm.ProviderConfig{
+		Provider: rlmProvider,
+		Model:    cfg.rlmModel,
+		APIKey:   rlmAPIKey,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create tiered client: %w", err)
+	}
+
+	processorConfig := rlm.ProcessorConfig{
+		Verbose: verbose,
+	}
+	processor, err := rlm.NewProcessorWithLLM(directLLM, subClient, processorConfig)
+	if err != nil {
+		return fmt.Errorf("failed to create processor: %w", err)
+	}
+
+	// If context and query provided, run single benchmark
+	if contextFile != "" && query != "" {
+		return runSingleBenchmark(ctx, processor, directLLM, mode, contextFile, query, iterations, warmupRuns, verbose)
+	}
+
+	// Otherwise run the full suite
+	cliConfig := rlm.BenchmarkCLIConfig{
+		Mode:       mode,
+		Iterations: iterations,
+		WarmupRuns: warmupRuns,
+		OutputDir:  outputDir,
+		TestDir:    testDir,
+		Tags:       tags,
+		ExcludeTag: excludeTags,
+		Verbose:    verbose,
+	}
+
+	runner := rlm.NewBenchmarkRunner(cliConfig, processor, directLLM)
+	report, err := runner.Run(ctx)
+	if err != nil {
+		return fmt.Errorf("benchmark failed: %w", err)
+	}
+
+	// Print efficiency report
+	fmt.Println()
+	fmt.Println(rlm.GenerateEfficiencyReport(report))
+
+	return nil
+}
+
+func runSingleBenchmark(ctx context.Context, processor *rlm.Processor, directLLM core.LLM, mode, contextFile, query string, iterations, warmupRuns int, verbose bool) error {
+	// Load context from file or directory
+	var contextContent string
+	info, err := os.Stat(contextFile)
+	if err != nil {
+		return fmt.Errorf("failed to stat context file: %w", err)
+	}
+
+	if info.IsDir() {
+		// Gather context from directory
+		var builder strings.Builder
+		err = filepath.Walk(contextFile, func(path string, info os.FileInfo, err error) error {
+			if err != nil || info.IsDir() {
+				return nil
+			}
+			// Only include code files
+			ext := strings.ToLower(filepath.Ext(path))
+			codeExts := map[string]bool{
+				".go": true, ".py": true, ".js": true, ".ts": true,
+				".java": true, ".c": true, ".cpp": true, ".h": true,
+				".rs": true, ".rb": true, ".php": true, ".md": true,
+			}
+			if !codeExts[ext] {
+				return nil
+			}
+			content, err := os.ReadFile(path)
+			if err != nil {
+				return nil
+			}
+			relPath, _ := filepath.Rel(contextFile, path)
+			builder.WriteString(fmt.Sprintf("=== %s ===\n", relPath))
+			builder.Write(content)
+			builder.WriteString("\n\n")
+			return nil
+		})
+		if err != nil {
+			return fmt.Errorf("failed to gather context: %w", err)
+		}
+		contextContent = builder.String()
+	} else {
+		content, err := os.ReadFile(contextFile)
+		if err != nil {
+			return fmt.Errorf("failed to read context file: %w", err)
+		}
+		contextContent = string(content)
+	}
+
+	fmt.Printf("Context size: %d bytes (~%d tokens)\n", len(contextContent), len(contextContent)/4)
+	fmt.Printf("Query: %s\n\n", query)
+
+	tc := rlm.TestCase{
+		ID:      "single-benchmark",
+		Name:    "Single Benchmark",
+		Context: contextContent,
+		Query:   query,
+	}
+
+	config := rlm.BenchmarkConfig{
+		Mode:           rlm.BenchmarkMode(mode),
+		Iterations:     iterations,
+		WarmupRuns:     warmupRuns,
+		Timeout:        10 * time.Minute,
+		CollectQuality: false,
+	}
+
+	benchmarker := rlm.NewBenchmarker(config, processor, directLLM)
+	result, err := benchmarker.RunTestCase(ctx, tc)
+	if err != nil {
+		return fmt.Errorf("benchmark failed: %w", err)
+	}
+
+	// Print results
+	fmt.Println("═══════════════════════════════════════════")
+	fmt.Println("                 RESULTS                   ")
+	fmt.Println("═══════════════════════════════════════════")
+
+	if len(result.DirectRuns) > 0 {
+		fmt.Println("\n📊 DIRECT MODE:")
+		fmt.Printf("  Avg Tokens:   %.0f\n", result.DirectStats.AvgTotalTokens)
+		fmt.Printf("  Avg Duration: %.0fms\n", result.DirectStats.AvgDuration)
+		fmt.Printf("  Total Cost:   $%.4f\n", result.DirectStats.TotalCostUSD)
+	}
+
+	if len(result.RLMRuns) > 0 {
+		fmt.Println("\n🔄 RLM MODE:")
+		fmt.Printf("  Avg Tokens:   %.0f\n", result.RLMStats.AvgTotalTokens)
+		fmt.Printf("  Avg Duration: %.0fms\n", result.RLMStats.AvgDuration)
+		fmt.Printf("  Total Cost:   $%.4f\n", result.RLMStats.TotalCostUSD)
+	}
+
+	if len(result.DirectRuns) > 0 && len(result.RLMRuns) > 0 {
+		fmt.Println("\n📈 COMPARISON:")
+		fmt.Printf("  Token Savings:    %.1f%%\n", result.Comparison.TokenSavingsPercent)
+		fmt.Printf("  Cost Savings:     %.1f%%\n", result.Comparison.CostSavingsPercent)
+		fmt.Printf("  Latency Overhead: %.1f%%\n", result.Comparison.LatencyDiffPercent)
+		fmt.Printf("\n  💡 %s\n", result.Comparison.Recommendation)
+	}
+
+	return nil
+}

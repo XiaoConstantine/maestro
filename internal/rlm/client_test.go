@@ -13,18 +13,37 @@ import (
 
 // mockLLM implements core.LLM for testing.
 type mockLLM struct {
-	response  string
-	callCount int
+	response         string
+	callCount        int
+	promptTokens     int
+	completionTokens int
+}
+
+// newMockLLMWithUsage creates a mockLLM with custom token usage values.
+func newMockLLMWithUsage(response string, promptTokens, completionTokens int) *mockLLM {
+	return &mockLLM{
+		response:         response,
+		promptTokens:     promptTokens,
+		completionTokens: completionTokens,
+	}
 }
 
 func (m *mockLLM) Generate(ctx context.Context, prompt string, opts ...core.GenerateOption) (*core.LLMResponse, error) {
 	m.callCount++
+	promptToks := m.promptTokens
+	if promptToks == 0 {
+		promptToks = 100
+	}
+	compToks := m.completionTokens
+	if compToks == 0 {
+		compToks = 50
+	}
 	return &core.LLMResponse{
 		Content: m.response,
 		Usage: &core.TokenInfo{
-			PromptTokens:     100,
-			CompletionTokens: 50,
-			TotalTokens:      150,
+			PromptTokens:     promptToks,
+			CompletionTokens: compToks,
+			TotalTokens:      promptToks + compToks,
 		},
 	}, nil
 }

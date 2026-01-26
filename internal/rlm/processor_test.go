@@ -95,12 +95,12 @@ func TestResult(t *testing.T) {
 	assert.Equal(t, StatusSuccess, result.Status)
 }
 
-func TestResumeNotImplemented(t *testing.T) {
-	// Resume is not yet implemented, should return error
+func TestResumeRequiresCheckpointManager(t *testing.T) {
+	// Resume requires checkpoint manager to be configured
 	p := &Processor{}
-	_, err := p.Resume(context.Background(), Checkpoint{}, Request{})
+	_, err := p.Resume(context.Background(), "/path/to/checkpoint.json", Request{})
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "not yet implemented")
+	assert.Contains(t, err.Error(), "checkpoint manager not configured")
 }
 
 func TestProgressEvent(t *testing.T) {

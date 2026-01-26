@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -68,6 +69,11 @@ type ServiceConfig struct {
 	GitHubToken   string
 	IndexWorkers  int
 	ReviewWorkers int
+
+	// RLM provider configuration
+	RLMProvider string // "anthropic", "openai", etc.
+	RLMModel    string // Model name for RLM
+	RLMAPIKey   string // API key for RLM provider
 }
 
 type Request struct {
@@ -387,6 +393,11 @@ func (s *MaestroService) handleRLM(ctx context.Context, request Request) (*Respo
 	// Extract RLM options from context
 	modelTier := "smart"
 	maxIterations := 0
+	provider := s.config.RLMProvider
+	model := s.config.RLMModel
+	apiKey := s.config.RLMAPIKey
+	originalProvider := provider
+
 	if request.Context != nil {
 		if tier, ok := request.Context["model_tier"].(string); ok {
 			modelTier = tier
@@ -397,12 +408,41 @@ func (s *MaestroService) handleRLM(ctx context.Context, request Request) (*Respo
 		} else if iterFloat, ok := request.Context["max_iterations"].(float64); ok {
 			maxIterations = int(iterFloat)
 		}
+		// Allow request-level provider override
+		if p, ok := request.Context["provider"].(string); ok && p != "" {
+			provider = p
+		}
+		if m, ok := request.Context["model"].(string); ok && m != "" {
+			model = m
+		}
+		// Allow request-level API key override
+		if k, ok := request.Context["api_key"].(string); ok && k != "" {
+			apiKey = k
+		}
 	}
 
-	// Create RLM processor
+	// If provider changed and no explicit API key override, clear the key
+	// to let the processor resolve it from environment variables
+	if strings.ToLower(provider) != strings.ToLower(originalProvider) && apiKey == s.config.RLMAPIKey {
+		apiKey = "" // Force environment variable lookup for new provider
+	}
+
+	// Use repo root for claude-code working directory when possible.
+	workDir := contentPath
+	if contentPath != "" {
+		if info, err := os.Stat(contentPath); err == nil && !info.IsDir() {
+			workDir = filepath.Dir(contentPath)
+		}
+	}
+
+	// Create RLM processor with provider configuration
 	processor, err := rlm.NewProcessor(rlm.ProcessorConfig{
 		ModelTier:     modelTier,
 		MaxIterations: maxIterations,
+		Provider:      provider,
+		Model:         model,
+		APIKey:        apiKey,
+		WorkDir:       workDir,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to create RLM processor: %w", err)
@@ -432,6 +472,8 @@ func (s *MaestroService) handleRLM(ctx context.Context, request Request) (*Respo
 			"cost_usd":          result.CostUSD,
 			"duration_ms":       result.Duration.Milliseconds(),
 			"status":            result.Status.String(),
+			"provider":          provider,
+			"model":             model,
 		},
 	}, nil
 }

@@ -12,6 +12,7 @@ require (
 	github.com/AlecAivazis/survey/v2 v2.3.7
 	github.com/XiaoConstantine/dspy-go v0.75.1
 	github.com/XiaoConstantine/mcp-go v0.3.1
+	github.com/anthropics/anthropic-sdk-go v1.19.0
 	github.com/briandowns/spinner v1.23.2
 	github.com/charmbracelet/glamour/v2 v2.0.0-20251106195642-800eb8175930
 	github.com/charmbracelet/x/ansi v0.11.1
@@ -25,7 +26,6 @@ require (
 
 require (
 	github.com/alecthomas/chroma/v2 v2.14.0 // indirect
-	github.com/anthropics/anthropic-sdk-go v1.19.0 // indirect
 	github.com/atotto/clipboard v0.1.4 // indirect
 	github.com/aymerick/douceur v0.2.0 // indirect
 	github.com/charmbracelet/colorprofile v0.3.3 // indirect

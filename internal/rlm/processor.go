@@ -35,13 +35,38 @@ type ProcessorConfig struct {
 	// ModelTier selects the model tier: "fast", "smart", or "best"
 	ModelTier string
 
+	// Provider specifies the LLM provider: "anthropic", "openai", "codex", "claude-code" (default: "anthropic")
+	Provider string
+
+	// Model specifies the model to use (provider-specific)
+	Model string
+
+	// APIKey for the provider (if not set, uses environment variables)
+	APIKey string
+
+	// WorkDir is the working directory for claude-code provider
+	WorkDir string
+
 	// OnProgress callback for progress updates
-	// TODO: Wire OnProgress to RLM iteration callbacks (PR 7)
 	OnProgress func(ProgressEvent)
 
 	// BatchConfig for parallel sub-agent calls
-	// TODO: Wire BatchConfig to sub-client creation (PR 7)
 	BatchConfig BatchConfig
+
+	// BudgetConfig for token budget management (Phase 6)
+	BudgetConfig *BudgetConfig
+
+	// CheckpointConfig for checkpoint/resume functionality (Phase 6)
+	CheckpointConfig *CheckpointConfig
+
+	// EnableRouting enables cross-agent query routing (Phase 6)
+	EnableRouting bool
+
+	// RouterConfig for cross-agent orchestration (Phase 6)
+	RouterConfig *RouterConfig
+
+	// ContextIndexConfig for persistent context caching (Phase 6)
+	ContextIndexConfig *ContextIndexConfig
 }
 
 // BatchConfig controls parallel execution of sub-agent calls.
@@ -119,7 +144,13 @@ type Checkpoint struct {
 type Processor struct {
 	config    ProcessorConfig
 	rlmModule *rlm.RLM
-	subClient *TieredSubClient
+	subClient rlm.SubLLMClient // Interface to support TieredSubClient, ClaudeCodeAdapter, etc.
+
+	// Phase 6 components
+	budget       *BudgetManager
+	checkpoint   *CheckpointManager
+	router       *QueryRouter
+	contextIndex *ContextIndex
 }
 
 // DefaultConfig returns sensible defaults for RLM processing.
@@ -144,13 +175,8 @@ func DefaultConfig() ProcessorConfig {
 
 // NewProcessor creates an RLM processor using the default LLM from the global registry.
 // This is a convenience method for CLI usage that sets up everything internally.
+// If Provider is specified in config, it creates a provider-specific SubAgent.
 func NewProcessor(config ProcessorConfig) (*Processor, error) {
-	// Get the default LLM from core registry
-	defaultLLM := core.GetDefaultLLM()
-	if defaultLLM == nil {
-		return nil, fmt.Errorf("no default LLM configured - call core.ConfigureDefaultLLM first")
-	}
-
 	// Map model tier to default tier enum
 	defaultTier := TierSmart
 	switch config.ModelTier {
@@ -158,6 +184,62 @@ func NewProcessor(config ProcessorConfig) (*Processor, error) {
 		defaultTier = TierFast
 	case "best":
 		defaultTier = TierBest
+	}
+
+	provider := strings.ToLower(config.Provider)
+
+	// Handle claude-code provider specially - it uses CLI subprocess
+	// and cannot be used as a tiered sub-client or root LLM directly.
+	if provider == "claude-code" || provider == "cc" {
+		// Use the default LLM for orchestration and Claude Code for sub-queries.
+		rootLLM := core.GetDefaultLLM()
+		if rootLLM == nil {
+			return nil, fmt.Errorf("no default LLM configured - call core.ConfigureDefaultLLM first or specify --provider")
+		}
+
+		claudeCodeClient := NewClaudeCodeAdapter(ClaudeCodeConfig{
+			WorkDir: config.WorkDir,
+		})
+
+		return NewProcessorWithLLM(rootLLM, claudeCodeClient, config)
+	}
+
+	// If provider is explicitly specified, create a tiered sub-client for that provider
+	if provider != "" && provider != "llamacpp" && provider != "llamacpp:" && provider != "ollama" {
+		subClient, err := NewTieredSubClientFromConfig(ProviderConfig{
+			Provider: provider,
+			Model:    config.Model,
+			APIKey:   config.APIKey,
+			WorkDir:  config.WorkDir,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("failed to create %s sub-client: %w", provider, err)
+		}
+
+		// Get root LLM from provider config as well
+		rootAgent, err := NewSubAgentFromConfig(ProviderConfig{
+			Provider: provider,
+			Model:    config.Model,
+			APIKey:   config.APIKey,
+			WorkDir:  config.WorkDir,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("failed to create root LLM for %s: %w", provider, err)
+		}
+
+		// Extract the underlying LLM from the adapter
+		adapter, ok := rootAgent.(*LLMSubAgentAdapter)
+		if !ok {
+			return nil, fmt.Errorf("unexpected SubAgent type for root LLM (got %T)", rootAgent)
+		}
+
+		return NewProcessorWithLLM(adapter.llm, subClient, config)
+	}
+
+	// Fall back to default LLM from core registry
+	defaultLLM := core.GetDefaultLLM()
+	if defaultLLM == nil {
+		return nil, fmt.Errorf("no default LLM configured - call core.ConfigureDefaultLLM first or specify --provider")
 	}
 
 	// Create tiered sub-client using the same LLM for all tiers initially
@@ -175,8 +257,8 @@ func NewProcessor(config ProcessorConfig) (*Processor, error) {
 
 // NewProcessorWithLLM creates an RLM processor with explicit LLM configuration.
 // The rootLLM is used for the RLM orchestration loop.
-// The subClient handles sub-agent queries with model tiering.
-func NewProcessorWithLLM(rootLLM core.LLM, subClient *TieredSubClient, config ProcessorConfig) (*Processor, error) {
+// The subClient handles sub-agent queries (can be TieredSubClient, ClaudeCodeAdapter, etc.)
+func NewProcessorWithLLM(rootLLM core.LLM, subClient rlm.SubLLMClient, config ProcessorConfig) (*Processor, error) {
 	if config.MaxIterations == 0 {
 		config.MaxIterations = 30
 	}
@@ -192,6 +274,45 @@ func NewProcessorWithLLM(rootLLM core.LLM, subClient *TieredSubClient, config Pr
 		config.TraceDir = filepath.Join(homeDir, ".maestro", "rlm_traces")
 	}
 
+	processor := &Processor{
+		config:    config,
+		subClient: subClient,
+	}
+
+	// Initialize Phase 6 components
+
+	// Budget management
+	if config.BudgetConfig != nil {
+		processor.budget = NewBudgetManager(*config.BudgetConfig)
+	}
+
+	// Checkpoint management
+	if config.CheckpointConfig != nil {
+		var err error
+		processor.checkpoint, err = NewCheckpointManager(*config.CheckpointConfig)
+		if err != nil {
+			return nil, fmt.Errorf("failed to initialize checkpoint manager: %w", err)
+		}
+	} else if config.CheckpointInterval > 0 {
+		// Use default checkpoint config if interval is set
+		var err error
+		processor.checkpoint, err = NewCheckpointManager(CheckpointConfig{
+			Interval: config.CheckpointInterval,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("failed to initialize checkpoint manager: %w", err)
+		}
+	}
+
+	// Context index
+	if config.ContextIndexConfig != nil {
+		var err error
+		processor.contextIndex, err = NewContextIndex(*config.ContextIndexConfig)
+		if err != nil {
+			return nil, fmt.Errorf("failed to initialize context index: %w", err)
+		}
+	}
+
 	// Build RLM options
 	opts := []rlm.Option{
 		rlm.WithMaxIterations(config.MaxIterations),
@@ -205,13 +326,9 @@ func NewProcessorWithLLM(rootLLM core.LLM, subClient *TieredSubClient, config Pr
 
 	// Create RLM module with our tiered sub-client for Query calls
 	// New() takes (rootLLM, subLLMClient, opts...) - subClient handles sub-queries
-	rlmModule := rlm.New(rootLLM, subClient, opts...)
+	processor.rlmModule = rlm.New(rootLLM, subClient, opts...)
 
-	return &Processor{
-		config:    config,
-		rlmModule: rlmModule,
-		subClient: subClient,
-	}, nil
+	return processor, nil
 }
 
 // Request defines an RLM processing request.
@@ -296,14 +413,35 @@ func (p *Processor) Process(ctx context.Context, req Request) (*Result, error) {
 	rootPromptTokens := completionResult.Usage.PromptTokens
 	rootCompletionTokens := completionResult.Usage.CompletionTokens
 
-	// Get sub-client token usage
-	stats := p.subClient.Stats()
-	result.SubTokens = stats.TotalPromptTokens + stats.TotalCompletionTokens
+	// Get sub-client token usage via type assertion
+	var subPromptTokens, subCompletionTokens int
+	var subCostUSD float64
+
+	switch client := p.subClient.(type) {
+	case *TieredSubClient:
+		stats := client.Stats()
+		subPromptTokens = stats.TotalPromptTokens
+		subCompletionTokens = stats.TotalCompletionTokens
+		subCostUSD = stats.TotalCostUSD
+	case *ClaudeCodeAdapter:
+		stats := client.Stats()
+		subPromptTokens = stats.TotalPromptTokens
+		subCompletionTokens = stats.TotalCompletionTokens
+		subCostUSD = stats.TotalCostUSD
+	case SubAgent:
+		// Generic SubAgent interface (includes Stats method)
+		stats := client.Stats()
+		subPromptTokens = stats.TotalPromptTokens
+		subCompletionTokens = stats.TotalCompletionTokens
+		subCostUSD = stats.TotalCostUSD
+	}
+
+	result.SubTokens = subPromptTokens + subCompletionTokens
 
 	// Combine root + sub tokens
-	result.PromptTokens = rootPromptTokens + stats.TotalPromptTokens
-	result.CompletionTokens = rootCompletionTokens + stats.TotalCompletionTokens
-	result.CostUSD = stats.TotalCostUSD
+	result.PromptTokens = rootPromptTokens + subPromptTokens
+	result.CompletionTokens = rootCompletionTokens + subCompletionTokens
+	result.CostUSD = subCostUSD
 	result.TotalTokens = result.RootTokens + result.SubTokens
 
 	// Calculate token savings vs naive approach
@@ -316,14 +454,157 @@ func (p *Processor) Process(ctx context.Context, req Request) (*Result, error) {
 
 // ProcessWithCheckpoints executes RLM with periodic checkpointing.
 func (p *Processor) ProcessWithCheckpoints(ctx context.Context, req Request) (*Result, error) {
-	// For now, delegate to Process. Checkpointing will be added in a future PR.
-	return p.Process(ctx, req)
+	if p.checkpoint == nil {
+		// No checkpoint manager configured, use regular process
+		return p.Process(ctx, req)
+	}
+
+	// Initialize checkpoint state
+	p.checkpoint.SetQuery(req.Query)
+	if req.ContentPath != "" {
+		info, err := os.Stat(req.ContentPath)
+		if err == nil {
+			p.checkpoint.SetContextRef(ContextReference{
+				Path:         req.ContentPath,
+				ContentHash:  HashContent(req.Context),
+				SizeBytes:    info.Size(),
+				LastModified: info.ModTime(),
+			})
+		}
+	}
+
+	// Process with checkpointing
+	result, err := p.Process(ctx, req)
+
+	// Save final checkpoint
+	if p.checkpoint != nil {
+		if err != nil {
+			p.checkpoint.MarkFailed(err)
+		} else {
+			p.checkpoint.MarkCompleted()
+		}
+		if saveErr := p.checkpoint.Save(); saveErr != nil && p.config.Verbose {
+			fmt.Fprintf(os.Stderr, "Warning: failed to save final checkpoint: %v\n", saveErr)
+		}
+	}
+
+	return result, err
 }
 
 // Resume continues an RLM execution from a checkpoint.
-func (p *Processor) Resume(ctx context.Context, checkpoint Checkpoint, req Request) (*Result, error) {
-	// Checkpoint resume will be implemented in PR 6
-	return nil, fmt.Errorf("checkpoint resume not yet implemented")
+func (p *Processor) Resume(ctx context.Context, checkpointPath string, req Request) (*Result, error) {
+	if p.checkpoint == nil {
+		return nil, fmt.Errorf("checkpoint manager not configured")
+	}
+
+	// Load checkpoint
+	state, err := p.checkpoint.Load(checkpointPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load checkpoint: %w", err)
+	}
+
+	// Check if resumable
+	resumable, warning := IsResumable(state)
+	if !resumable {
+		return nil, fmt.Errorf("checkpoint not resumable: %s", warning)
+	}
+	if warning != "" && p.config.Verbose {
+		fmt.Fprintf(os.Stderr, "Warning: %s\n", warning)
+	}
+
+	// Use original query if not provided
+	if req.Query == "" {
+		req.Query = state.Query
+	}
+
+	// Continue processing from checkpoint state
+	// Note: The RLM module itself doesn't support state restoration yet,
+	// so we start fresh but can use the partial results as hints
+	if len(state.PartialResults) > 0 && len(req.Hints) == 0 {
+		// Convert partial results to hints
+		for _, pr := range state.PartialResults {
+			if str, ok := pr.Value.(string); ok {
+				req.Hints = append(req.Hints, fmt.Sprintf("Previous finding (%s): %s", pr.Key, str))
+			}
+		}
+	}
+
+	return p.ProcessWithCheckpoints(ctx, req)
+}
+
+// ResumeLatest resumes from the most recent checkpoint for a session.
+func (p *Processor) ResumeLatest(ctx context.Context, sessionID string, req Request) (*Result, error) {
+	if p.checkpoint == nil {
+		return nil, fmt.Errorf("checkpoint manager not configured")
+	}
+
+	state, err := p.checkpoint.LoadLatest(sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load latest checkpoint: %w", err)
+	}
+
+	// Use the checkpoint path
+	checkpoints, err := p.checkpoint.ListCheckpoints(sessionID)
+	if err != nil || len(checkpoints) == 0 {
+		return nil, fmt.Errorf("no checkpoints found for session %s", sessionID)
+	}
+
+	// Set session ID
+	p.checkpoint.SetSessionID(state.SessionID)
+
+	return p.Resume(ctx, checkpoints[0].Path, req)
+}
+
+// ListCheckpoints returns available checkpoints.
+func (p *Processor) ListCheckpoints(sessionID string) ([]CheckpointInfo, error) {
+	if p.checkpoint == nil {
+		return nil, fmt.Errorf("checkpoint manager not configured")
+	}
+	return p.checkpoint.ListCheckpoints(sessionID)
+}
+
+// BudgetStatus returns the current budget status.
+func (p *Processor) BudgetStatus() *BudgetStatus {
+	if p.budget == nil {
+		return nil
+	}
+	status := p.budget.Status()
+	return &status
+}
+
+// SetBudget updates the budget limit.
+func (p *Processor) SetBudget(maxBudgetUSD float64) {
+	if p.budget != nil {
+		p.budget.SetBudget(maxBudgetUSD)
+	}
+}
+
+// ContextIndexStats returns context index statistics.
+func (p *Processor) ContextIndexStats() *IndexStats {
+	if p.contextIndex == nil {
+		return nil
+	}
+	stats := p.contextIndex.Stats()
+	return &stats
+}
+
+// IndexPath indexes a file or directory for faster processing.
+func (p *Processor) IndexPath(path string) (int, error) {
+	if p.contextIndex == nil {
+		return 0, fmt.Errorf("context index not configured")
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		return 0, err
+	}
+
+	if info.IsDir() {
+		return p.contextIndex.IndexDirectory(path, nil)
+	}
+
+	entries, err := p.contextIndex.IndexFile(path)
+	return len(entries), err
 }
 
 // loadContent loads content from a file or directory path.
