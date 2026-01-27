@@ -188,20 +188,16 @@ func NewProcessor(config ProcessorConfig) (*Processor, error) {
 
 	provider := strings.ToLower(config.Provider)
 
-	// Handle claude-code provider specially - it uses CLI subprocess
-	// and cannot be used as a tiered sub-client or root LLM directly.
+	// Handle claude-code provider - uses CLI subprocess for both orchestration and sub-queries.
+	// This enables using Claude Max/Pro subscription without API keys.
 	if provider == "claude-code" || provider == "cc" {
-		// Use the default LLM for orchestration and Claude Code for sub-queries.
-		rootLLM := core.GetDefaultLLM()
-		if rootLLM == nil {
-			return nil, fmt.Errorf("no default LLM configured - call core.ConfigureDefaultLLM first or specify --provider")
-		}
-
-		claudeCodeClient := NewClaudeCodeAdapter(ClaudeCodeConfig{
+		claudeCodeLLM := NewClaudeCodeLLM(ClaudeCodeConfig{
 			WorkDir: config.WorkDir,
 		})
 
-		return NewProcessorWithLLM(rootLLM, claudeCodeClient, config)
+		// Use the same Claude Code instance for both root LLM and sub-queries
+		// This ensures all calls go through the subscription
+		return NewProcessorWithLLM(claudeCodeLLM, claudeCodeLLM.GetAdapter(), config)
 	}
 
 	// If provider is explicitly specified, create a tiered sub-client for that provider

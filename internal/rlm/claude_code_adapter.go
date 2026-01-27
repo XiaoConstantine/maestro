@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/XiaoConstantine/dspy-go/pkg/core"
 	"github.com/XiaoConstantine/dspy-go/pkg/modules/rlm"
 )
 
@@ -71,6 +72,38 @@ type ClaudeCodeResponse struct {
 
 	StructuredOutput json.RawMessage `json:"structured_output,omitempty"`
 	Errors           []string        `json:"errors,omitempty"`
+}
+
+// parseClaudeCodeOutput parses the JSON output from Claude Code CLI.
+// The CLI outputs a JSON array of events; we need to find the final result message.
+func parseClaudeCodeOutput(data []byte) (ClaudeCodeResponse, error) {
+	// First try to parse as a single object (backwards compatibility)
+	var singleResp ClaudeCodeResponse
+	if err := json.Unmarshal(data, &singleResp); err == nil {
+		// Successfully parsed as single object
+		return singleResp, nil
+	}
+
+	// Try to parse as an array of events
+	var events []ClaudeCodeResponse
+	if err := json.Unmarshal(data, &events); err != nil {
+		return ClaudeCodeResponse{}, fmt.Errorf("failed to parse as single object or array: %w", err)
+	}
+
+	if len(events) == 0 {
+		return ClaudeCodeResponse{}, fmt.Errorf("empty response array from claude-code")
+	}
+
+	// Find the result message - typically the last one with type "result"
+	for i := len(events) - 1; i >= 0; i-- {
+		event := events[i]
+		if event.Type == "result" {
+			return event, nil
+		}
+	}
+
+	// If no result type found, return the last event
+	return events[len(events)-1], nil
 }
 
 // NewClaudeCodeAdapter creates a SubAgent backed by Claude Code CLI.
@@ -148,8 +181,9 @@ func (a *ClaudeCodeAdapter) Query(ctx context.Context, prompt string) (rlm.Query
 		return rlm.QueryResponse{}, fmt.Errorf("claude-code failed: %w, stderr: %s", err, stderr.String())
 	}
 
-	var resp ClaudeCodeResponse
-	if err := json.Unmarshal(stdout.Bytes(), &resp); err != nil {
+	// Claude Code CLI outputs a JSON array of events. We need to find the result message.
+	resp, err := parseClaudeCodeOutput(stdout.Bytes())
+	if err != nil {
 		// Try to return raw output if JSON parsing fails
 		return rlm.QueryResponse{
 			Response: stdout.String(),
@@ -170,16 +204,21 @@ func (a *ClaudeCodeAdapter) Query(ctx context.Context, prompt string) (rlm.Query
 		if len(resp.Errors) > 0 {
 			errMsg = fmt.Sprintf("%s: %v", resp.Result, resp.Errors)
 		}
+		// Include cache tokens in total prompt tokens
+		errPromptTokens := resp.Usage.InputTokens + resp.Usage.CacheCreationInputTokens + resp.Usage.CacheReadInputTokens
 		return rlm.QueryResponse{
 			Response:         errMsg,
-			PromptTokens:     resp.Usage.InputTokens,
+			PromptTokens:     errPromptTokens,
 			CompletionTokens: resp.Usage.OutputTokens,
 		}, fmt.Errorf("claude-code error: %s", errMsg)
 	}
 
+	// Total prompt tokens includes both direct input and cache creation tokens
+	totalPromptTokens := resp.Usage.InputTokens + resp.Usage.CacheCreationInputTokens + resp.Usage.CacheReadInputTokens
+
 	return rlm.QueryResponse{
 		Response:         resp.Result,
-		PromptTokens:     resp.Usage.InputTokens,
+		PromptTokens:     totalPromptTokens,
 		CompletionTokens: resp.Usage.OutputTokens,
 	}, nil
 }
@@ -219,17 +258,20 @@ func (a *ClaudeCodeAdapter) QueryWithSchema(ctx context.Context, prompt string, 
 		return nil, rlm.QueryResponse{}, fmt.Errorf("claude-code failed: %w, stderr: %s", err, stderr.String())
 	}
 
-	var resp ClaudeCodeResponse
-	if err := json.Unmarshal(stdout.Bytes(), &resp); err != nil {
+	resp, err := parseClaudeCodeOutput(stdout.Bytes())
+	if err != nil {
 		return nil, rlm.QueryResponse{}, fmt.Errorf("failed to parse claude-code output: %w", err)
 	}
 
 	a.sessionID = resp.SessionID
 	a.recordUsage(resp)
 
+	// Total prompt tokens includes both direct input and cache tokens
+	totalPromptTokens := resp.Usage.InputTokens + resp.Usage.CacheCreationInputTokens + resp.Usage.CacheReadInputTokens
+
 	queryResp := rlm.QueryResponse{
 		Response:         resp.Result,
-		PromptTokens:     resp.Usage.InputTokens,
+		PromptTokens:     totalPromptTokens,
 		CompletionTokens: resp.Usage.OutputTokens,
 	}
 
@@ -256,7 +298,8 @@ func (a *ClaudeCodeAdapter) recordUsage(resp ClaudeCodeResponse) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
-	a.totalPrompt += resp.Usage.InputTokens
+	// Include all input tokens: direct input + cache creation + cache read
+	a.totalPrompt += resp.Usage.InputTokens + resp.Usage.CacheCreationInputTokens + resp.Usage.CacheReadInputTokens
 	a.totalCompl += resp.Usage.OutputTokens
 	a.totalCost += resp.TotalCostUSD
 	a.totalQueries++
@@ -337,4 +380,108 @@ func (a *ClaudeCodeAdapter) Reset() {
 func (a *ClaudeCodeAdapter) IsAvailable() bool {
 	cmd := exec.Command(a.cliPath, "--version")
 	return cmd.Run() == nil
+}
+
+// ClaudeCodeLLM wraps ClaudeCodeAdapter to implement core.LLM interface.
+// This allows Claude Code to be used as the root LLM for RLM orchestration,
+// enabling full subscription-based usage without API keys.
+type ClaudeCodeLLM struct {
+	adapter *ClaudeCodeAdapter
+}
+
+// NewClaudeCodeLLM creates a core.LLM backed by Claude Code CLI.
+func NewClaudeCodeLLM(config ClaudeCodeConfig) *ClaudeCodeLLM {
+	return &ClaudeCodeLLM{
+		adapter: NewClaudeCodeAdapter(config),
+	}
+}
+
+// Generate implements core.LLM.
+func (c *ClaudeCodeLLM) Generate(ctx context.Context, prompt string, opts ...core.GenerateOption) (*core.LLMResponse, error) {
+	resp, err := c.adapter.Query(ctx, prompt)
+	if err != nil {
+		return nil, err
+	}
+
+	return &core.LLMResponse{
+		Content: resp.Response,
+		Usage: &core.TokenInfo{
+			PromptTokens:     resp.PromptTokens,
+			CompletionTokens: resp.CompletionTokens,
+			TotalTokens:      resp.PromptTokens + resp.CompletionTokens,
+		},
+	}, nil
+}
+
+// GenerateWithJSON implements core.LLM.
+func (c *ClaudeCodeLLM) GenerateWithJSON(ctx context.Context, prompt string, opts ...core.GenerateOption) (map[string]interface{}, error) {
+	resp, err := c.Generate(ctx, prompt, opts...)
+	if err != nil {
+		return nil, err
+	}
+
+	// Try to parse response as JSON
+	var result map[string]interface{}
+	if err := json.Unmarshal([]byte(resp.Content), &result); err != nil {
+		// Return as raw content if not valid JSON
+		return map[string]interface{}{"content": resp.Content}, nil
+	}
+	return result, nil
+}
+
+// GenerateWithFunctions implements core.LLM.
+func (c *ClaudeCodeLLM) GenerateWithFunctions(ctx context.Context, prompt string, functions []map[string]interface{}, opts ...core.GenerateOption) (map[string]interface{}, error) {
+	// Claude Code doesn't support function calling directly
+	return c.GenerateWithJSON(ctx, prompt, opts...)
+}
+
+// CreateEmbedding implements core.LLM.
+func (c *ClaudeCodeLLM) CreateEmbedding(ctx context.Context, input string, opts ...core.EmbeddingOption) (*core.EmbeddingResult, error) {
+	return nil, fmt.Errorf("embeddings not supported by claude-code provider")
+}
+
+// CreateEmbeddings implements core.LLM.
+func (c *ClaudeCodeLLM) CreateEmbeddings(ctx context.Context, inputs []string, opts ...core.EmbeddingOption) (*core.BatchEmbeddingResult, error) {
+	return nil, fmt.Errorf("embeddings not supported by claude-code provider")
+}
+
+// StreamGenerate implements core.LLM.
+func (c *ClaudeCodeLLM) StreamGenerate(ctx context.Context, prompt string, opts ...core.GenerateOption) (*core.StreamResponse, error) {
+	return nil, fmt.Errorf("streaming not supported by claude-code provider")
+}
+
+// GenerateWithContent implements core.LLM.
+func (c *ClaudeCodeLLM) GenerateWithContent(ctx context.Context, content []core.ContentBlock, opts ...core.GenerateOption) (*core.LLMResponse, error) {
+	// Convert content blocks to text prompt
+	var prompt strings.Builder
+	for _, block := range content {
+		prompt.WriteString(block.String())
+		prompt.WriteString("\n")
+	}
+	return c.Generate(ctx, prompt.String(), opts...)
+}
+
+// StreamGenerateWithContent implements core.LLM.
+func (c *ClaudeCodeLLM) StreamGenerateWithContent(ctx context.Context, content []core.ContentBlock, opts ...core.GenerateOption) (*core.StreamResponse, error) {
+	return nil, fmt.Errorf("streaming not supported by claude-code provider")
+}
+
+// ModelID implements core.LLM.
+func (c *ClaudeCodeLLM) ModelID() string {
+	return "claude-code"
+}
+
+// ProviderName implements core.LLM.
+func (c *ClaudeCodeLLM) ProviderName() string {
+	return "claude-code"
+}
+
+// Capabilities implements core.LLM.
+func (c *ClaudeCodeLLM) Capabilities() []core.Capability {
+	return []core.Capability{core.CapabilityCompletion, core.CapabilityJSON}
+}
+
+// GetAdapter returns the underlying ClaudeCodeAdapter for sub-client usage.
+func (c *ClaudeCodeLLM) GetAdapter() *ClaudeCodeAdapter {
+	return c.adapter
 }

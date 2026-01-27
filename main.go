@@ -946,45 +946,79 @@ func runBenchmark(cfg *config, mode string, iterations, warmupRuns int, outputDi
 		return fmt.Errorf("API key required for provider %s (set via environment variable)", rlmProvider)
 	}
 
-	// Create the direct LLM for comparison
+	// Create the direct LLM and RLM processor based on provider
 	var directLLM core.LLM
+	var processor *rlm.Processor
 	var err error
+
 	switch rlmProvider {
+	case "claude-code", "cc":
+		// Use Claude Code CLI for both direct and RLM modes
+		// This uses your Claude Max/Pro subscription
+		claudeCodeLLM := rlm.NewClaudeCodeLLM(rlm.ClaudeCodeConfig{})
+		directLLM = claudeCodeLLM
+
+		processorConfig := rlm.ProcessorConfig{
+			Provider: "claude-code",
+			Verbose:  verbose,
+		}
+		processor, err = rlm.NewProcessor(processorConfig)
+		if err != nil {
+			return fmt.Errorf("failed to create processor: %w", err)
+		}
+
 	case "anthropic":
 		model := cfg.rlmModel
 		if model == "" {
 			model = "claude-sonnet-4-5-20250929"
 		}
 		directLLM, err = llms.NewAnthropicLLM(rlmAPIKey, anthropic.Model(model))
+		if err != nil {
+			return fmt.Errorf("failed to create direct LLM: %w", err)
+		}
+
+		subClient, err := rlm.NewTieredSubClientFromConfig(rlm.ProviderConfig{
+			Provider: rlmProvider,
+			Model:    cfg.rlmModel,
+			APIKey:   rlmAPIKey,
+		})
+		if err != nil {
+			return fmt.Errorf("failed to create tiered client: %w", err)
+		}
+
+		processorConfig := rlm.ProcessorConfig{Verbose: verbose}
+		processor, err = rlm.NewProcessorWithLLM(directLLM, subClient, processorConfig)
+		if err != nil {
+			return fmt.Errorf("failed to create processor: %w", err)
+		}
+
 	case "openai", "codex":
 		model := cfg.rlmModel
 		if model == "" {
 			model = "gpt-4o"
 		}
 		directLLM, err = llms.NewOpenAI(core.ModelID(model), rlmAPIKey)
+		if err != nil {
+			return fmt.Errorf("failed to create direct LLM: %w", err)
+		}
+
+		subClient, err := rlm.NewTieredSubClientFromConfig(rlm.ProviderConfig{
+			Provider: rlmProvider,
+			Model:    cfg.rlmModel,
+			APIKey:   rlmAPIKey,
+		})
+		if err != nil {
+			return fmt.Errorf("failed to create tiered client: %w", err)
+		}
+
+		processorConfig := rlm.ProcessorConfig{Verbose: verbose}
+		processor, err = rlm.NewProcessorWithLLM(directLLM, subClient, processorConfig)
+		if err != nil {
+			return fmt.Errorf("failed to create processor: %w", err)
+		}
+
 	default:
-		return fmt.Errorf("unsupported provider for benchmark: %s", rlmProvider)
-	}
-	if err != nil {
-		return fmt.Errorf("failed to create direct LLM: %w", err)
-	}
-
-	// Create the RLM processor
-	subClient, err := rlm.NewTieredSubClientFromConfig(rlm.ProviderConfig{
-		Provider: rlmProvider,
-		Model:    cfg.rlmModel,
-		APIKey:   rlmAPIKey,
-	})
-	if err != nil {
-		return fmt.Errorf("failed to create tiered client: %w", err)
-	}
-
-	processorConfig := rlm.ProcessorConfig{
-		Verbose: verbose,
-	}
-	processor, err := rlm.NewProcessorWithLLM(directLLM, subClient, processorConfig)
-	if err != nil {
-		return fmt.Errorf("failed to create processor: %w", err)
+		return fmt.Errorf("unsupported provider for benchmark: %s (supported: anthropic, openai, claude-code)", rlmProvider)
 	}
 
 	// If context and query provided, run single benchmark
