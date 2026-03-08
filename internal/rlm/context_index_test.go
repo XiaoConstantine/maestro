@@ -501,12 +501,12 @@ func TestContextIndex_IndexDirectory(t *testing.T) {
 
 	// Create test files
 	files := map[string]string{
-		"main.go":     "package main",
-		"util.go":     "package main\nfunc util() {}",
-		"script.py":   "print('hello')",
-		"readme.md":   "# Readme",
-		".hidden.go":  "package hidden", // Should be skipped
-		"data.txt":    "some data",      // Not in default extensions
+		"main.go":    "package main",
+		"util.go":    "package main\nfunc util() {}",
+		"script.py":  "print('hello')",
+		"readme.md":  "# Readme",
+		".hidden.go": "package hidden", // Should be skipped
+		"data.txt":   "some data",      // Not in default extensions
 	}
 
 	for name, content := range files {
@@ -629,7 +629,9 @@ func TestContextEntry_Metadata(t *testing.T) {
 	idx.Put(entry)
 
 	// Save and reload
-	idx.Save()
+	if err := idx.Save(); err != nil {
+		t.Fatalf("failed to save index: %v", err)
+	}
 
 	idx2, _ := NewContextIndex(config)
 	got, ok := idx2.Get("test.go")

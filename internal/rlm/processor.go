@@ -807,7 +807,7 @@ func loadFile(path string) (string, error) {
 }
 
 // loadDirectory recursively loads content from a directory.
-// Content loading limits to prevent runaway memory usage
+// Content loading limits to prevent runaway memory usage.
 const (
 	maxContentBytes = 50 * 1024 * 1024 // 50MB max total content
 	maxFiles        = 1000             // Max files to load

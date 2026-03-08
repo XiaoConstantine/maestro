@@ -110,9 +110,9 @@ func (e *BudgetError) Error() string {
 type BudgetErrorType int
 
 const (
-	// BudgetExceeded means the budget limit was reached
+	// BudgetExceeded means the budget limit was reached.
 	BudgetExceeded BudgetErrorType = iota
-	// BudgetWarning means the warning threshold was reached
+	// BudgetWarning means the warning threshold was reached.
 	BudgetWarning
 	// BudgetStepsExceeded means step budget was exhausted.
 	BudgetStepsExceeded

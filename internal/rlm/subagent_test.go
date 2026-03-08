@@ -117,8 +117,12 @@ func TestSubAgentRegistry(t *testing.T) {
 		agent1 := &mockSubAgent{name: "first"}
 		agent2 := &mockSubAgent{name: "second"}
 
-		registry.Register(agent1)
-		registry.Register(agent2)
+		if err := registry.Register(agent1); err != nil {
+			t.Fatalf("register agent1: %v", err)
+		}
+		if err := registry.Register(agent2); err != nil {
+			t.Fatalf("register agent2: %v", err)
+		}
 
 		got, err := registry.GetDefault()
 		if err != nil {
@@ -135,8 +139,12 @@ func TestSubAgentRegistry(t *testing.T) {
 		agent1 := &mockSubAgent{name: "first"}
 		agent2 := &mockSubAgent{name: "second"}
 
-		registry.Register(agent1)
-		registry.Register(agent2)
+		if err := registry.Register(agent1); err != nil {
+			t.Fatalf("register agent1: %v", err)
+		}
+		if err := registry.Register(agent2); err != nil {
+			t.Fatalf("register agent2: %v", err)
+		}
 
 		if err := registry.SetDefault("second"); err != nil {
 			t.Fatalf("SetDefault: %v", err)
@@ -152,7 +160,9 @@ func TestSubAgentRegistry(t *testing.T) {
 		registry := NewSubAgentRegistry()
 
 		agent := &mockSubAgent{name: "agent"}
-		registry.Register(agent)
+		if err := registry.Register(agent); err != nil {
+			t.Fatalf("register agent: %v", err)
+		}
 
 		if err := registry.Register(agent); err == nil {
 			t.Error("Expected error for duplicate registration")
@@ -180,9 +190,15 @@ func TestSubAgentRegistry(t *testing.T) {
 	t.Run("List returns all names", func(t *testing.T) {
 		registry := NewSubAgentRegistry()
 
-		registry.Register(&mockSubAgent{name: "a"})
-		registry.Register(&mockSubAgent{name: "b"})
-		registry.Register(&mockSubAgent{name: "c"})
+		if err := registry.Register(&mockSubAgent{name: "a"}); err != nil {
+			t.Fatalf("register a: %v", err)
+		}
+		if err := registry.Register(&mockSubAgent{name: "b"}); err != nil {
+			t.Fatalf("register b: %v", err)
+		}
+		if err := registry.Register(&mockSubAgent{name: "c"}); err != nil {
+			t.Fatalf("register c: %v", err)
+		}
 
 		names := registry.List()
 		if len(names) != 3 {
@@ -192,7 +208,9 @@ func TestSubAgentRegistry(t *testing.T) {
 
 	t.Run("HasAgent", func(t *testing.T) {
 		registry := NewSubAgentRegistry()
-		registry.Register(&mockSubAgent{name: "exists"})
+		if err := registry.Register(&mockSubAgent{name: "exists"}); err != nil {
+			t.Fatalf("register exists: %v", err)
+		}
 
 		if !registry.HasAgent("exists") {
 			t.Error("HasAgent returned false for registered agent")
@@ -205,7 +223,7 @@ func TestSubAgentRegistry(t *testing.T) {
 	t.Run("AggregateStats", func(t *testing.T) {
 		registry := NewSubAgentRegistry()
 
-		registry.Register(&mockSubAgent{
+		if err := registry.Register(&mockSubAgent{
 			name: "agent1",
 			stats: AgentStats{
 				TotalPromptTokens:     100,
@@ -214,8 +232,10 @@ func TestSubAgentRegistry(t *testing.T) {
 				TotalCostUSD:          0.10,
 				CallsByTier:           map[ModelTier]int{TierSmart: 5},
 			},
-		})
-		registry.Register(&mockSubAgent{
+		}); err != nil {
+			t.Fatalf("register agent1: %v", err)
+		}
+		if err := registry.Register(&mockSubAgent{
 			name: "agent2",
 			stats: AgentStats{
 				TotalPromptTokens:     200,
@@ -224,7 +244,9 @@ func TestSubAgentRegistry(t *testing.T) {
 				TotalCostUSD:          0.20,
 				CallsByTier:           map[ModelTier]int{TierFast: 8, TierSmart: 2},
 			},
-		})
+		}); err != nil {
+			t.Fatalf("register agent2: %v", err)
+		}
 
 		stats := registry.AggregateStats()
 

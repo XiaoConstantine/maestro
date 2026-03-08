@@ -188,7 +188,7 @@ func TestCheckpointManager_LoadLatest(t *testing.T) {
 
 	// Create multiple checkpoints
 	for i := 1; i <= 3; i++ {
-		cm.UpdateState(i, map[string]any{"iter": i}, TokenUsage{TotalTokens: i * 100}, float64(i) * 0.10)
+		cm.UpdateState(i, map[string]any{"iter": i}, TokenUsage{TotalTokens: i * 100}, float64(i)*0.10)
 		time.Sleep(10 * time.Millisecond) // Ensure different timestamps
 		if err := cm.Save(); err != nil {
 			t.Fatalf("failed to save checkpoint %d: %v", i, err)
@@ -217,12 +217,16 @@ func TestCheckpointManager_ListSessions(t *testing.T) {
 	// Create first session
 	cm1, _ := NewCheckpointManager(config)
 	cm1.UpdateState(1, nil, TokenUsage{}, 0)
-	cm1.Save()
+	if err := cm1.Save(); err != nil {
+		t.Fatalf("failed to save checkpoint: %v", err)
+	}
 
 	// Create second session
 	cm2, _ := NewCheckpointManager(config)
 	cm2.UpdateState(1, nil, TokenUsage{}, 0)
-	cm2.Save()
+	if err := cm2.Save(); err != nil {
+		t.Fatalf("failed to save checkpoint: %v", err)
+	}
 
 	sessions, err := cm2.ListSessions()
 	if err != nil {
@@ -248,7 +252,9 @@ func TestCheckpointManager_DeleteSession(t *testing.T) {
 	// Create checkpoints
 	for i := 1; i <= 3; i++ {
 		cm.UpdateState(i, nil, TokenUsage{}, 0)
-		cm.Save()
+		if err := cm.Save(); err != nil {
+			t.Fatalf("failed to save checkpoint: %v", err)
+		}
 		time.Sleep(10 * time.Millisecond)
 	}
 
@@ -285,7 +291,9 @@ func TestCheckpointManager_PruneCheckpoints(t *testing.T) {
 	// Create more checkpoints than allowed
 	for i := 1; i <= 5; i++ {
 		cm.UpdateState(i, nil, TokenUsage{}, 0)
-		cm.Save()
+		if err := cm.Save(); err != nil {
+			t.Fatalf("failed to save checkpoint: %v", err)
+		}
 		time.Sleep(50 * time.Millisecond) // Ensure pruning goroutine runs
 	}
 

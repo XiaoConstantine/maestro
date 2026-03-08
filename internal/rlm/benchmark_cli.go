@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/XiaoConstantine/dspy-go/pkg/core"
+	"golang.org/x/text/cases"
+	"golang.org/x/text/language"
 )
 
 const (
@@ -584,7 +586,7 @@ func GenerateEfficiencyReport(report *BenchmarkReport) string {
 			continue
 		}
 
-		builder.WriteString(fmt.Sprintf("### %s Codebases\n\n", strings.Title(size)))
+		builder.WriteString(fmt.Sprintf("### %s Codebases\n\n", cases.Title(language.Und).String(size)))
 
 		var avgSavings, avgLatency float64
 		for _, r := range results {

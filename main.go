@@ -95,7 +95,7 @@ const (
 	DefaultModelProvider = "llamacpp:"
 	DefaultModelName     = "llamacpp:"
 
-	// RLM-specific defaults
+	// RLM-specific defaults.
 	DefaultRLMProvider = "anthropic"
 	DefaultRLMModel    = "" // Use provider default
 )

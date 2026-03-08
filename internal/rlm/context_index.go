@@ -106,10 +106,10 @@ type ContextEntry struct {
 
 // ExtractedEntity represents a code entity (function, type, variable, etc.)
 type ExtractedEntity struct {
-	Name     string `json:"name"`
-	Type     string `json:"type"` // function, type, variable, class, etc.
-	Line     int    `json:"line,omitempty"`
-	Exported bool   `json:"exported,omitempty"`
+	Name      string `json:"name"`
+	Type      string `json:"type"` // function, type, variable, class, etc.
+	Line      int    `json:"line,omitempty"`
+	Exported  bool   `json:"exported,omitempty"`
 	DocString string `json:"doc,omitempty"`
 }
 
@@ -268,7 +268,7 @@ func (idx *ContextIndex) Put(entry *ContextEntry) {
 
 	// Auto-persist if enabled
 	if idx.config.AutoPersist {
-		go idx.Save()
+		go func() { _ = idx.Save() }()
 	}
 
 	// Evict if over limit

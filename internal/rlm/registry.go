@@ -148,7 +148,7 @@ func (r *SubAgentRegistry) AggregateStats() AgentStats {
 	return aggregate
 }
 
-// Global registry instance
+// Global registry instance.
 var globalRegistry *SubAgentRegistry
 var registryOnce sync.Once
 

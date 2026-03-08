@@ -127,8 +127,12 @@ func TestQueryRouter_Route(t *testing.T) {
 		outputPrice: 0.015,
 	}
 
-	registry.Register(mockClaude)
-	registry.Register(mockGPT)
+	if err := registry.Register(mockClaude); err != nil {
+		t.Fatalf("failed to register mockClaude: %v", err)
+	}
+	if err := registry.Register(mockGPT); err != nil {
+		t.Fatalf("failed to register mockGPT: %v", err)
+	}
 
 	config := DefaultRouterConfig()
 	config.EnableMetrics = true
@@ -165,8 +169,12 @@ func TestQueryRouter_RouteWithTier(t *testing.T) {
 		outputPrice: 0.015,
 	}
 
-	registry.Register(mockFast)
-	registry.Register(mockSmart)
+	if err := registry.Register(mockFast); err != nil {
+		t.Fatalf("failed to register mockFast: %v", err)
+	}
+	if err := registry.Register(mockSmart); err != nil {
+		t.Fatalf("failed to register mockSmart: %v", err)
+	}
 
 	config := DefaultRouterConfig()
 	config.FastAgents = []string{"anthropic-claude-haiku"}
@@ -196,7 +204,9 @@ func TestQueryRouter_Fallback(t *testing.T) {
 		inputPrice:  0.003,
 		outputPrice: 0.015,
 	}
-	registry.Register(mockDefault)
+	if err := registry.Register(mockDefault); err != nil {
+		t.Fatalf("failed to register mockDefault: %v", err)
+	}
 
 	config := DefaultRouterConfig()
 	config.DefaultAgent = "default-agent"
@@ -239,7 +249,9 @@ func TestQueryRouter_Metrics(t *testing.T) {
 		inputPrice:  0.003,
 		outputPrice: 0.015,
 	}
-	registry.Register(mock)
+	if err := registry.Register(mock); err != nil {
+		t.Fatalf("failed to register mock: %v", err)
+	}
 
 	config := DefaultRouterConfig()
 	config.DefaultAgent = "test-agent"
@@ -250,10 +262,14 @@ func TestQueryRouter_Metrics(t *testing.T) {
 
 	// Make several queries
 	for i := 0; i < 5; i++ {
-		router.Route(ctx, "explain this")
+		if _, err := router.Route(ctx, "explain this"); err != nil {
+			t.Fatalf("route failed: %v", err)
+		}
 	}
 	for i := 0; i < 3; i++ {
-		router.Route(ctx, "write a function")
+		if _, err := router.Route(ctx, "write a function"); err != nil {
+			t.Fatalf("route failed: %v", err)
+		}
 	}
 
 	metrics := router.Metrics()
@@ -280,7 +296,9 @@ func TestQueryRouter_History(t *testing.T) {
 		inputPrice:  0.003,
 		outputPrice: 0.015,
 	}
-	registry.Register(mock)
+	if err := registry.Register(mock); err != nil {
+		t.Fatalf("failed to register mock: %v", err)
+	}
 
 	config := DefaultRouterConfig()
 	config.DefaultAgent = "test-agent"
@@ -289,9 +307,15 @@ func TestQueryRouter_History(t *testing.T) {
 
 	ctx := context.Background()
 
-	router.Route(ctx, "query 1")
-	router.Route(ctx, "query 2")
-	router.Route(ctx, "query 3")
+	if _, err := router.Route(ctx, "query 1"); err != nil {
+		t.Fatalf("route failed: %v", err)
+	}
+	if _, err := router.Route(ctx, "query 2"); err != nil {
+		t.Fatalf("route failed: %v", err)
+	}
+	if _, err := router.Route(ctx, "query 3"); err != nil {
+		t.Fatalf("route failed: %v", err)
+	}
 
 	history := router.History(2)
 
@@ -313,7 +337,9 @@ func TestQueryRouter_ResetMetrics(t *testing.T) {
 		inputPrice:  0.003,
 		outputPrice: 0.015,
 	}
-	registry.Register(mock)
+	if err := registry.Register(mock); err != nil {
+		t.Fatalf("failed to register mock: %v", err)
+	}
 
 	config := DefaultRouterConfig()
 	config.DefaultAgent = "test-agent"
@@ -321,7 +347,9 @@ func TestQueryRouter_ResetMetrics(t *testing.T) {
 	router := NewQueryRouter(registry, config)
 
 	ctx := context.Background()
-	router.Route(ctx, "test query")
+	if _, err := router.Route(ctx, "test query"); err != nil {
+		t.Fatalf("route failed: %v", err)
+	}
 
 	metrics := router.Metrics()
 	if metrics.TotalRouted != 1 {
@@ -349,7 +377,9 @@ func TestQueryRouter_AddRule(t *testing.T) {
 		inputPrice:  0.003,
 		outputPrice: 0.015,
 	}
-	registry.Register(mock)
+	if err := registry.Register(mock); err != nil {
+		t.Fatalf("failed to register mock: %v", err)
+	}
 
 	config := DefaultRouterConfig()
 	router := NewQueryRouter(registry, config)
@@ -378,7 +408,9 @@ func TestQueryRouter_QueryBatched(t *testing.T) {
 		inputPrice:  0.003,
 		outputPrice: 0.015,
 	}
-	registry.Register(mock)
+	if err := registry.Register(mock); err != nil {
+		t.Fatalf("failed to register mock: %v", err)
+	}
 
 	config := DefaultRouterConfig()
 	config.DefaultAgent = "test-agent"
@@ -432,7 +464,9 @@ func TestQueryRouter_QueryBatched_ResilientAndParallel(t *testing.T) {
 			return dspyrlm.QueryResponse{Response: "ok:" + prompt}, nil
 		},
 	}
-	registry.Register(mock)
+	if err := registry.Register(mock); err != nil {
+		t.Fatalf("failed to register mock: %v", err)
+	}
 
 	config := DefaultRouterConfig()
 	config.DefaultAgent = "test-agent"
@@ -465,7 +499,9 @@ func TestRouterSubClient(t *testing.T) {
 		inputPrice:  0.003,
 		outputPrice: 0.015,
 	}
-	registry.Register(mock)
+	if err := registry.Register(mock); err != nil {
+		t.Fatalf("failed to register mock: %v", err)
+	}
 
 	config := DefaultRouterConfig()
 	config.DefaultAgent = "test-agent"
@@ -552,7 +588,7 @@ func TestQueryRouter_IntentByLength(t *testing.T) {
 	}
 }
 
-// Helper to verify SubLLMClient interface compliance
+// Helper to verify SubLLMClient interface compliance.
 func TestRouterImplementsSubLLMClient(t *testing.T) {
 	registry := NewSubAgentRegistry()
 	router := NewQueryRouter(registry, DefaultRouterConfig())

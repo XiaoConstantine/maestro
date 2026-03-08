@@ -336,7 +336,9 @@ func (a *ClaudeCodeAdapter) QueryBatched(ctx context.Context, prompts []string) 
 			return nil
 		})
 	}
-	p.Wait()
+	if err := p.Wait(); err != nil {
+		return nil, err
+	}
 
 	return results, nil
 }

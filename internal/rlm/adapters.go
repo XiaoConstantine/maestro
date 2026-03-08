@@ -155,7 +155,9 @@ func (a *LLMSubAgentAdapter) QueryBatched(ctx context.Context, prompts []string)
 		})
 	}
 
-	p.Wait()
+	if err := p.Wait(); err != nil {
+		return nil, err
+	}
 	return results, nil
 }
 
@@ -200,7 +202,7 @@ func (a *LLMSubAgentAdapter) Stats() AgentStats {
 	}
 }
 
-// OpenAI model pricing (per 1K tokens)
+// OpenAI model pricing (per 1K tokens).
 var openAIPricing = map[string]struct{ input, output float64 }{
 	"gpt-4o":           {0.005, 0.015},
 	"gpt-4o-mini":      {0.00015, 0.0006},
@@ -236,7 +238,7 @@ func NewOpenAISubAgent(modelID string, apiKey string) (*LLMSubAgentAdapter, erro
 	}), nil
 }
 
-// Anthropic model pricing (per 1K tokens)
+// Anthropic model pricing (per 1K tokens).
 var anthropicPricing = map[string]struct{ input, output float64 }{
 	"claude-3-haiku-20240307":    {0.00025, 0.00125},
 	"claude-3-5-haiku-20241022":  {0.001, 0.005},

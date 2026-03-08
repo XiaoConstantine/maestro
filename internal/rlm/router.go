@@ -17,17 +17,17 @@ import (
 type QueryIntent int
 
 const (
-	// IntentAnalysis for reasoning, analysis, and explanation tasks
+	// IntentAnalysis for reasoning, analysis, and explanation tasks.
 	IntentAnalysis QueryIntent = iota
-	// IntentCodeGeneration for code writing and modification tasks
+	// IntentCodeGeneration for code writing and modification tasks.
 	IntentCodeGeneration
-	// IntentSimple for simple, direct questions
+	// IntentSimple for simple, direct questions.
 	IntentSimple
-	// IntentComplex for multi-step, complex reasoning tasks
+	// IntentComplex for multi-step, complex reasoning tasks.
 	IntentComplex
-	// IntentSearch for code search and exploration tasks
+	// IntentSearch for code search and exploration tasks.
 	IntentSearch
-	// IntentUnknown when intent cannot be determined
+	// IntentUnknown when intent cannot be determined.
 	IntentUnknown
 )
 
@@ -274,7 +274,9 @@ func (r *QueryRouter) QueryBatched(ctx context.Context, prompts []string) ([]rlm
 		})
 	}
 
-	p.Wait()
+	if err := p.Wait(); err != nil {
+		return nil, err
+	}
 	return results, nil
 }
 

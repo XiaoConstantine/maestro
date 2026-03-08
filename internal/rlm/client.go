@@ -15,11 +15,11 @@ import (
 type ModelTier int
 
 const (
-	// TierFast uses cheap, fast models (Haiku, Flash) for high-volume work
+	// TierFast uses cheap, fast models (Haiku, Flash) for high-volume work.
 	TierFast ModelTier = iota
-	// TierSmart uses balanced models (Sonnet) for moderate complexity
+	// TierSmart uses balanced models (Sonnet) for moderate complexity.
 	TierSmart
-	// TierBest uses frontier models (Opus, Claude Code) for synthesis
+	// TierBest uses frontier models (Opus, Claude Code) for synthesis.
 	TierBest
 )
 
@@ -39,7 +39,7 @@ func (t ModelTier) String() string {
 // defaultBatchConcurrency is the default max goroutines for batched query execution.
 const defaultBatchConcurrency = 10
 
-// Pricing per 1K tokens (approximate, USD)
+// Pricing per 1K tokens (approximate, USD).
 var tierPricing = map[ModelTier]struct{ input, output float64 }{
 	TierFast:  {0.00025, 0.00125}, // Haiku-level
 	TierSmart: {0.003, 0.015},     // Sonnet-level
@@ -186,7 +186,9 @@ func (c *TieredSubClient) QueryBatchedWithTier(ctx context.Context, prompts []st
 		})
 	}
 
-	p.Wait()
+	if err := p.Wait(); err != nil {
+		return nil, err
+	}
 	return results, nil
 }
 

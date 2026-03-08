@@ -1078,8 +1078,8 @@ func generateMarkdownReport(report *BenchmarkReport) string {
 
 	// Summary
 	md += "## Summary\n\n"
-	md += fmt.Sprintf("| Metric | Value |\n")
-	md += fmt.Sprintf("|--------|-------|\n")
+	md += "| Metric | Value |\n"
+	md += "|--------|-------|\n"
 	md += fmt.Sprintf("| Total Test Cases | %d |\n", report.Summary.TotalTestCases)
 	md += fmt.Sprintf("| Passed Test Cases | %d |\n", report.Summary.PassedTestCases)
 	md += fmt.Sprintf("| Avg Token Savings | %.1f%% |\n", report.Summary.AvgTokenSavings)

@@ -426,7 +426,7 @@ func (s *MaestroService) handleRLM(ctx context.Context, request Request) (*Respo
 
 	// If provider changed and no explicit API key override, clear the key
 	// to let the processor resolve it from environment variables
-	if strings.ToLower(provider) != strings.ToLower(originalProvider) && apiKey == s.config.RLMAPIKey {
+	if !strings.EqualFold(provider, originalProvider) && apiKey == s.config.RLMAPIKey {
 		apiKey = "" // Force environment variable lookup for new provider
 	}
 
