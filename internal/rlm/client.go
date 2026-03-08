@@ -36,11 +36,14 @@ func (t ModelTier) String() string {
 	}
 }
 
+// defaultBatchConcurrency is the default max goroutines for batched query execution.
+const defaultBatchConcurrency = 10
+
 // Pricing per 1K tokens (approximate, USD)
 var tierPricing = map[ModelTier]struct{ input, output float64 }{
-	TierFast:  {0.00025, 0.00125},  // Haiku-level
-	TierSmart: {0.003, 0.015},      // Sonnet-level
-	TierBest:  {0.015, 0.075},      // Opus-level
+	TierFast:  {0.00025, 0.00125}, // Haiku-level
+	TierSmart: {0.003, 0.015},     // Sonnet-level
+	TierBest:  {0.015, 0.075},     // Opus-level
 }
 
 // TieredSubClient implements rlm.SubLLMClient with model tier routing.
@@ -60,12 +63,12 @@ type TieredSubClient struct {
 
 // TieredSubClientConfig configures the tiered sub-client.
 type TieredSubClientConfig struct {
-	FastModel    core.LLM // For TierFast (optional)
-	SmartModel   core.LLM // For TierSmart (required)
-	BestModel    core.LLM // For TierBest (optional, defaults to SmartModel)
-	DefaultTier  ModelTier
+	FastModel     core.LLM // For TierFast (optional)
+	SmartModel    core.LLM // For TierSmart (required)
+	BestModel     core.LLM // For TierBest (optional, defaults to SmartModel)
+	DefaultTier   ModelTier
 	MaxConcurrent int
-	Timeout      time.Duration
+	Timeout       time.Duration
 }
 
 // NewTieredSubClient creates a sub-client with model tier support.
@@ -168,7 +171,7 @@ func (c *TieredSubClient) QueryBatchedWithTier(ctx context.Context, prompts []st
 	}
 
 	results := make([]rlm.QueryResponse, len(prompts))
-	p := pool.New().WithMaxGoroutines(c.maxConcurrent).WithErrors().WithContext(ctx)
+	p := pool.New().WithMaxGoroutines(c.maxConcurrent).WithContext(ctx)
 
 	for i, prompt := range prompts {
 		i, prompt := i, prompt
@@ -176,14 +179,15 @@ func (c *TieredSubClient) QueryBatchedWithTier(ctx context.Context, prompts []st
 			resp, err := c.QueryWithTier(ctx, prompt, tier)
 			if err != nil {
 				results[i] = rlm.QueryResponse{Response: fmt.Sprintf("Error: %v", err)}
-				return err
+				return nil
 			}
 			results[i] = resp
 			return nil
 		})
 	}
 
-	return results, p.Wait()
+	p.Wait()
+	return results, nil
 }
 
 func (c *TieredSubClient) recordUsage(tier ModelTier, prompt, completion int) {

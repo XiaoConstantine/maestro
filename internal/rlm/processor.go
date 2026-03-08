@@ -143,6 +143,7 @@ type Checkpoint struct {
 // Processor orchestrates RLM execution in Maestro.
 type Processor struct {
 	config    ProcessorConfig
+	rootLLM   core.LLM
 	rlmModule *rlm.RLM
 	subClient rlm.SubLLMClient // Interface to support TieredSubClient, ClaudeCodeAdapter, etc.
 
@@ -241,8 +242,10 @@ func NewProcessor(config ProcessorConfig) (*Processor, error) {
 	// Create tiered sub-client using the same LLM for all tiers initially
 	// In production, different tiers would use different models
 	subClient, err := NewTieredSubClient(TieredSubClientConfig{
-		SmartModel:  defaultLLM,
-		DefaultTier: defaultTier,
+		SmartModel:    defaultLLM,
+		DefaultTier:   defaultTier,
+		MaxConcurrent: config.BatchConfig.MaxConcurrent,
+		Timeout:       config.BatchConfig.TimeoutPerCall,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to create sub-client: %w", err)
@@ -272,14 +275,25 @@ func NewProcessorWithLLM(rootLLM core.LLM, subClient rlm.SubLLMClient, config Pr
 
 	processor := &Processor{
 		config:    config,
+		rootLLM:   rootLLM,
 		subClient: subClient,
 	}
+	effectiveRootLLM := rootLLM
+	effectiveSubClient := subClient
+	effectiveSubAgent := toSubAgent(subClient)
 
 	// Initialize Phase 6 components
 
 	// Budget management
 	if config.BudgetConfig != nil {
 		processor.budget = NewBudgetManager(*config.BudgetConfig)
+		effectiveRootLLM = NewBudgetAwareLLM(rootLLM, processor.budget)
+		if effectiveSubAgent == nil {
+			return nil, fmt.Errorf("budget management requires a SubAgent-compatible sub-client (got %T)", subClient)
+		}
+		budgeted := NewBudgetAwareSubClient(effectiveSubAgent, processor.budget)
+		effectiveSubClient = budgeted
+		effectiveSubAgent = budgeted
 	}
 
 	// Checkpoint management
@@ -309,22 +323,105 @@ func NewProcessorWithLLM(rootLLM core.LLM, subClient rlm.SubLLMClient, config Pr
 		}
 	}
 
+	// Optional cross-agent routing: route sub-queries to best available backend.
+	if config.EnableRouting {
+		if effectiveSubAgent == nil {
+			return nil, fmt.Errorf("query routing requires a SubAgent-compatible sub-client (got %T)", effectiveSubClient)
+		}
+
+		registry := NewSubAgentRegistry()
+		if err := registerSubAgentIfMissing(registry, effectiveSubAgent); err != nil {
+			return nil, fmt.Errorf("failed to register base sub-agent for routing: %w", err)
+		}
+		for _, candidate := range GlobalRegistry().All() {
+			candidateForRouter := candidate
+			if processor.budget != nil {
+				candidateForRouter = NewBudgetAwareSubClient(candidate, processor.budget)
+			}
+			if err := registerSubAgentIfMissing(registry, candidateForRouter); err != nil {
+				return nil, fmt.Errorf("failed to register global sub-agent %q: %w", candidate.Name(), err)
+			}
+		}
+
+		routerCfg := buildRouterConfig(config.RouterConfig, effectiveSubAgent.Name())
+		processor.router = NewQueryRouter(registry, routerCfg)
+		effectiveSubClient = NewRouterSubClient(processor.router)
+	}
+
+	processor.subClient = effectiveSubClient
+	processor.rootLLM = effectiveRootLLM
+
 	// Build RLM options
 	opts := []rlm.Option{
 		rlm.WithMaxIterations(config.MaxIterations),
 		rlm.WithTimeout(config.Timeout),
 		rlm.WithTraceDir(config.TraceDir),
+		rlm.WithHistoryCompression(3, 500),
 	}
 
 	if config.Verbose {
 		opts = append(opts, rlm.WithVerbose(true))
 	}
 
+	if config.OnProgress != nil || processor.checkpoint != nil {
+		opts = append(opts, rlm.WithProgressHandler(func(progress rlm.IterationProgress) {
+			totalPromptTokens, totalCompletionTokens, totalTokens, costUSD := processor.currentUsageSnapshot()
+			if processor.checkpoint != nil {
+				processor.checkpoint.UpdateState(
+					progress.CurrentIteration,
+					nil, // REPL variable serialization is not exposed by dspy-go today.
+					TokenUsage{
+						PromptTokens:     totalPromptTokens,
+						CompletionTokens: totalCompletionTokens,
+						TotalTokens:      totalTokens,
+					},
+					costUSD,
+				)
+				if processor.checkpoint.ShouldCheckpoint(progress.CurrentIteration) {
+					_ = processor.checkpoint.Save()
+				}
+			}
+
+			if config.OnProgress != nil {
+				config.OnProgress(ProgressEvent{
+					Iteration:      progress.CurrentIteration,
+					TotalExpected:  progress.MaxIterations,
+					CurrentPhase:   "iteration",
+					TokensUsed:     totalTokens,
+					ItemsProcessed: progress.CurrentIteration,
+					CostUSD:        costUSD,
+				})
+			}
+		}))
+	}
+
 	// Create RLM module with our tiered sub-client for Query calls
 	// New() takes (rootLLM, subLLMClient, opts...) - subClient handles sub-queries
-	processor.rlmModule = rlm.New(rootLLM, subClient, opts...)
+	processor.rlmModule = rlm.New(effectiveRootLLM, effectiveSubClient, opts...)
 
 	return processor, nil
+}
+
+// ResetState clears per-run mutable state so benchmarks do not leak sessions,
+// token counters, or budget usage across warmups and measured iterations.
+func (p *Processor) ResetState() {
+	if p == nil {
+		return
+	}
+
+	if p.budget != nil {
+		p.budget.Reset()
+	}
+
+	_ = resetIfSupported(p.rootLLM)
+
+	if !resetIfSupported(p.subClient) {
+		if routerClient, ok := p.subClient.(*RouterSubClient); ok && routerClient.router != nil && routerClient.router.registry != nil {
+			for _, agent := range routerClient.router.registry.All() {
+				_ = resetIfSupported(agent)
+			}
+		}
+	}
 }
 
 // Request defines an RLM processing request.
@@ -375,6 +472,24 @@ func (p *Processor) Process(ctx context.Context, req Request) (*Result, error) {
 		req.OnProgress("Processing with RLM...")
 	}
 
+	if p.budget != nil {
+		if remaining := p.budget.RemainingSteps(); remaining >= 0 && remaining < 2 {
+			return &Result{
+					Duration: time.Since(start),
+					Status:   StatusError,
+				}, &BudgetError{
+					Type:    BudgetStepsExceeded,
+					Message: fmt.Sprintf("budget exhausted: remaining root steps %d below minimum required 2", remaining),
+				}
+		}
+		if err := p.budget.CheckBudget(); err != nil {
+			return &Result{
+				Duration: time.Since(start),
+				Status:   StatusError,
+			}, err
+		}
+	}
+
 	// Use Complete() instead of Process() to get full iteration and token data
 	completionResult, err := p.rlmModule.Complete(ctx, content, query)
 
@@ -404,41 +519,22 @@ func (p *Processor) Process(ctx context.Context, req Request) (*Result, error) {
 	result.Answer = completionResult.Response
 	result.Iterations = completionResult.Iterations
 
-	// Get root token usage from completion result
-	result.RootTokens = completionResult.Usage.TotalTokens
-	rootPromptTokens := completionResult.Usage.PromptTokens
-	rootCompletionTokens := completionResult.Usage.CompletionTokens
+	// Use TokenTracker as the canonical source for root/sub separation.
+	tracker := p.rlmModule.GetTokenTracker()
+	rootUsage := tracker.GetRootUsage()
+	subUsage := tracker.GetSubUsage()
+	subRLMUsage := tracker.GetSubRLMUsage()
+	totalUsage := tracker.GetTotalUsage()
 
-	// Get sub-client token usage via type assertion
-	var subPromptTokens, subCompletionTokens int
-	var subCostUSD float64
+	result.RootTokens = rootUsage.TotalTokens
+	result.SubTokens = subUsage.TotalTokens + subRLMUsage.TotalTokens
+	result.PromptTokens = totalUsage.PromptTokens
+	result.CompletionTokens = totalUsage.CompletionTokens
+	result.TotalTokens = totalUsage.TotalTokens
 
-	switch client := p.subClient.(type) {
-	case *TieredSubClient:
-		stats := client.Stats()
-		subPromptTokens = stats.TotalPromptTokens
-		subCompletionTokens = stats.TotalCompletionTokens
-		subCostUSD = stats.TotalCostUSD
-	case *ClaudeCodeAdapter:
-		stats := client.Stats()
-		subPromptTokens = stats.TotalPromptTokens
-		subCompletionTokens = stats.TotalCompletionTokens
-		subCostUSD = stats.TotalCostUSD
-	case SubAgent:
-		// Generic SubAgent interface (includes Stats method)
-		stats := client.Stats()
-		subPromptTokens = stats.TotalPromptTokens
-		subCompletionTokens = stats.TotalCompletionTokens
-		subCostUSD = stats.TotalCostUSD
-	}
-
-	result.SubTokens = subPromptTokens + subCompletionTokens
-
-	// Combine root + sub tokens
-	result.PromptTokens = rootPromptTokens + subPromptTokens
-	result.CompletionTokens = rootCompletionTokens + subCompletionTokens
-	result.CostUSD = subCostUSD
-	result.TotalTokens = result.RootTokens + result.SubTokens
+	// Cost is tracked by budget manager when enabled, otherwise via sub-client stats.
+	_, _, _, totalCostUSD := p.currentUsageSnapshot()
+	result.CostUSD = totalCostUSD
 
 	// Calculate token savings vs naive approach
 	if baselineTokens > 0 && result.TotalTokens < baselineTokens {
@@ -601,6 +697,91 @@ func (p *Processor) IndexPath(path string) (int, error) {
 
 	entries, err := p.contextIndex.IndexFile(path)
 	return len(entries), err
+}
+
+type stateResetter interface {
+	Reset()
+}
+
+func resetIfSupported(target any) bool {
+	if resetter, ok := target.(stateResetter); ok {
+		resetter.Reset()
+		return true
+	}
+	return false
+}
+
+func toSubAgent(client rlm.SubLLMClient) SubAgent {
+	if agent, ok := client.(SubAgent); ok {
+		return agent
+	}
+	if tiered, ok := client.(*TieredSubClient); ok {
+		return NewTieredSubClientAdapter(tiered, "tiered-subclient")
+	}
+	return nil
+}
+
+func registerSubAgentIfMissing(registry *SubAgentRegistry, agent SubAgent) error {
+	if registry.HasAgent(agent.Name()) {
+		return nil
+	}
+	return registry.Register(agent)
+}
+
+func buildRouterConfig(userConfig *RouterConfig, fallbackDefaultAgent string) RouterConfig {
+	cfg := DefaultRouterConfig()
+	if userConfig != nil {
+		cfg = *userConfig
+	}
+
+	if cfg.DefaultAgent == "" {
+		cfg.DefaultAgent = fallbackDefaultAgent
+	}
+	if len(cfg.AnalysisAgents) == 0 {
+		cfg.AnalysisAgents = []string{cfg.DefaultAgent}
+	}
+	if len(cfg.CodeGenAgents) == 0 {
+		cfg.CodeGenAgents = []string{cfg.DefaultAgent}
+	}
+	if len(cfg.FastAgents) == 0 {
+		cfg.FastAgents = []string{cfg.DefaultAgent}
+	}
+	if len(cfg.BestAgents) == 0 {
+		cfg.BestAgents = []string{cfg.DefaultAgent}
+	}
+	if cfg.BatchMaxConcurrent <= 0 {
+		cfg.BatchMaxConcurrent = defaultBatchConcurrency
+	}
+
+	return cfg
+}
+
+// currentUsageSnapshot returns cumulative usage currently visible to the processor:
+// total prompt tokens, total completion tokens, total tokens, and cost.
+func (p *Processor) currentUsageSnapshot() (promptTokens, completionTokens, totalTokens int, costUSD float64) {
+	if p.rlmModule != nil {
+		usage := p.rlmModule.GetTokenTracker().GetTotalUsage()
+		promptTokens = usage.PromptTokens
+		completionTokens = usage.CompletionTokens
+		totalTokens = usage.TotalTokens
+	}
+
+	// Budget manager is the canonical cost source when enabled (includes root+sub).
+	if p.budget != nil {
+		return promptTokens, completionTokens, totalTokens, p.budget.TotalSpent()
+	}
+
+	// Without budget manager, cost comes from sub-agent statistics.
+	if p.router != nil && p.router.registry != nil {
+		stats := p.router.registry.AggregateStats()
+		return promptTokens, completionTokens, totalTokens, stats.TotalCostUSD
+	}
+
+	if agent, ok := p.subClient.(SubAgent); ok {
+		stats := agent.Stats()
+		return promptTokens, completionTokens, totalTokens, stats.TotalCostUSD
+	}
+	return promptTokens, completionTokens, totalTokens, 0
 }
 
 // loadContent loads content from a file or directory path.

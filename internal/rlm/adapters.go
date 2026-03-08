@@ -17,7 +17,7 @@ import (
 // TieredSubClient already implements rlm.SubLLMClient, so we just add
 // the orchestration methods.
 type TieredSubClientAdapter struct {
-	*TieredSubClient          // Embed for SubLLMClient methods
+	*TieredSubClient // Embed for SubLLMClient methods
 	name             string
 	capabilities     []Capability
 }
@@ -140,7 +140,7 @@ func (a *LLMSubAgentAdapter) QueryBatched(ctx context.Context, prompts []string)
 	}
 
 	results := make([]rlm.QueryResponse, len(prompts))
-	p := pool.New().WithMaxGoroutines(10).WithErrors().WithContext(ctx)
+	p := pool.New().WithMaxGoroutines(defaultBatchConcurrency).WithContext(ctx)
 
 	for i, prompt := range prompts {
 		i, prompt := i, prompt
@@ -148,14 +148,15 @@ func (a *LLMSubAgentAdapter) QueryBatched(ctx context.Context, prompts []string)
 			resp, err := a.Query(ctx, prompt)
 			if err != nil {
 				results[i] = rlm.QueryResponse{Response: fmt.Sprintf("Error: %v", err)}
-				return err
+				return nil
 			}
 			results[i] = resp
 			return nil
 		})
 	}
 
-	return results, p.Wait()
+	p.Wait()
+	return results, nil
 }
 
 func (a *LLMSubAgentAdapter) recordUsage(prompt, completion int) {
@@ -264,9 +265,37 @@ func NewAnthropicSubAgent(modelID string, apiKey string) (*LLMSubAgentAdapter, e
 	}), nil
 }
 
+// Gemini model pricing (per 1K tokens)
+// NOTE: Values are approximate defaults and may vary by region/tier.
+var geminiPricing = map[string]struct{ input, output float64 }{
+	"gemini-2.5-flash":      {0.00125, 0.005},
+	"gemini-2.5-pro":        {0.0035, 0.0105},
+	"gemini-2.5-flash-lite": {0.00075, 0.003},
+	"gemini-2.0-flash":      {0.00075, 0.003},
+}
+
+// NewGoogleSubAgent creates a SubAgent using Google Gemini models.
+func NewGoogleSubAgent(modelID string, apiKey string) (*LLMSubAgentAdapter, error) {
+	llm, err := llms.NewGeminiLLM(apiKey, core.ModelID(modelID))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create Gemini LLM: %w", err)
+	}
+
+	pricing, ok := geminiPricing[modelID]
+	if !ok {
+		pricing = struct{ input, output float64 }{0.00125, 0.005}
+	}
+
+	return NewLLMSubAgentAdapter(llm, LLMSubAgentConfig{
+		Name:        "google-" + modelID,
+		InputPrice:  pricing.input,
+		OutputPrice: pricing.output,
+	}), nil
+}
+
 // ProviderConfig contains configuration for creating a SubAgent.
 type ProviderConfig struct {
-	Provider string // "anthropic", "openai", "codex", "claude-code", etc.
+	Provider string // "anthropic", "openai", "google", "codex", "claude-code", etc.
 	Model    string // Model name/ID
 	APIKey   string // API key for the provider
 	WorkDir  string // Working directory (for claude-code provider)
@@ -277,6 +306,9 @@ const DefaultAnthropicModel = "claude-sonnet-4-5-20250929"
 
 // DefaultOpenAIModel is the default model for OpenAI provider.
 const DefaultOpenAIModel = "gpt-4o"
+
+// DefaultGoogleModel is the default model for Google provider.
+const DefaultGoogleModel = "gemini-2.5-flash"
 
 // NewSubAgentFromConfig creates a SubAgent based on provider configuration.
 // This is the main factory function for creating SubAgents from CLI flags.
@@ -297,6 +329,13 @@ func NewSubAgentFromConfig(config ProviderConfig) (SubAgent, error) {
 		}
 		return NewOpenAISubAgent(model, config.APIKey)
 
+	case "google", "gemini":
+		model := config.Model
+		if model == "" {
+			model = DefaultGoogleModel
+		}
+		return NewGoogleSubAgent(model, config.APIKey)
+
 	case "claude-code", "cc":
 		// Claude Code uses CLI, no API key needed (uses local auth)
 		return NewClaudeCodeAdapter(ClaudeCodeConfig{
@@ -304,7 +343,7 @@ func NewSubAgentFromConfig(config ProviderConfig) (SubAgent, error) {
 		}), nil
 
 	default:
-		return nil, fmt.Errorf("unsupported provider: %s (supported: anthropic, openai, codex, claude-code)", config.Provider)
+		return nil, fmt.Errorf("unsupported provider: %s (supported: anthropic, openai, google, codex, claude-code)", config.Provider)
 	}
 }
 
@@ -363,6 +402,29 @@ func NewTieredSubClientFromConfig(config ProviderConfig) (*TieredSubClient, erro
 			bestModel = config.Model
 		}
 		bestLLM, err = llms.NewOpenAI(core.ModelID(bestModel), config.APIKey)
+		if err != nil {
+			bestLLM = smartLLM
+		}
+
+	case "google", "gemini":
+		// Default to Gemini Flash for smart tier.
+		smartModel := config.Model
+		if smartModel == "" {
+			smartModel = DefaultGoogleModel
+		}
+		smartLLM, err = llms.NewGeminiLLM(config.APIKey, core.ModelID(smartModel))
+		if err != nil {
+			return nil, fmt.Errorf("failed to create Gemini smart LLM: %w", err)
+		}
+
+		// Use Flash Lite for fast tier; fall back to smart model.
+		fastLLM, err = llms.NewGeminiLLM(config.APIKey, core.ModelID("gemini-2.5-flash-lite"))
+		if err != nil {
+			fastLLM = smartLLM
+		}
+
+		// Use Pro for best tier; fall back to smart model.
+		bestLLM, err = llms.NewGeminiLLM(config.APIKey, core.ModelID("gemini-2.5-pro"))
 		if err != nil {
 			bestLLM = smartLLM
 		}

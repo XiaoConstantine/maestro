@@ -2,6 +2,7 @@ package rlm
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -44,6 +45,28 @@ func TestLLMSubAgentAdapter(t *testing.T) {
 
 		stats := adapter.Stats()
 		assert.Equal(t, 3, stats.TotalQueries)
+	})
+
+	t.Run("QueryBatched is resilient on per-item errors", func(t *testing.T) {
+		llm := &mockLLM{
+			response: "ok",
+			errFn: func(prompt string) error {
+				if prompt == "bad" {
+					return errors.New("boom")
+				}
+				return nil
+			},
+		}
+		adapter := NewLLMSubAgentAdapter(llm, LLMSubAgentConfig{
+			Name: "batch-agent",
+		})
+
+		results, err := adapter.QueryBatched(context.Background(), []string{"a", "bad", "c"})
+		require.NoError(t, err)
+		require.Len(t, results, 3)
+		assert.Equal(t, "ok", results[0].Response)
+		assert.Contains(t, results[1].Response, "Error:")
+		assert.Equal(t, "ok", results[2].Response)
 	})
 
 	t.Run("Name returns configured name", func(t *testing.T) {

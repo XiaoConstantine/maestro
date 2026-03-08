@@ -84,6 +84,19 @@ type fileFilterRules struct {
 
 // NewTools creates a new GitHub tools instance.
 func NewTools(token, owner, repo string) Interface {
+	tools, err := NewToolsWithError(token, owner, repo)
+	if err != nil {
+		return nil
+	}
+	return tools
+}
+
+// NewToolsWithError creates a new GitHub tools instance and returns initialization errors.
+func NewToolsWithError(token, owner, repo string) (Interface, error) {
+	if strings.TrimSpace(token) == "" {
+		return nil, fmt.Errorf("github token is empty")
+	}
+
 	// Create an authenticated GitHub client
 	ctx := context.Background()
 	ts := oauth2.StaticTokenSource(
@@ -94,14 +107,14 @@ func NewTools(token, owner, repo string) Interface {
 
 	user, _, err := client.Users.Get(ctx, "")
 	if err != nil {
-		return nil
+		return nil, fmt.Errorf("failed to authenticate GitHub token: %w", err)
 	}
 	return &Tools{
 		client:            client,
 		owner:             owner,
 		repo:              repo,
 		authenticatedUser: user.GetLogin(),
-	}
+	}, nil
 }
 
 func (g *Tools) Client() *github.Client {

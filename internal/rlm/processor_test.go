@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	dspyrlm "github.com/XiaoConstantine/dspy-go/pkg/modules/rlm"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -59,6 +60,129 @@ func TestNewProcessorValidation(t *testing.T) {
 	assert.Equal(t, 30, cfg.MaxIterations)
 	assert.Equal(t, 10*time.Minute, cfg.Timeout)
 	assert.Equal(t, 5, cfg.CheckpointInterval)
+}
+
+type plainSubClient struct{}
+
+func (p plainSubClient) Query(ctx context.Context, prompt string) (dspyrlm.QueryResponse, error) {
+	return dspyrlm.QueryResponse{Response: "ok"}, nil
+}
+
+func (p plainSubClient) QueryBatched(ctx context.Context, prompts []string) ([]dspyrlm.QueryResponse, error) {
+	out := make([]dspyrlm.QueryResponse, 0, len(prompts))
+	for range prompts {
+		out = append(out, dspyrlm.QueryResponse{Response: "ok"})
+	}
+	return out, nil
+}
+
+func TestNewProcessorWithLLM_BudgetRequiresSubAgentCompatibleClient(t *testing.T) {
+	root := &mockLLM{response: "root"}
+	_, err := NewProcessorWithLLM(root, plainSubClient{}, ProcessorConfig{
+		CheckpointInterval: -1, // disable filesystem checkpoint setup in unit test
+		BudgetConfig: &BudgetConfig{
+			MaxBudgetUSD: 1.0,
+		},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "SubAgent-compatible")
+}
+
+func TestNewProcessorWithLLM_EnableRoutingWrapsSubClient(t *testing.T) {
+	root := &mockLLM{response: "root"}
+	sub, err := NewTieredSubClient(TieredSubClientConfig{
+		SmartModel: root,
+	})
+	require.NoError(t, err)
+
+	p, err := NewProcessorWithLLM(root, sub, ProcessorConfig{
+		CheckpointInterval: -1, // disable filesystem checkpoint setup in unit test
+		EnableRouting:      true,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, p.router)
+
+	_, ok := p.subClient.(*RouterSubClient)
+	assert.True(t, ok, "expected subClient to be wrapped by RouterSubClient when routing is enabled")
+}
+
+func TestBuildRouterConfigFallsBackToDefaultAgent(t *testing.T) {
+	cfg := buildRouterConfig(&RouterConfig{}, "fallback-agent")
+	assert.Equal(t, "fallback-agent", cfg.DefaultAgent)
+	assert.Equal(t, []string{"fallback-agent"}, cfg.AnalysisAgents)
+	assert.Equal(t, []string{"fallback-agent"}, cfg.CodeGenAgents)
+	assert.Equal(t, []string{"fallback-agent"}, cfg.FastAgents)
+	assert.Equal(t, []string{"fallback-agent"}, cfg.BestAgents)
+}
+
+func TestNewProcessorWithLLM_RoutingWrapsGlobalAgentsWithBudget(t *testing.T) {
+	prevGlobal := globalRegistry
+	globalRegistry = NewSubAgentRegistry()
+	defer func() {
+		globalRegistry = prevGlobal
+	}()
+
+	root := &mockLLM{response: "root"}
+	sub, err := NewTieredSubClient(TieredSubClientConfig{
+		SmartModel: root,
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, GlobalRegistry().Register(&mockSubAgent{
+		name:        "global-agent",
+		inputPrice:  0.003,
+		outputPrice: 0.015,
+	}))
+
+	p, err := NewProcessorWithLLM(root, sub, ProcessorConfig{
+		CheckpointInterval: -1, // disable filesystem checkpoint setup in unit test
+		EnableRouting:      true,
+		BudgetConfig: &BudgetConfig{
+			MaxBudgetUSD: 1.0,
+		},
+		RouterConfig: &RouterConfig{
+			DefaultAgent:   "global-agent",
+			AnalysisAgents: []string{"global-agent"},
+			CodeGenAgents:  []string{"global-agent"},
+			FastAgents:     []string{"global-agent"},
+			BestAgents:     []string{"global-agent"},
+		},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, p.router)
+
+	registered, err := p.router.registry.Get("global-agent")
+	require.NoError(t, err)
+	_, ok := registered.(*BudgetAwareSubClient)
+	assert.True(t, ok, "expected global route candidate to be budget-wrapped")
+}
+
+func TestProcess_PreflightBudgetGuardRemainingSteps(t *testing.T) {
+	root := &mockLLM{response: "root", provider: "openai", model: "gpt-4o"}
+	sub, err := NewTieredSubClient(TieredSubClientConfig{
+		SmartModel: root,
+	})
+	require.NoError(t, err)
+
+	p, err := NewProcessorWithLLM(root, sub, ProcessorConfig{
+		CheckpointInterval: -1, // disable filesystem checkpoint setup in unit test
+		BudgetConfig: &BudgetConfig{
+			MaxSteps:      1,
+			MaxTokens:     1000,
+			MaxBudgetUSD:  10,
+			WarnThreshold: 0.8,
+		},
+	})
+	require.NoError(t, err)
+
+	result, err := p.Process(context.Background(), Request{
+		Context: "short context",
+		Query:   "short query",
+	})
+	require.Error(t, err)
+	require.NotNil(t, result)
+	assert.Equal(t, StatusError, result.Status)
+	assert.Contains(t, err.Error(), "remaining root steps")
 }
 
 func TestCheckpoint(t *testing.T) {
@@ -140,9 +264,9 @@ func TestEstimateTokens(t *testing.T) {
 		expected int
 	}{
 		{"empty", "", 0},
-		{"short", "hello", 1},        // 5 chars / 4 = 1
-		{"medium", "hello world!", 3}, // 12 chars / 4 = 3
-		{"1kb", string(make([]byte, 1000)), 250},   // 1000 / 4 = 250
+		{"short", "hello", 1},                       // 5 chars / 4 = 1
+		{"medium", "hello world!", 3},               // 12 chars / 4 = 3
+		{"1kb", string(make([]byte, 1000)), 250},    // 1000 / 4 = 250
 		{"10kb", string(make([]byte, 10000)), 2500}, // 10000 / 4 = 2500
 	}
 

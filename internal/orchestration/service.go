@@ -111,6 +111,9 @@ type MaestroService struct {
 
 func NewMaestroService(ctx context.Context, config *ServiceConfig, githubTools types.GitHubInterface) (*MaestroService, error) {
 	logger := logging.GetLogger()
+	if githubTools == nil {
+		return nil, fmt.Errorf("github client is not initialized (check --github-token or MAESTRO_GITHUB_TOKEN)")
+	}
 
 	var memory agents.Memory
 	switch config.MemoryType {

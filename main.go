@@ -16,7 +16,6 @@ import (
 	"github.com/XiaoConstantine/dspy-go/pkg/core"
 	"github.com/XiaoConstantine/dspy-go/pkg/llms"
 	"github.com/XiaoConstantine/dspy-go/pkg/logging"
-	"github.com/anthropics/anthropic-sdk-go"
 	maestroace "github.com/XiaoConstantine/maestro/internal/ace"
 	"github.com/XiaoConstantine/maestro/internal/github"
 	"github.com/XiaoConstantine/maestro/internal/orchestration"
@@ -25,6 +24,7 @@ import (
 	"github.com/XiaoConstantine/maestro/internal/types"
 	"github.com/XiaoConstantine/maestro/internal/util"
 	"github.com/XiaoConstantine/maestro/terminal"
+	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/logrusorgru/aurora"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
@@ -323,7 +323,10 @@ func runCLIWithoutBanner(cfg *config) error {
 	if err := core.ConfigureTeacherLLM(cfg.apiKey, core.ModelGoogleGeminiPro); err != nil {
 		return fmt.Errorf("failed to configure teacher LLM: %w", err)
 	}
-	githubTools := github.NewTools(cfg.githubToken, cfg.owner, cfg.repo)
+	githubTools, err := github.NewToolsWithError(cfg.githubToken, cfg.owner, cfg.repo)
+	if err != nil {
+		return fmt.Errorf("github client is not initialized: %w", err)
+	}
 
 	// Initialize MCP bash helper for GitHub operations
 	var mcpHelper *github.MCPBashHelper
@@ -400,7 +403,10 @@ func runCLIWithoutBanner(cfg *config) error {
 func runFullPRReview(ctx context.Context, prNumber int, cfg *config, console types.ConsoleInterface, agent types.ReviewAgent, mcpHelper *github.MCPBashHelper) error {
 	logger := logging.GetLogger()
 
-	githubTools := github.NewTools(cfg.githubToken, cfg.owner, cfg.repo)
+	githubTools, err := github.NewToolsWithError(cfg.githubToken, cfg.owner, cfg.repo)
+	if err != nil {
+		return fmt.Errorf("github client is not initialized: %w", err)
+	}
 
 	// Fetching PR changes
 	if console.Color() {
@@ -768,7 +774,10 @@ func runModernUI(cfg *config) error {
 	}
 
 	// Initialize GitHub tools
-	githubTools := github.NewTools(cfg.githubToken, cfg.owner, cfg.repo)
+	githubTools, err := github.NewToolsWithError(cfg.githubToken, cfg.owner, cfg.repo)
+	if err != nil {
+		return fmt.Errorf("github client is not initialized: %w", err)
+	}
 	dbPath, err := util.CreateStoragePath(ctx, cfg.owner, cfg.repo)
 	if err != nil {
 		return fmt.Errorf("failed to create storage path: %w", err)
@@ -782,8 +791,11 @@ func runModernUI(cfg *config) error {
 
 	switch rlmProvider {
 	case "openai", "codex":
-		// For OpenAI RLM, prefer OPENAI_API_KEY, fall back to main key only if main provider is also OpenAI
-		rlmAPIKey = os.Getenv("OPENAI_API_KEY")
+		// For OpenAI/Codex RLM, prefer OAuth subscription token, then API key.
+		rlmAPIKey = util.FirstNonEmpty(
+			os.Getenv("OPENAI_OAUTH_TOKEN"),
+			os.Getenv("OPENAI_API_KEY"),
+		)
 		if rlmAPIKey == "" && (mainProvider == "openai" || mainProvider == "codex") {
 			rlmAPIKey = cfg.apiKey
 		}
@@ -889,6 +901,7 @@ Modes:
 Examples:
   # Run A/B comparison with default test cases
   maestro benchmark --rlm-provider anthropic
+  maestro benchmark --rlm-provider google --rlm-model gemini-2.5-flash
 
   # Benchmark a specific file/directory
   maestro benchmark --context ./src --query "Explain the architecture"
@@ -903,7 +916,7 @@ Examples:
 	cmd.Flags().StringVar(&benchMode, "mode", "ab", "Benchmark mode: direct, rlm, or ab (both)")
 	cmd.Flags().IntVar(&iterations, "iterations", 3, "Number of iterations per test")
 	cmd.Flags().IntVar(&warmupRuns, "warmup", 1, "Number of warmup runs before measurement")
-	cmd.Flags().StringVar(&outputDir, "output", "./benchmark_results", "Output directory for reports")
+	cmd.Flags().StringVar(&outputDir, "output", filepath.Join(os.TempDir(), "maestro-benchmark-results"), "Output directory for reports")
 	cmd.Flags().StringVar(&testDir, "test-dir", "", "Directory containing test case files")
 	cmd.Flags().StringSliceVar(&tags, "tags", nil, "Filter tests by tags (e.g., small,medium)")
 	cmd.Flags().StringSliceVar(&excludeTags, "exclude-tags", nil, "Exclude tests by tags")
@@ -917,6 +930,29 @@ Examples:
 func runBenchmark(cfg *config, mode string, iterations, warmupRuns int, outputDir, testDir string, tags, excludeTags []string, verbose bool, contextFile, query string) error {
 	ctx := context.Background()
 
+	// Configure dspy-go logger so RLM/Predict internals are captured
+	logLevel := logging.INFO
+	if verbose {
+		logLevel = logging.DEBUG
+	}
+	benchLogPath := filepath.Join(os.TempDir(), "maestro-benchmark-dspy.log")
+	fileOutput, _ := logging.NewFileOutput(
+		benchLogPath,
+		logging.WithRotation(100*1024*1024, 5),
+		logging.WithJSONFormat(true),
+	)
+	benchLogger := logging.NewLogger(logging.Config{
+		Severity: logLevel,
+		Outputs:  []logging.Output{fileOutput},
+	})
+	logging.SetLogger(benchLogger)
+
+	benchmarkTraceDir := filepath.Join(os.TempDir(), "maestro-rlm-traces")
+	if err := os.MkdirAll(benchmarkTraceDir, 0o755); err != nil && verbose {
+		fmt.Printf("Warning: failed to create benchmark trace directory %q: %v\n", benchmarkTraceDir, err)
+	}
+
+	fmt.Printf("dspy-go log: %s\n", benchLogPath)
 	fmt.Println("═══════════════════════════════════════════")
 	fmt.Println("         MAESTRO RLM BENCHMARK             ")
 	fmt.Println("═══════════════════════════════════════════")
@@ -930,7 +966,15 @@ func runBenchmark(cfg *config, mode string, iterations, warmupRuns int, outputDi
 	var rlmAPIKey string
 	switch rlmProvider {
 	case "openai", "codex":
-		rlmAPIKey = os.Getenv("OPENAI_API_KEY")
+		rlmAPIKey = util.FirstNonEmpty(
+			os.Getenv("OPENAI_OAUTH_TOKEN"),
+			os.Getenv("OPENAI_API_KEY"),
+		)
+	case "google", "gemini":
+		rlmAPIKey = util.FirstNonEmpty(
+			os.Getenv("GEMINI_API_KEY"),
+			os.Getenv("GOOGLE_API_KEY"),
+		)
 	case "anthropic":
 		rlmAPIKey = util.FirstNonEmpty(
 			os.Getenv("ANTHROPIC_API_KEY"),
@@ -961,6 +1005,7 @@ func runBenchmark(cfg *config, mode string, iterations, warmupRuns int, outputDi
 		processorConfig := rlm.ProcessorConfig{
 			Provider: "claude-code",
 			Verbose:  verbose,
+			TraceDir: benchmarkTraceDir,
 		}
 		processor, err = rlm.NewProcessor(processorConfig)
 		if err != nil {
@@ -986,7 +1031,7 @@ func runBenchmark(cfg *config, mode string, iterations, warmupRuns int, outputDi
 			return fmt.Errorf("failed to create tiered client: %w", err)
 		}
 
-		processorConfig := rlm.ProcessorConfig{Verbose: verbose}
+		processorConfig := rlm.ProcessorConfig{Verbose: verbose, TraceDir: benchmarkTraceDir}
 		processor, err = rlm.NewProcessorWithLLM(directLLM, subClient, processorConfig)
 		if err != nil {
 			return fmt.Errorf("failed to create processor: %w", err)
@@ -1011,14 +1056,39 @@ func runBenchmark(cfg *config, mode string, iterations, warmupRuns int, outputDi
 			return fmt.Errorf("failed to create tiered client: %w", err)
 		}
 
-		processorConfig := rlm.ProcessorConfig{Verbose: verbose}
+		processorConfig := rlm.ProcessorConfig{Verbose: verbose, TraceDir: benchmarkTraceDir}
+		processor, err = rlm.NewProcessorWithLLM(directLLM, subClient, processorConfig)
+		if err != nil {
+			return fmt.Errorf("failed to create processor: %w", err)
+		}
+
+	case "google", "gemini":
+		model := cfg.rlmModel
+		if model == "" {
+			model = "gemini-2.5-flash"
+		}
+		directLLM, err = llms.NewGeminiLLM(rlmAPIKey, core.ModelID(model))
+		if err != nil {
+			return fmt.Errorf("failed to create direct Gemini LLM: %w", err)
+		}
+
+		subClient, err := rlm.NewTieredSubClientFromConfig(rlm.ProviderConfig{
+			Provider: rlmProvider,
+			Model:    cfg.rlmModel,
+			APIKey:   rlmAPIKey,
+		})
+		if err != nil {
+			return fmt.Errorf("failed to create tiered client: %w", err)
+		}
+
+		processorConfig := rlm.ProcessorConfig{Verbose: verbose, TraceDir: benchmarkTraceDir}
 		processor, err = rlm.NewProcessorWithLLM(directLLM, subClient, processorConfig)
 		if err != nil {
 			return fmt.Errorf("failed to create processor: %w", err)
 		}
 
 	default:
-		return fmt.Errorf("unsupported provider for benchmark: %s (supported: anthropic, openai, claude-code)", rlmProvider)
+		return fmt.Errorf("unsupported provider for benchmark: %s (supported: anthropic, openai, google, claude-code)", rlmProvider)
 	}
 
 	// If context and query provided, run single benchmark
@@ -1128,26 +1198,43 @@ func runSingleBenchmark(ctx context.Context, processor *rlm.Processor, directLLM
 	fmt.Println("═══════════════════════════════════════════")
 
 	if len(result.DirectRuns) > 0 {
-		fmt.Println("\n📊 DIRECT MODE:")
-		fmt.Printf("  Avg Tokens:   %.0f\n", result.DirectStats.AvgTotalTokens)
-		fmt.Printf("  Avg Duration: %.0fms\n", result.DirectStats.AvgDuration)
-		fmt.Printf("  Total Cost:   $%.4f\n", result.DirectStats.TotalCostUSD)
+		printModeResults("DIRECT MODE", result.DirectStats)
 	}
 
 	if len(result.RLMRuns) > 0 {
-		fmt.Println("\n🔄 RLM MODE:")
-		fmt.Printf("  Avg Tokens:   %.0f\n", result.RLMStats.AvgTotalTokens)
-		fmt.Printf("  Avg Duration: %.0fms\n", result.RLMStats.AvgDuration)
-		fmt.Printf("  Total Cost:   $%.4f\n", result.RLMStats.TotalCostUSD)
+		printModeResults("RLM MODE", result.RLMStats)
 	}
 
 	if len(result.DirectRuns) > 0 && len(result.RLMRuns) > 0 {
-		fmt.Println("\n📈 COMPARISON:")
+		fmt.Println("\n  COMPARISON:")
 		fmt.Printf("  Token Savings:    %.1f%%\n", result.Comparison.TokenSavingsPercent)
 		fmt.Printf("  Cost Savings:     %.1f%%\n", result.Comparison.CostSavingsPercent)
 		fmt.Printf("  Latency Overhead: %.1f%%\n", result.Comparison.LatencyDiffPercent)
-		fmt.Printf("\n  💡 %s\n", result.Comparison.Recommendation)
+		fmt.Printf("  Prompt Pressure Reduction: %.1f%%\n", result.Comparison.PromptPressureReductionPercent)
+		fmt.Printf("\n  %s\n", result.Comparison.Recommendation)
 	}
 
 	return nil
+}
+
+func printModeResults(label string, stats rlm.RunStats) {
+	fmt.Printf("\n%s (%d/%d succeeded):\n", label, stats.SuccessfulRuns, stats.TotalRuns)
+	if stats.SuccessfulRuns == 0 {
+		fmt.Println("  ALL RUNS FAILED")
+		for _, e := range stats.Errors {
+			fmt.Printf("  Error: %s\n", e)
+		}
+		return
+	}
+	fmt.Printf("  Avg Tokens:   %.0f\n", stats.AvgTotalTokens)
+	fmt.Printf("  Avg Duration: %.0fms\n", stats.AvgDuration)
+	fmt.Printf("  Avg Max Prompt: %.0f tokens (fill %.3f)\n",
+		stats.AvgMaxPromptTokens, stats.AvgPeakPromptFillRatio)
+	fmt.Printf("  Total Cost:   $%.4f\n", stats.TotalCostUSD)
+	if stats.FailedRuns > 0 {
+		fmt.Printf("  Failed Runs:  %d\n", stats.FailedRuns)
+		for _, e := range stats.Errors {
+			fmt.Printf("    Error: %s\n", e)
+		}
+	}
 }

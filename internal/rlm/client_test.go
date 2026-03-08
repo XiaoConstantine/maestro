@@ -2,6 +2,7 @@ package rlm
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
@@ -17,6 +18,9 @@ type mockLLM struct {
 	callCount        int
 	promptTokens     int
 	completionTokens int
+	errFn            func(prompt string) error
+	provider         string
+	model            string
 }
 
 // newMockLLMWithUsage creates a mockLLM with custom token usage values.
@@ -29,6 +33,11 @@ func newMockLLMWithUsage(response string, promptTokens, completionTokens int) *m
 }
 
 func (m *mockLLM) Generate(ctx context.Context, prompt string, opts ...core.GenerateOption) (*core.LLMResponse, error) {
+	if m.errFn != nil {
+		if err := m.errFn(prompt); err != nil {
+			return nil, err
+		}
+	}
 	m.callCount++
 	promptToks := m.promptTokens
 	if promptToks == 0 {
@@ -76,9 +85,22 @@ func (m *mockLLM) CreateEmbeddings(ctx context.Context, inputs []string, opts ..
 	return nil, fmt.Errorf("not implemented")
 }
 
-func (m *mockLLM) ProviderName() string        { return "mock" }
-func (m *mockLLM) ModelID() string             { return "mock-model" }
-func (m *mockLLM) Capabilities() []core.Capability { return []core.Capability{core.CapabilityCompletion} }
+func (m *mockLLM) ProviderName() string {
+	if m.provider != "" {
+		return m.provider
+	}
+	return "mock"
+}
+
+func (m *mockLLM) ModelID() string {
+	if m.model != "" {
+		return m.model
+	}
+	return "mock-model"
+}
+func (m *mockLLM) Capabilities() []core.Capability {
+	return []core.Capability{core.CapabilityCompletion}
+}
 
 func TestModelTierString(t *testing.T) {
 	tests := []struct {
@@ -232,6 +254,31 @@ func TestTieredSubClientQueryBatchedEmpty(t *testing.T) {
 	assert.Nil(t, results)
 }
 
+func TestTieredSubClientQueryBatched_ResilientOnErrors(t *testing.T) {
+	smartModel := &mockLLM{
+		response: "ok",
+		errFn: func(prompt string) error {
+			if prompt == "bad" {
+				return errors.New("boom")
+			}
+			return nil
+		},
+	}
+
+	client, err := NewTieredSubClient(TieredSubClientConfig{
+		SmartModel:    smartModel,
+		MaxConcurrent: 3,
+	})
+	require.NoError(t, err)
+
+	results, err := client.QueryBatched(context.Background(), []string{"a", "bad", "c"})
+	require.NoError(t, err)
+	require.Len(t, results, 3)
+	assert.Equal(t, "ok", results[0].Response)
+	assert.Contains(t, results[1].Response, "Error:")
+	assert.Equal(t, "ok", results[2].Response)
+}
+
 func TestTieredSubClientTokenTracking(t *testing.T) {
 	smartModel := &mockLLM{response: "response"}
 
@@ -274,7 +321,7 @@ func TestTieredSubClientStats(t *testing.T) {
 	_, _ = client.QueryWithTier(context.Background(), "test", TierSmart)
 
 	stats := client.Stats()
-	assert.Equal(t, 300, stats.TotalPromptTokens)  // 3 * 100
+	assert.Equal(t, 300, stats.TotalPromptTokens)     // 3 * 100
 	assert.Equal(t, 150, stats.TotalCompletionTokens) // 3 * 50
 	assert.Equal(t, 2, stats.CallsByTier[TierFast])
 	assert.Equal(t, 1, stats.CallsByTier[TierSmart])

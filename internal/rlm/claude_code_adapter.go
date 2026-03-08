@@ -5,13 +5,16 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/XiaoConstantine/dspy-go/pkg/core"
 	"github.com/XiaoConstantine/dspy-go/pkg/modules/rlm"
+	"github.com/sourcegraph/conc/pool"
 )
 
 // ClaudeCodeAdapter implements SubAgent using Claude Code CLI.
@@ -26,7 +29,7 @@ type ClaudeCodeAdapter struct {
 	timeout      time.Duration
 
 	// Usage tracking
-	mu           sync.Mutex
+	mu           sync.RWMutex
 	totalPrompt  int
 	totalCompl   int
 	totalCost    float64
@@ -72,6 +75,11 @@ type ClaudeCodeResponse struct {
 
 	StructuredOutput json.RawMessage `json:"structured_output,omitempty"`
 	Errors           []string        `json:"errors,omitempty"`
+}
+
+// TotalInputTokens returns the total prompt tokens including cache tokens.
+func (r *ClaudeCodeResponse) TotalInputTokens() int {
+	return r.Usage.InputTokens + r.Usage.CacheCreationInputTokens + r.Usage.CacheReadInputTokens
 }
 
 // parseClaudeCodeOutput parses the JSON output from Claude Code CLI.
@@ -139,8 +147,12 @@ func NewClaudeCodeAdapter(config ClaudeCodeConfig) *ClaudeCodeAdapter {
 
 // Query implements rlm.SubLLMClient.
 func (a *ClaudeCodeAdapter) Query(ctx context.Context, prompt string) (rlm.QueryResponse, error) {
+	return a.queryWithSessionMode(ctx, prompt, a.GetSessionID(), true)
+}
+
+func (a *ClaudeCodeAdapter) queryWithSessionMode(ctx context.Context, prompt string, resumeSession string, persistSession bool) (rlm.QueryResponse, error) {
 	args := []string{
-		"-p", prompt,
+		"-p", "-",
 		"--output-format", "json",
 	}
 
@@ -156,9 +168,10 @@ func (a *ClaudeCodeAdapter) Query(ctx context.Context, prompt string) (rlm.Query
 	// If enableTools is true but allowedTools is empty, use Claude Code defaults
 
 	// Resume session if available
-	if a.sessionID != "" {
-		args = append(args, "--resume", a.sessionID)
+	if resumeSession != "" {
+		args = append(args, "--resume", resumeSession)
 	}
+	args = maybeAppendDebugFileArg(args)
 
 	// Apply timeout via context
 	ctx, cancel := context.WithTimeout(ctx, a.timeout)
@@ -168,17 +181,26 @@ func (a *ClaudeCodeAdapter) Query(ctx context.Context, prompt string) (rlm.Query
 	if a.workDir != "" {
 		cmd.Dir = a.workDir
 	}
+	cmd.Env = nonInteractiveEnv()
+	cmd.Stdin = strings.NewReader(prompt)
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
 	if err := cmd.Run(); err != nil {
+		stderrStr := stderr.String()
+		// Extract the last meaningful lines from stderr (skip verbose prompt logs)
+		stderrSummary := lastLines(stderrStr, 5)
+		if resumeSession != "" && strings.Contains(stderrStr, "No conversation found with session ID") {
+			a.ResetSession()
+			return a.queryWithSessionMode(ctx, prompt, "", persistSession)
+		}
 		// Check if it's a context timeout
 		if ctx.Err() == context.DeadlineExceeded {
 			return rlm.QueryResponse{}, fmt.Errorf("claude-code timed out after %v", a.timeout)
 		}
-		return rlm.QueryResponse{}, fmt.Errorf("claude-code failed: %w, stderr: %s", err, stderr.String())
+		return rlm.QueryResponse{}, fmt.Errorf("claude-code failed: %w, stderr (last 5 lines): %s", err, stderrSummary)
 	}
 
 	// Claude Code CLI outputs a JSON array of events. We need to find the result message.
@@ -191,8 +213,8 @@ func (a *ClaudeCodeAdapter) Query(ctx context.Context, prompt string) (rlm.Query
 	}
 
 	// Store session ID for resumption
-	if resp.SessionID != "" {
-		a.sessionID = resp.SessionID
+	if persistSession && resp.SessionID != "" {
+		a.SetSessionID(resp.SessionID)
 	}
 
 	// Track usage
@@ -204,21 +226,16 @@ func (a *ClaudeCodeAdapter) Query(ctx context.Context, prompt string) (rlm.Query
 		if len(resp.Errors) > 0 {
 			errMsg = fmt.Sprintf("%s: %v", resp.Result, resp.Errors)
 		}
-		// Include cache tokens in total prompt tokens
-		errPromptTokens := resp.Usage.InputTokens + resp.Usage.CacheCreationInputTokens + resp.Usage.CacheReadInputTokens
 		return rlm.QueryResponse{
 			Response:         errMsg,
-			PromptTokens:     errPromptTokens,
+			PromptTokens:     resp.TotalInputTokens(),
 			CompletionTokens: resp.Usage.OutputTokens,
 		}, fmt.Errorf("claude-code error: %s", errMsg)
 	}
 
-	// Total prompt tokens includes both direct input and cache creation tokens
-	totalPromptTokens := resp.Usage.InputTokens + resp.Usage.CacheCreationInputTokens + resp.Usage.CacheReadInputTokens
-
 	return rlm.QueryResponse{
 		Response:         resp.Result,
-		PromptTokens:     totalPromptTokens,
+		PromptTokens:     resp.TotalInputTokens(),
 		CompletionTokens: resp.Usage.OutputTokens,
 	}, nil
 }
@@ -226,7 +243,7 @@ func (a *ClaudeCodeAdapter) Query(ctx context.Context, prompt string) (rlm.Query
 // QueryWithSchema executes a query expecting structured JSON output.
 func (a *ClaudeCodeAdapter) QueryWithSchema(ctx context.Context, prompt string, schema string) (json.RawMessage, rlm.QueryResponse, error) {
 	args := []string{
-		"-p", prompt,
+		"-p", "-",
 		"--output-format", "json",
 		"--json-schema", schema,
 	}
@@ -235,9 +252,10 @@ func (a *ClaudeCodeAdapter) QueryWithSchema(ctx context.Context, prompt string, 
 		args = append(args, "--allowedTools", strings.Join(a.allowedTools, ","))
 	}
 
-	if a.sessionID != "" {
-		args = append(args, "--resume", a.sessionID)
+	if session := a.GetSessionID(); session != "" {
+		args = append(args, "--resume", session)
 	}
+	args = maybeAppendDebugFileArg(args)
 
 	ctx, cancel := context.WithTimeout(ctx, a.timeout)
 	defer cancel()
@@ -246,16 +264,23 @@ func (a *ClaudeCodeAdapter) QueryWithSchema(ctx context.Context, prompt string, 
 	if a.workDir != "" {
 		cmd.Dir = a.workDir
 	}
+	cmd.Env = nonInteractiveEnv()
+	cmd.Stdin = strings.NewReader(prompt)
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
 	if err := cmd.Run(); err != nil {
+		stderrStr := stderr.String()
+		if session := a.GetSessionID(); session != "" && strings.Contains(stderrStr, "No conversation found with session ID") {
+			a.ResetSession()
+			return a.QueryWithSchema(ctx, prompt, schema)
+		}
 		if ctx.Err() == context.DeadlineExceeded {
 			return nil, rlm.QueryResponse{}, fmt.Errorf("claude-code timed out after %v", a.timeout)
 		}
-		return nil, rlm.QueryResponse{}, fmt.Errorf("claude-code failed: %w, stderr: %s", err, stderr.String())
+		return nil, rlm.QueryResponse{}, fmt.Errorf("claude-code failed: %w, stderr: %s", err, stderrStr)
 	}
 
 	resp, err := parseClaudeCodeOutput(stdout.Bytes())
@@ -263,15 +288,14 @@ func (a *ClaudeCodeAdapter) QueryWithSchema(ctx context.Context, prompt string, 
 		return nil, rlm.QueryResponse{}, fmt.Errorf("failed to parse claude-code output: %w", err)
 	}
 
-	a.sessionID = resp.SessionID
+	if resp.SessionID != "" {
+		a.SetSessionID(resp.SessionID)
+	}
 	a.recordUsage(resp)
-
-	// Total prompt tokens includes both direct input and cache tokens
-	totalPromptTokens := resp.Usage.InputTokens + resp.Usage.CacheCreationInputTokens + resp.Usage.CacheReadInputTokens
 
 	queryResp := rlm.QueryResponse{
 		Response:         resp.Result,
-		PromptTokens:     totalPromptTokens,
+		PromptTokens:     resp.TotalInputTokens(),
 		CompletionTokens: resp.Usage.OutputTokens,
 	}
 
@@ -279,18 +303,41 @@ func (a *ClaudeCodeAdapter) QueryWithSchema(ctx context.Context, prompt string, 
 }
 
 // QueryBatched implements rlm.SubLLMClient.
-// Note: Claude Code queries are executed sequentially to maintain session context.
+// When session state exists, execution is sequential to preserve conversation continuity.
+// In stateless mode (no session), queries run concurrently for better throughput.
 func (a *ClaudeCodeAdapter) QueryBatched(ctx context.Context, prompts []string) ([]rlm.QueryResponse, error) {
-	results := make([]rlm.QueryResponse, len(prompts))
-	for i, prompt := range prompts {
-		resp, err := a.Query(ctx, prompt)
-		if err != nil {
-			results[i] = rlm.QueryResponse{Response: fmt.Sprintf("Error: %v", err)}
-			// Continue with remaining prompts
-			continue
-		}
-		results[i] = resp
+	if len(prompts) == 0 {
+		return nil, nil
 	}
+
+	results := make([]rlm.QueryResponse, len(prompts))
+	if a.GetSessionID() != "" {
+		for i, prompt := range prompts {
+			resp, err := a.Query(ctx, prompt)
+			if err != nil {
+				results[i] = rlm.QueryResponse{Response: fmt.Sprintf("Error: %v", err)}
+				continue
+			}
+			results[i] = resp
+		}
+		return results, nil
+	}
+
+	p := pool.New().WithMaxGoroutines(defaultBatchConcurrency).WithContext(ctx)
+	for i, prompt := range prompts {
+		i, prompt := i, prompt
+		p.Go(func(ctx context.Context) error {
+			resp, err := a.queryWithSessionMode(ctx, prompt, "", false)
+			if err != nil {
+				results[i] = rlm.QueryResponse{Response: fmt.Sprintf("Error: %v", err)}
+				return nil
+			}
+			results[i] = resp
+			return nil
+		})
+	}
+	p.Wait()
+
 	return results, nil
 }
 
@@ -298,8 +345,7 @@ func (a *ClaudeCodeAdapter) recordUsage(resp ClaudeCodeResponse) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
-	// Include all input tokens: direct input + cache creation + cache read
-	a.totalPrompt += resp.Usage.InputTokens + resp.Usage.CacheCreationInputTokens + resp.Usage.CacheReadInputTokens
+	a.totalPrompt += resp.TotalInputTokens()
 	a.totalCompl += resp.Usage.OutputTokens
 	a.totalCost += resp.TotalCostUSD
 	a.totalQueries++
@@ -331,8 +377,8 @@ func (a *ClaudeCodeAdapter) TokenPricing() (input float64, output float64) {
 
 // Stats implements SubAgent.
 func (a *ClaudeCodeAdapter) Stats() AgentStats {
-	a.mu.Lock()
-	defer a.mu.Unlock()
+	a.mu.RLock()
+	defer a.mu.RUnlock()
 
 	return AgentStats{
 		TotalPromptTokens:     a.totalPrompt,
@@ -352,8 +398,8 @@ func (a *ClaudeCodeAdapter) ResetSession() {
 
 // GetSessionID returns the current session ID.
 func (a *ClaudeCodeAdapter) GetSessionID() string {
-	a.mu.Lock()
-	defer a.mu.Unlock()
+	a.mu.RLock()
+	defer a.mu.RUnlock()
 	return a.sessionID
 }
 
@@ -380,6 +426,58 @@ func (a *ClaudeCodeAdapter) Reset() {
 func (a *ClaudeCodeAdapter) IsAvailable() bool {
 	cmd := exec.Command(a.cliPath, "--version")
 	return cmd.Run() == nil
+}
+
+// nonInteractiveEnv returns the current process environment configured for
+// non-interactive Claude CLI subprocess execution. It:
+//   - Strips CLAUDECODE to avoid the nested-session guard that blocks invocation
+//     from within an existing Claude Code session.
+//   - Strips ANTHROPIC_API_KEY and CLAUDE_API_KEY so the CLI uses the user's
+//     Claude Max/Pro subscription auth instead of a (possibly empty) API key.
+//   - Sets TERM=dumb and NO_COLOR=1 to prevent TTY/raw-mode setup that hangs
+//     when stdin is a pipe (benchmarks, CI, etc.).
+func nonInteractiveEnv() []string {
+	var env []string
+	for _, e := range os.Environ() {
+		if strings.HasPrefix(e, "CLAUDECODE=") ||
+			strings.HasPrefix(e, "ANTHROPIC_API_KEY=") ||
+			strings.HasPrefix(e, "CLAUDE_API_KEY=") {
+			continue
+		}
+		env = append(env, e)
+	}
+	env = append(env,
+		"TERM=dumb",
+		"NO_COLOR=1",
+	)
+	return env
+}
+
+// maybeAppendDebugFileArg ensures claude CLI writes debug logs to a writable path
+// in restricted environments. Users can override the path with
+// MAESTRO_CLAUDE_DEBUG_FILE.
+func maybeAppendDebugFileArg(args []string) []string {
+	if dbg := os.Getenv("MAESTRO_CLAUDE_DEBUG_FILE"); dbg != "" {
+		return append(args, "--debug-file", dbg)
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		if dirWritable(filepath.Join(home, ".claude", "debug")) {
+			return args
+		}
+	}
+	return append(args, "--debug-file", filepath.Join(os.TempDir(), "maestro-claude-code-debug.log"))
+}
+
+func dirWritable(dir string) bool {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return false
+	}
+	testPath := filepath.Join(dir, ".maestro_write_test")
+	if err := os.WriteFile(testPath, []byte("ok"), 0o600); err != nil {
+		return false
+	}
+	_ = os.Remove(testPath)
+	return true
 }
 
 // ClaudeCodeLLM wraps ClaudeCodeAdapter to implement core.LLM interface.
@@ -481,7 +579,23 @@ func (c *ClaudeCodeLLM) Capabilities() []core.Capability {
 	return []core.Capability{core.CapabilityCompletion, core.CapabilityJSON}
 }
 
+// Reset clears the underlying adapter session and usage counters.
+func (c *ClaudeCodeLLM) Reset() {
+	if c.adapter != nil {
+		c.adapter.Reset()
+	}
+}
+
 // GetAdapter returns the underlying ClaudeCodeAdapter for sub-client usage.
 func (c *ClaudeCodeLLM) GetAdapter() *ClaudeCodeAdapter {
 	return c.adapter
+}
+
+// lastLines returns the last n non-empty lines from s.
+func lastLines(s string, n int) string {
+	lines := strings.Split(strings.TrimSpace(s), "\n")
+	if len(lines) <= n {
+		return strings.TrimSpace(s)
+	}
+	return strings.Join(lines[len(lines)-n:], "\n")
 }

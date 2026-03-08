@@ -11,6 +11,23 @@ import (
 	"github.com/XiaoConstantine/dspy-go/pkg/core"
 )
 
+const (
+	// Character limits used when hydrating built-in benchmark cases from the
+	// current working directory. 4 chars ~= 1 token.
+	defaultSmallContextChars  = 40_000
+	defaultMediumContextChars = 140_000
+	defaultLargeContextChars  = 320_000
+)
+
+var defaultBuiltInQueries = map[string]string{
+	"small-function-analysis": "Analyze this code and explain the main logic, edge cases, and potential defects.",
+	"small-bug-fix":           "Identify the most likely bug in this code and propose a minimal safe fix.",
+	"medium-refactor":         "Suggest a refactor plan that improves structure while preserving behavior.",
+	"medium-feature":          "Design and describe changes needed to add a feature spanning multiple modules.",
+	"large-architecture":      "Review the architecture and identify the highest-impact design improvements.",
+	"large-cross-cutting":     "Propose an implementation plan for a cross-cutting change and list affected areas.",
+}
+
 // BenchmarkCLIConfig holds CLI configuration for benchmarks.
 type BenchmarkCLIConfig struct {
 	Mode       string   // "direct", "rlm", or "ab"
@@ -29,17 +46,17 @@ func DefaultBenchmarkCLIConfig() BenchmarkCLIConfig {
 		Mode:       "ab",
 		Iterations: 3,
 		WarmupRuns: 1,
-		OutputDir:  "./benchmark_results",
+		OutputDir:  filepath.Join(os.TempDir(), "maestro-benchmark-results"),
 		Verbose:    false,
 	}
 }
 
 // BenchmarkRunner handles running benchmarks from CLI.
 type BenchmarkRunner struct {
-	config     BenchmarkCLIConfig
-	processor  *Processor
-	directLLM  core.LLM
-	testCases  []TestCase
+	config    BenchmarkCLIConfig
+	processor *Processor
+	directLLM core.LLM
+	testCases []TestCase
 }
 
 // NewBenchmarkRunner creates a CLI benchmark runner.
@@ -58,9 +75,13 @@ func (r *BenchmarkRunner) LoadTestCases() error {
 	}
 
 	// Use built-in test suites
-	r.testCases = append(r.testCases, SmallCodebaseTests()...)
-	r.testCases = append(r.testCases, MediumCodebaseTests()...)
-	r.testCases = append(r.testCases, LargeCodebaseTests()...)
+	builtIn := append(SmallCodebaseTests(), MediumCodebaseTests()...)
+	builtIn = append(builtIn, LargeCodebaseTests()...)
+	hydrated, err := hydrateBuiltInTestCases(builtIn)
+	if err != nil {
+		return err
+	}
+	r.testCases = append(r.testCases, hydrated...)
 
 	// Filter by tags
 	r.testCases = FilterTestsByTags(r.testCases, r.config.Tags, r.config.ExcludeTag)
@@ -69,6 +90,100 @@ func (r *BenchmarkRunner) LoadTestCases() error {
 	r.testCases = SortTestsBySize(r.testCases)
 
 	return nil
+}
+
+func hydrateBuiltInTestCases(cases []TestCase) ([]TestCase, error) {
+	if len(cases) == 0 {
+		return nil, nil
+	}
+
+	wd, err := os.Getwd()
+	if err != nil {
+		return nil, fmt.Errorf("failed to determine working directory for built-in benchmark cases: %w", err)
+	}
+
+	largeContext, err := gatherDirectoryContextWithLimit(wd, defaultLargeContextChars)
+	if err != nil {
+		return nil, fmt.Errorf("failed to build default benchmark context from %q: %w", wd, err)
+	}
+	largeContext = strings.TrimSpace(largeContext)
+	if largeContext == "" {
+		return nil, fmt.Errorf(
+			"failed to build default benchmark context from %q: no code files found (use --test-dir or --context/--query)",
+			wd,
+		)
+	}
+
+	smallContext := truncateContextByChars(largeContext, defaultSmallContextChars)
+	mediumContext := truncateContextByChars(largeContext, defaultMediumContextChars)
+	largeContext = truncateContextByChars(largeContext, defaultLargeContextChars)
+
+	hydrated := make([]TestCase, len(cases))
+	copy(hydrated, cases)
+
+	for i := range hydrated {
+		if strings.TrimSpace(hydrated[i].Query) == "" {
+			hydrated[i].Query = defaultQueryForCase(hydrated[i].ID)
+		}
+		if strings.TrimSpace(hydrated[i].Context) == "" {
+			hydrated[i].Context = contextForTags(hydrated[i].Tags, smallContext, mediumContext, largeContext)
+		}
+
+		if strings.TrimSpace(hydrated[i].Context) == "" || strings.TrimSpace(hydrated[i].Query) == "" {
+			return nil, fmt.Errorf(
+				"built-in benchmark case %q has empty context/query after hydration; use --test-dir with explicit cases",
+				hydrated[i].ID,
+			)
+		}
+	}
+
+	return hydrated, nil
+}
+
+func defaultQueryForCase(caseID string) string {
+	if query, ok := defaultBuiltInQueries[caseID]; ok {
+		return query
+	}
+	return "Analyze this code and propose concrete, high-impact improvements."
+}
+
+func contextForTags(tags []string, small, medium, large string) string {
+	switch {
+	case hasTag(tags, "small"):
+		return small
+	case hasTag(tags, "medium"):
+		return medium
+	case hasTag(tags, "large"):
+		return large
+	default:
+		if medium != "" {
+			return medium
+		}
+		if large != "" {
+			return large
+		}
+		return small
+	}
+}
+
+func hasTag(tags []string, want string) bool {
+	for _, tag := range tags {
+		if tag == want {
+			return true
+		}
+	}
+	return false
+}
+
+func truncateContextByChars(context string, maxChars int) string {
+	if maxChars <= 0 {
+		return context
+	}
+	runes := []rune(context)
+	if len(runes) <= maxChars {
+		return context
+	}
+	return string(runes[:maxChars])
 }
 
 func (r *BenchmarkRunner) loadTestCasesFromDir(dir string) error {
@@ -159,12 +274,13 @@ func (r *BenchmarkRunner) Run(ctx context.Context) (*BenchmarkReport, error) {
 	mode := parseBenchmarkMode(r.config.Mode)
 
 	benchConfig := BenchmarkConfig{
-		Mode:           mode,
-		Iterations:     r.config.Iterations,
-		WarmupRuns:     r.config.WarmupRuns,
-		Timeout:        5 * time.Minute,
-		OutputDir:      r.config.OutputDir,
-		CollectQuality: true,
+		Mode:                mode,
+		Iterations:          r.config.Iterations,
+		WarmupRuns:          r.config.WarmupRuns,
+		Timeout:             5 * time.Minute,
+		OutputDir:           r.config.OutputDir,
+		CollectQuality:      true,
+		ContextWindowTokens: defaultContextWindowTokens,
 	}
 
 	benchmarker := NewBenchmarker(benchConfig, r.processor, r.directLLM)
@@ -244,6 +360,18 @@ func printBenchTestResult(result *BenchTestResult, mode BenchmarkMode) {
 			result.DirectStats.AvgTotalTokens,
 			result.RLMStats.AvgTotalTokens,
 			result.Comparison.TokenSavingsPercent)
+		if result.DirectStats.FailedRuns > 0 {
+			fmt.Printf("    Direct failures: %d/%d\n", result.DirectStats.FailedRuns, result.DirectStats.TotalRuns)
+			for _, errMsg := range result.DirectStats.Errors {
+				fmt.Printf("      - %s\n", errMsg)
+			}
+		}
+		if result.RLMStats.FailedRuns > 0 {
+			fmt.Printf("    RLM failures: %d/%d\n", result.RLMStats.FailedRuns, result.RLMStats.TotalRuns)
+			for _, errMsg := range result.RLMStats.Errors {
+				fmt.Printf("      - %s\n", errMsg)
+			}
+		}
 	}
 }
 
@@ -260,6 +388,7 @@ func printSummary(report *BenchmarkReport) {
 	fmt.Printf("Avg Cost Savings:     %.1f%%\n", report.Summary.AvgCostSavings)
 	fmt.Printf("Avg Latency Overhead: %.1f%%\n", report.Summary.AvgLatencyOverhead)
 	fmt.Printf("Avg Quality Diff:     %.1f%%\n", report.Summary.AvgQualityDiff)
+	fmt.Printf("Avg Prompt Pressure Reduction: %.1f%%\n", report.Summary.AvgPromptPressureReduction)
 	fmt.Println()
 	fmt.Printf("Recommended Mode:     %s\n", report.Summary.RecommendedMode)
 	fmt.Printf("Reason:               %s\n", report.Summary.RecommendationReason)
@@ -290,8 +419,14 @@ func CreateSampleTestCase(dir, name string) error {
 }
 
 func gatherDirectoryContext(dir string) (string, error) {
+	return gatherDirectoryContextWithLimit(dir, 100_000)
+}
+
+func gatherDirectoryContextWithLimit(dir string, maxSize int) (string, error) {
 	var builder strings.Builder
-	maxSize := 100000 // ~100KB limit
+	if maxSize <= 0 {
+		maxSize = 100_000
+	}
 
 	err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
@@ -328,11 +463,11 @@ func gatherDirectoryContext(dir string) (string, error) {
 		}
 
 		relPath, _ := filepath.Rel(dir, path)
-		builder.WriteString(fmt.Sprintf("=== %s ===\n", relPath))
-		builder.Write(content)
-		builder.WriteString("\n\n")
+		writeStringWithLimit(&builder, fmt.Sprintf("=== %s ===\n", relPath), maxSize)
+		writeStringWithLimit(&builder, string(content), maxSize)
+		writeStringWithLimit(&builder, "\n\n", maxSize)
 
-		if builder.Len() > maxSize {
+		if builder.Len() >= maxSize {
 			return filepath.SkipAll
 		}
 
@@ -344,6 +479,21 @@ func gatherDirectoryContext(dir string) (string, error) {
 	}
 
 	return builder.String(), nil
+}
+
+func writeStringWithLimit(builder *strings.Builder, s string, maxSize int) {
+	if s == "" || maxSize <= 0 || builder.Len() >= maxSize {
+		return
+	}
+	remaining := maxSize - builder.Len()
+	if remaining <= 0 {
+		return
+	}
+	if len(s) <= remaining {
+		builder.WriteString(s)
+		return
+	}
+	builder.WriteString(s[:remaining])
 }
 
 func estimateSizeTag(contextLen int) string {
@@ -401,6 +551,10 @@ func GenerateEfficiencyReport(report *BenchmarkReport) string {
 		}
 	} else {
 		builder.WriteString("RLM did not demonstrate token savings in this benchmark run.\n\n")
+	}
+	if report.Summary.AvgPromptPressureReduction > 0 {
+		builder.WriteString(fmt.Sprintf("RLM also reduces per-call prompt pressure by **%.1f%%** on average (peak fill ratio).\n\n",
+			report.Summary.AvgPromptPressureReduction))
 	}
 
 	// Breakeven Analysis

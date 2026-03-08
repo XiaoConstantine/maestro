@@ -7,10 +7,12 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/XiaoConstantine/dspy-go/pkg/core"
+	dspyrlm "github.com/XiaoConstantine/dspy-go/pkg/modules/rlm"
 )
 
 // BenchmarkMode defines the execution mode for benchmarking.
@@ -22,6 +24,13 @@ const (
 	ModeAB     BenchmarkMode = "ab"     // Run both and compare
 )
 
+const (
+	defaultContextWindowTokens = 200000
+	minRLMFillRatio            = 0.10
+)
+
+var defaultBenchmarkOutputDir = filepath.Join(os.TempDir(), "maestro-benchmark-results")
+
 // BenchmarkConfig configures benchmark execution.
 type BenchmarkConfig struct {
 	Mode           BenchmarkMode
@@ -30,17 +39,21 @@ type BenchmarkConfig struct {
 	Timeout        time.Duration // Timeout per test case
 	OutputDir      string        // Directory for reports
 	CollectQuality bool          // Whether to collect quality metrics
+	// ContextWindowTokens is used to compute prompt fill ratio per call.
+	// Defaults to 200k if unset.
+	ContextWindowTokens int
 }
 
 // DefaultBenchmarkConfig returns sensible defaults.
 func DefaultBenchmarkConfig() BenchmarkConfig {
 	return BenchmarkConfig{
-		Mode:           ModeAB,
-		Iterations:     3,
-		WarmupRuns:     1,
-		Timeout:        5 * time.Minute,
-		OutputDir:      "./benchmark_results",
-		CollectQuality: true,
+		Mode:                ModeAB,
+		Iterations:          3,
+		WarmupRuns:          1,
+		Timeout:             5 * time.Minute,
+		OutputDir:           defaultBenchmarkOutputDir,
+		CollectQuality:      true,
+		ContextWindowTokens: defaultContextWindowTokens,
 	}
 }
 
@@ -58,73 +71,88 @@ type TestCase struct {
 
 // RunResult captures the result of a single benchmark run.
 type RunResult struct {
-	Mode             BenchmarkMode `json:"mode"`
-	Iteration        int           `json:"iteration"`
-	StartTime        time.Time     `json:"start_time"`
-	Duration         time.Duration `json:"duration"`
-	PromptTokens     int           `json:"prompt_tokens"`
-	CompletionTokens int           `json:"completion_tokens"`
-	TotalTokens      int           `json:"total_tokens"`
-	CostUSD          float64       `json:"cost_usd"`
-	Response         string        `json:"response"`
-	Error            string        `json:"error,omitempty"`
-	QualityScore     float64       `json:"quality_score,omitempty"` // 0-1 scale
+	Mode                  BenchmarkMode `json:"mode"`
+	Iteration             int           `json:"iteration"`
+	StartTime             time.Time     `json:"start_time"`
+	Duration              time.Duration `json:"duration"`
+	PromptTokens          int           `json:"prompt_tokens"`
+	CompletionTokens      int           `json:"completion_tokens"`
+	TotalTokens           int           `json:"total_tokens"`
+	RawPromptTokens       int           `json:"raw_prompt_tokens,omitempty"`
+	RawCompletionTokens   int           `json:"raw_completion_tokens,omitempty"`
+	RawTotalTokens        int           `json:"raw_total_tokens,omitempty"`
+	PromptOverhead        int           `json:"prompt_overhead,omitempty"`
+	CompletionOverhead    int           `json:"completion_overhead,omitempty"`
+	CostUSD               float64       `json:"cost_usd"`
+	Response              string        `json:"response"`
+	Error                 string        `json:"error,omitempty"`
+	QualityScore          float64       `json:"quality_score,omitempty"` // 0-1 scale
+	MaxPromptTokens       int           `json:"max_prompt_tokens,omitempty"`
+	PeakPromptFillRatio   float64       `json:"peak_prompt_fill_ratio,omitempty"`
+	PromptTokensSeries    []int         `json:"prompt_tokens_series,omitempty"`
+	PromptFillRatioSeries []float64     `json:"prompt_fill_ratio_series,omitempty"`
 }
 
 // BenchTestResult aggregates results for a single test case.
 type BenchTestResult struct {
-	TestCase     TestCase    `json:"test_case"`
-	DirectRuns   []RunResult `json:"direct_runs,omitempty"`
-	RLMRuns      []RunResult `json:"rlm_runs,omitempty"`
-	DirectStats  RunStats    `json:"direct_stats,omitempty"`
-	RLMStats     RunStats    `json:"rlm_stats,omitempty"`
-	Comparison   Comparison  `json:"comparison,omitempty"`
-	GeneratedAt  time.Time   `json:"generated_at"`
+	TestCase    TestCase    `json:"test_case"`
+	DirectRuns  []RunResult `json:"direct_runs,omitempty"`
+	RLMRuns     []RunResult `json:"rlm_runs,omitempty"`
+	DirectStats RunStats    `json:"direct_stats,omitempty"`
+	RLMStats    RunStats    `json:"rlm_stats,omitempty"`
+	Comparison  Comparison  `json:"comparison,omitempty"`
+	GeneratedAt time.Time   `json:"generated_at"`
 }
 
 // RunStats provides statistical summary of runs.
 type RunStats struct {
-	TotalRuns        int     `json:"total_runs"`
-	SuccessfulRuns   int     `json:"successful_runs"`
-	AvgDuration      float64 `json:"avg_duration_ms"`
-	MinDuration      float64 `json:"min_duration_ms"`
-	MaxDuration      float64 `json:"max_duration_ms"`
-	AvgPromptTokens  float64 `json:"avg_prompt_tokens"`
-	AvgCompTokens    float64 `json:"avg_completion_tokens"`
-	AvgTotalTokens   float64 `json:"avg_total_tokens"`
-	TotalCostUSD     float64 `json:"total_cost_usd"`
-	AvgQualityScore  float64 `json:"avg_quality_score,omitempty"`
+	TotalRuns              int      `json:"total_runs"`
+	SuccessfulRuns         int      `json:"successful_runs"`
+	FailedRuns             int      `json:"failed_runs,omitempty"`
+	Errors                 []string `json:"errors,omitempty"`
+	AvgDuration            float64  `json:"avg_duration_ms"`
+	MinDuration            float64  `json:"min_duration_ms"`
+	MaxDuration            float64  `json:"max_duration_ms"`
+	AvgPromptTokens        float64  `json:"avg_prompt_tokens"`
+	AvgCompTokens          float64  `json:"avg_completion_tokens"`
+	AvgTotalTokens         float64  `json:"avg_total_tokens"`
+	TotalCostUSD           float64  `json:"total_cost_usd"`
+	AvgQualityScore        float64  `json:"avg_quality_score,omitempty"`
+	AvgMaxPromptTokens     float64  `json:"avg_max_prompt_tokens,omitempty"`
+	AvgPeakPromptFillRatio float64  `json:"avg_peak_prompt_fill_ratio,omitempty"`
 }
 
 // Comparison shows the efficiency comparison between modes.
 type Comparison struct {
-	TokenSavingsPercent   float64 `json:"token_savings_percent"`   // Positive = RLM uses fewer tokens
-	CostSavingsPercent    float64 `json:"cost_savings_percent"`    // Positive = RLM costs less
-	LatencyDiffPercent    float64 `json:"latency_diff_percent"`    // Positive = RLM is slower
-	QualityDiffPercent    float64 `json:"quality_diff_percent"`    // Positive = RLM has better quality
-	EfficiencyRatio       float64 `json:"efficiency_ratio"`        // Tokens saved per quality point
-	Recommendation        string  `json:"recommendation"`          // Which mode to use
+	TokenSavingsPercent            float64 `json:"token_savings_percent"`             // Positive = RLM uses fewer tokens
+	CostSavingsPercent             float64 `json:"cost_savings_percent"`              // Positive = RLM costs less
+	LatencyDiffPercent             float64 `json:"latency_diff_percent"`              // Positive = RLM is slower
+	QualityDiffPercent             float64 `json:"quality_diff_percent"`              // Positive = RLM has better quality
+	PromptPressureReductionPercent float64 `json:"prompt_pressure_reduction_percent"` // Positive = RLM has lower peak prompt pressure
+	EfficiencyRatio                float64 `json:"efficiency_ratio"`                  // Tokens saved per quality point
+	Recommendation                 string  `json:"recommendation"`                    // Which mode to use
 }
 
 // BenchmarkReport is the full benchmark report.
 type BenchmarkReport struct {
-	Config        BenchmarkConfig       `json:"config"`
-	BenchTestResults   []BenchTestResult          `json:"test_results"`
-	Summary       ReportSummary         `json:"summary"`
-	GeneratedAt   time.Time             `json:"generated_at"`
-	DurationTotal time.Duration         `json:"duration_total"`
+	Config           BenchmarkConfig   `json:"config"`
+	BenchTestResults []BenchTestResult `json:"test_results"`
+	Summary          ReportSummary     `json:"summary"`
+	GeneratedAt      time.Time         `json:"generated_at"`
+	DurationTotal    time.Duration     `json:"duration_total"`
 }
 
 // ReportSummary provides high-level benchmark summary.
 type ReportSummary struct {
-	TotalTestCases       int     `json:"total_test_cases"`
-	PassedTestCases      int     `json:"passed_test_cases"`
-	AvgTokenSavings      float64 `json:"avg_token_savings_percent"`
-	AvgCostSavings       float64 `json:"avg_cost_savings_percent"`
-	AvgLatencyOverhead   float64 `json:"avg_latency_overhead_percent"`
-	AvgQualityDiff       float64 `json:"avg_quality_diff_percent"`
-	RecommendedMode      string  `json:"recommended_mode"`
-	RecommendationReason string  `json:"recommendation_reason"`
+	TotalTestCases             int     `json:"total_test_cases"`
+	PassedTestCases            int     `json:"passed_test_cases"`
+	AvgTokenSavings            float64 `json:"avg_token_savings_percent"`
+	AvgCostSavings             float64 `json:"avg_cost_savings_percent"`
+	AvgLatencyOverhead         float64 `json:"avg_latency_overhead_percent"`
+	AvgQualityDiff             float64 `json:"avg_quality_diff_percent"`
+	AvgPromptPressureReduction float64 `json:"avg_prompt_pressure_reduction_percent"`
+	RecommendedMode            string  `json:"recommended_mode"`
+	RecommendationReason       string  `json:"recommendation_reason"`
 }
 
 // Benchmarker runs benchmarks comparing direct vs RLM approaches.
@@ -134,6 +162,11 @@ type Benchmarker struct {
 	directLLM core.LLM
 	mu        sync.Mutex
 	results   []BenchTestResult
+
+	calibrationMu                   sync.Mutex
+	directPromptOverheadPerCall     int
+	directCompletionOverheadPerCall int
+	directOverheadCalibrated        bool
 }
 
 // NewBenchmarker creates a new benchmarker.
@@ -200,25 +233,31 @@ func (b *Benchmarker) RunTestCase(ctx context.Context, tc TestCase) (*BenchTestR
 // runDirect executes test case in direct mode (full context stuffing).
 func (b *Benchmarker) runDirect(ctx context.Context, tc TestCase) ([]RunResult, error) {
 	runs := make([]RunResult, 0, b.config.Iterations)
+	prompt := fmt.Sprintf("Context:\n%s\n\nQuery: %s", tc.Context, tc.Query)
+	promptOverheadPerCall, completionOverheadPerCall := b.calibratedDirectOverhead(ctx)
+	warmupRuns := b.effectiveWarmupRuns()
 
 	// Warmup runs (not recorded)
-	for i := 0; i < b.config.WarmupRuns; i++ {
-		prompt := fmt.Sprintf("Context:\n%s\n\nQuery: %s", tc.Context, tc.Query)
+	for i := 0; i < warmupRuns; i++ {
+		b.resetDirectState()
 		_, _ = b.directLLM.Generate(ctx, prompt)
 	}
 
 	// Measured runs
 	for i := 0; i < b.config.Iterations; i++ {
+		b.resetDirectState()
+
 		run := RunResult{
 			Mode:      ModeDirect,
 			Iteration: i + 1,
 			StartTime: time.Now(),
 		}
 
-		prompt := fmt.Sprintf("Context:\n%s\n\nQuery: %s", tc.Context, tc.Query)
+		tracker := newCallPressureTracker(b.config.ContextWindowTokens)
+		meteredLLM := &meteredLLM{LLM: b.directLLM, tracker: tracker}
 
 		timeoutCtx, cancel := context.WithTimeout(ctx, b.config.Timeout)
-		resp, err := b.directLLM.Generate(timeoutCtx, prompt)
+		resp, err := meteredLLM.Generate(timeoutCtx, prompt)
 		cancel()
 
 		run.Duration = time.Since(run.StartTime)
@@ -227,13 +266,47 @@ func (b *Benchmarker) runDirect(ctx context.Context, tc TestCase) ([]RunResult, 
 			run.Error = err.Error()
 		} else {
 			run.Response = resp.Content
+			rawPrompt := 0
+			rawCompletion := 0
 			if resp.Usage != nil {
-				run.PromptTokens = resp.Usage.PromptTokens
-				run.CompletionTokens = resp.Usage.CompletionTokens
-				run.TotalTokens = resp.Usage.PromptTokens + resp.Usage.CompletionTokens
+				rawPrompt = resp.Usage.PromptTokens
+				rawCompletion = resp.Usage.CompletionTokens
 			}
+			if rawPrompt <= 0 {
+				rawPrompt = estimateTokens(prompt)
+			}
+			if rawCompletion <= 0 {
+				rawCompletion = estimateTokens(resp.Content)
+			}
+
+			adjPrompt, adjCompletion, promptOverhead, completionOverhead := applyPerCallOverhead(
+				rawPrompt,
+				rawCompletion,
+				1,
+				promptOverheadPerCall,
+				completionOverheadPerCall,
+			)
+			run.RawPromptTokens = rawPrompt
+			run.RawCompletionTokens = rawCompletion
+			run.RawTotalTokens = rawPrompt + rawCompletion
+			run.PromptOverhead = promptOverhead
+			run.CompletionOverhead = completionOverhead
+			run.PromptTokens = adjPrompt
+			run.CompletionTokens = adjCompletion
+			run.TotalTokens = run.PromptTokens + run.CompletionTokens
+
 			// Estimate cost (using default pricing)
 			run.CostUSD = estimateDirectCost(run.PromptTokens, run.CompletionTokens)
+			_, _, promptSeries, _, _, _ := tracker.Snapshot()
+			adjustedSeries, adjustedFill, adjustedMaxPrompt, adjustedPeakFill := adjustPromptPressureSeries(
+				promptSeries,
+				b.config.ContextWindowTokens,
+				promptOverheadPerCall,
+			)
+			run.MaxPromptTokens = adjustedMaxPrompt
+			run.PeakPromptFillRatio = adjustedPeakFill
+			run.PromptTokensSeries = adjustedSeries
+			run.PromptFillRatioSeries = adjustedFill
 
 			// Quality scoring if expected output provided
 			if b.config.CollectQuality && tc.Expected != "" {
@@ -250,27 +323,70 @@ func (b *Benchmarker) runDirect(ctx context.Context, tc TestCase) ([]RunResult, 
 // runRLM executes test case in RLM mode.
 func (b *Benchmarker) runRLM(ctx context.Context, tc TestCase) ([]RunResult, error) {
 	runs := make([]RunResult, 0, b.config.Iterations)
+	if b.processor == nil {
+		return nil, fmt.Errorf("rlm processor is not configured")
+	}
+	if b.directLLM == nil {
+		return nil, fmt.Errorf("direct LLM is not configured for instrumentation")
+	}
+	fillRatio := contextFillRatio(tc.Context, b.config.ContextWindowTokens)
+	if fillRatio < minRLMFillRatio {
+		for i := 0; i < b.config.Iterations; i++ {
+			runs = append(runs, RunResult{
+				Mode:      ModeRLM,
+				Iteration: i + 1,
+				StartTime: time.Now(),
+				Error: fmt.Sprintf(
+					"skipped: context fill ratio %.2f below RLM threshold %.2f",
+					fillRatio,
+					minRLMFillRatio,
+				),
+			})
+		}
+		return runs, nil
+	}
 
 	req := Request{
 		Context: tc.Context,
 		Query:   tc.Query,
 	}
+	runConfig := b.processor.config
+	runConfig.MaxIterations = benchmarkMaxIterations(estimateTokens(tc.Context), runConfig.MaxIterations)
+	promptOverheadPerCall, completionOverheadPerCall := b.calibratedDirectOverhead(ctx)
+	warmupRuns := b.effectiveWarmupRuns()
 
 	// Warmup runs
-	for i := 0; i < b.config.WarmupRuns; i++ {
-		_, _ = b.processor.Process(ctx, req)
+	for i := 0; i < warmupRuns; i++ {
+		b.resetProcessorState()
+		b.resetDirectState()
+
+		warmupProcessor, err := NewProcessorWithLLM(b.directLLM, b.processor.subClient, runConfig)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create warmup processor: %w", err)
+		}
+		_, _ = warmupProcessor.Process(ctx, req)
 	}
 
 	// Measured runs
 	for i := 0; i < b.config.Iterations; i++ {
+		b.resetProcessorState()
+		b.resetDirectState()
+
 		run := RunResult{
 			Mode:      ModeRLM,
 			Iteration: i + 1,
 			StartTime: time.Now(),
 		}
+		tracker := newCallPressureTracker(b.config.ContextWindowTokens)
+		meteredRoot := &meteredLLM{LLM: b.directLLM, tracker: tracker}
+		meteredSub := &meteredSubClient{inner: b.processor.subClient, tracker: tracker}
+		instrumentedProcessor, procErr := NewProcessorWithLLM(meteredRoot, meteredSub, runConfig)
+		if procErr != nil {
+			return nil, fmt.Errorf("failed to create instrumented processor: %w", procErr)
+		}
 
 		timeoutCtx, cancel := context.WithTimeout(ctx, b.config.Timeout)
-		resp, err := b.processor.Process(timeoutCtx, req)
+		resp, err := instrumentedProcessor.Process(timeoutCtx, req)
 		cancel()
 
 		run.Duration = time.Since(run.StartTime)
@@ -279,10 +395,50 @@ func (b *Benchmarker) runRLM(ctx context.Context, tc TestCase) ([]RunResult, err
 			run.Error = err.Error()
 		} else {
 			run.Response = resp.Answer
-			run.PromptTokens = resp.PromptTokens
-			run.CompletionTokens = resp.CompletionTokens
-			run.TotalTokens = resp.TotalTokens
+			rawPrompt := resp.PromptTokens
+			rawCompletion := resp.CompletionTokens
+
+			_, _, promptSeries, _, trackedPrompt, trackedCompletion := tracker.Snapshot()
+			if rawPrompt <= 0 {
+				rawPrompt = trackedPrompt
+			}
+			if rawCompletion <= 0 {
+				rawCompletion = trackedCompletion
+			}
+
+			callCount := len(promptSeries)
+			adjPrompt, adjCompletion, promptOverhead, completionOverhead := applyPerCallOverhead(
+				rawPrompt,
+				rawCompletion,
+				callCount,
+				promptOverheadPerCall,
+				completionOverheadPerCall,
+			)
+			run.RawPromptTokens = rawPrompt
+			run.RawCompletionTokens = rawCompletion
+			run.RawTotalTokens = rawPrompt + rawCompletion
+			run.PromptOverhead = promptOverhead
+			run.CompletionOverhead = completionOverhead
+			run.PromptTokens = adjPrompt
+			run.CompletionTokens = adjCompletion
+			run.TotalTokens = run.PromptTokens + run.CompletionTokens
 			run.CostUSD = resp.CostUSD
+			if run.TotalTokens == 0 {
+				lower := strings.ToLower(strings.TrimSpace(run.Response))
+				if lower == "" || strings.HasPrefix(lower, "error:") || strings.Contains(lower, "failed") {
+					run.Error = "rlm returned zero-token output; likely upstream query failure"
+				}
+			}
+
+			adjustedSeries, adjustedFill, adjustedMaxPrompt, adjustedPeakFill := adjustPromptPressureSeries(
+				promptSeries,
+				b.config.ContextWindowTokens,
+				promptOverheadPerCall,
+			)
+			run.MaxPromptTokens = adjustedMaxPrompt
+			run.PeakPromptFillRatio = adjustedPeakFill
+			run.PromptTokensSeries = adjustedSeries
+			run.PromptFillRatioSeries = adjustedFill
 
 			if b.config.CollectQuality && tc.Expected != "" {
 				run.QualityScore = scoreQuality(run.Response, tc.Expected)
@@ -290,6 +446,17 @@ func (b *Benchmarker) runRLM(ctx context.Context, tc TestCase) ([]RunResult, err
 		}
 
 		runs = append(runs, run)
+		if i == 0 && run.Error != "" {
+			for skipped := i + 1; skipped < b.config.Iterations; skipped++ {
+				runs = append(runs, RunResult{
+					Mode:      ModeRLM,
+					Iteration: skipped + 1,
+					StartTime: time.Now(),
+					Error:     fmt.Sprintf("skipped after iteration 1 failure: %s", run.Error),
+				})
+			}
+			break
+		}
 	}
 
 	return runs, nil
@@ -325,9 +492,9 @@ func (b *Benchmarker) GenerateReport() *BenchmarkReport {
 	defer b.mu.Unlock()
 
 	report := &BenchmarkReport{
-		Config:      b.config,
+		Config:           b.config,
 		BenchTestResults: b.results,
-		GeneratedAt: time.Now(),
+		GeneratedAt:      time.Now(),
 	}
 
 	// Calculate summary
@@ -338,12 +505,26 @@ func (b *Benchmarker) GenerateReport() *BenchmarkReport {
 
 // SaveReport saves the benchmark report to disk.
 func (b *Benchmarker) SaveReport(report *BenchmarkReport) error {
-	if err := os.MkdirAll(b.config.OutputDir, 0755); err != nil {
-		return fmt.Errorf("failed to create output directory: %w", err)
+	outputDir := strings.TrimSpace(b.config.OutputDir)
+	if outputDir == "" {
+		outputDir = defaultBenchmarkOutputDir
+	}
+
+	if err := os.MkdirAll(outputDir, 0755); err != nil {
+		fallbackDir := filepath.Join(os.TempDir(), "maestro-benchmark-results")
+		if fallbackErr := os.MkdirAll(fallbackDir, 0755); fallbackErr != nil {
+			return fmt.Errorf("failed to create output directory %q (also tried %q): %w", b.config.OutputDir, fallbackDir, err)
+		}
+		fmt.Printf("Warning: could not write to %s, falling back to %s\n", b.config.OutputDir, fallbackDir)
+		outputDir = fallbackDir
+	}
+	b.config.OutputDir = outputDir
+	if report != nil {
+		report.Config.OutputDir = outputDir
 	}
 
 	// Save JSON report
-	jsonPath := filepath.Join(b.config.OutputDir, fmt.Sprintf("benchmark_%s.json", time.Now().Format("20060102_150405")))
+	jsonPath := filepath.Join(outputDir, fmt.Sprintf("benchmark_%s.json", time.Now().Format("20060102_150405")))
 	jsonData, err := json.MarshalIndent(report, "", "  ")
 	if err != nil {
 		return fmt.Errorf("failed to marshal report: %w", err)
@@ -353,7 +534,7 @@ func (b *Benchmarker) SaveReport(report *BenchmarkReport) error {
 	}
 
 	// Save markdown report
-	mdPath := filepath.Join(b.config.OutputDir, fmt.Sprintf("benchmark_%s.md", time.Now().Format("20060102_150405")))
+	mdPath := filepath.Join(outputDir, fmt.Sprintf("benchmark_%s.md", time.Now().Format("20060102_150405")))
 	mdContent := generateMarkdownReport(report)
 	if err := os.WriteFile(mdPath, []byte(mdContent), 0644); err != nil {
 		return fmt.Errorf("failed to write markdown report: %w", err)
@@ -364,6 +545,286 @@ func (b *Benchmarker) SaveReport(report *BenchmarkReport) error {
 
 // Helper functions
 
+type callPressureTracker struct {
+	mu              sync.Mutex
+	contextWindow   int
+	maxPromptTokens int
+	peakFillRatio   float64
+	promptSeries    []int
+	fillSeries      []float64
+	totalPrompt     int
+	totalCompletion int
+}
+
+func newCallPressureTracker(contextWindow int) *callPressureTracker {
+	if contextWindow <= 0 {
+		contextWindow = defaultContextWindowTokens
+	}
+	return &callPressureTracker{
+		contextWindow: contextWindow,
+		promptSeries:  make([]int, 0, 16),
+		fillSeries:    make([]float64, 0, 16),
+	}
+}
+
+func (t *callPressureTracker) Record(promptTokens, completionTokens int) {
+	if promptTokens < 0 {
+		promptTokens = 0
+	}
+	if completionTokens < 0 {
+		completionTokens = 0
+	}
+	fill := 0.0
+	if t.contextWindow > 0 {
+		fill = float64(promptTokens) / float64(t.contextWindow)
+	}
+
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	t.promptSeries = append(t.promptSeries, promptTokens)
+	t.fillSeries = append(t.fillSeries, fill)
+	t.totalPrompt += promptTokens
+	t.totalCompletion += completionTokens
+	if promptTokens > t.maxPromptTokens {
+		t.maxPromptTokens = promptTokens
+	}
+	if fill > t.peakFillRatio {
+		t.peakFillRatio = fill
+	}
+}
+
+func (t *callPressureTracker) Snapshot() (maxPrompt int, peakFill float64, promptSeries []int, fillSeries []float64, totalPrompt int, totalCompletion int) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	promptSeries = make([]int, len(t.promptSeries))
+	copy(promptSeries, t.promptSeries)
+	fillSeries = make([]float64, len(t.fillSeries))
+	copy(fillSeries, t.fillSeries)
+	return t.maxPromptTokens, t.peakFillRatio, promptSeries, fillSeries, t.totalPrompt, t.totalCompletion
+}
+
+type meteredLLM struct {
+	core.LLM
+	tracker *callPressureTracker
+}
+
+func (m *meteredLLM) Generate(ctx context.Context, prompt string, options ...core.GenerateOption) (*core.LLMResponse, error) {
+	resp, err := m.LLM.Generate(ctx, prompt, options...)
+	if err != nil {
+		return resp, err
+	}
+
+	promptTokens := 0
+	completionTokens := 0
+	if resp != nil && resp.Usage != nil {
+		promptTokens = resp.Usage.PromptTokens
+		completionTokens = resp.Usage.CompletionTokens
+	}
+	if promptTokens <= 0 {
+		promptTokens = estimateTokens(prompt)
+	}
+	if completionTokens <= 0 && resp != nil {
+		completionTokens = estimateTokens(resp.Content)
+	}
+	if m.tracker != nil {
+		m.tracker.Record(promptTokens, completionTokens)
+	}
+	return resp, nil
+}
+
+type meteredSubClient struct {
+	inner   dspyrlm.SubLLMClient
+	tracker *callPressureTracker
+}
+
+func (m *meteredSubClient) Query(ctx context.Context, prompt string) (dspyrlm.QueryResponse, error) {
+	resp, err := m.inner.Query(ctx, prompt)
+	if err != nil {
+		return resp, err
+	}
+	promptTokens := resp.PromptTokens
+	completionTokens := resp.CompletionTokens
+	if promptTokens <= 0 {
+		promptTokens = estimateTokens(prompt)
+	}
+	if completionTokens <= 0 {
+		completionTokens = estimateTokens(resp.Response)
+	}
+	if m.tracker != nil {
+		m.tracker.Record(promptTokens, completionTokens)
+	}
+	return resp, nil
+}
+
+func (m *meteredSubClient) QueryBatched(ctx context.Context, prompts []string) ([]dspyrlm.QueryResponse, error) {
+	responses, err := m.inner.QueryBatched(ctx, prompts)
+	for i, prompt := range prompts {
+		if i >= len(responses) {
+			break
+		}
+		resp := responses[i]
+		promptTokens := resp.PromptTokens
+		completionTokens := resp.CompletionTokens
+		if promptTokens <= 0 {
+			promptTokens = estimateTokens(prompt)
+		}
+		if completionTokens <= 0 {
+			completionTokens = estimateTokens(resp.Response)
+		}
+		if m.tracker != nil {
+			m.tracker.Record(promptTokens, completionTokens)
+		}
+	}
+	if err == nil {
+		for _, resp := range responses {
+			trimmed := strings.TrimSpace(resp.Response)
+			if strings.HasPrefix(strings.ToLower(trimmed), "error:") {
+				return responses, fmt.Errorf("%s", trimmed)
+			}
+		}
+	}
+	return responses, err
+}
+
+func (b *Benchmarker) resetDirectState() {
+	if b.directLLM == nil {
+		return
+	}
+	_ = resetIfSupported(b.directLLM)
+}
+
+func (b *Benchmarker) resetProcessorState() {
+	if b.processor == nil {
+		return
+	}
+	b.processor.ResetState()
+}
+
+func (b *Benchmarker) calibrateDirectOverhead(ctx context.Context) (promptOverheadPerCall, completionOverheadPerCall int) {
+	if b.directLLM == nil {
+		return 0, 0
+	}
+	if _, ok := b.directLLM.(stateResetter); !ok {
+		return 0, 0
+	}
+
+	// Calibrate from a tiny stateless call to approximate fixed provider overhead.
+	b.resetDirectState()
+	defer b.resetDirectState()
+
+	calibrationTimeout := b.config.Timeout
+	if calibrationTimeout <= 0 || calibrationTimeout > 30*time.Second {
+		calibrationTimeout = 30 * time.Second
+	}
+	calibrationCtx, cancel := context.WithTimeout(ctx, calibrationTimeout)
+	defer cancel()
+
+	resp, err := b.directLLM.Generate(calibrationCtx, "Reply with exactly: OK")
+	if err != nil || resp == nil || resp.Usage == nil {
+		return 0, 0
+	}
+
+	promptOverheadPerCall = resp.Usage.PromptTokens
+	completionOverheadPerCall = resp.Usage.CompletionTokens
+	if promptOverheadPerCall < 0 {
+		promptOverheadPerCall = 0
+	}
+	if completionOverheadPerCall < 0 {
+		completionOverheadPerCall = 0
+	}
+	return promptOverheadPerCall, completionOverheadPerCall
+}
+
+func (b *Benchmarker) calibratedDirectOverhead(ctx context.Context) (promptOverheadPerCall, completionOverheadPerCall int) {
+	b.calibrationMu.Lock()
+	defer b.calibrationMu.Unlock()
+
+	if b.directOverheadCalibrated {
+		return b.directPromptOverheadPerCall, b.directCompletionOverheadPerCall
+	}
+
+	promptOverheadPerCall, completionOverheadPerCall = b.calibrateDirectOverhead(ctx)
+	b.directPromptOverheadPerCall = promptOverheadPerCall
+	b.directCompletionOverheadPerCall = completionOverheadPerCall
+	b.directOverheadCalibrated = true
+	return promptOverheadPerCall, completionOverheadPerCall
+}
+
+func (b *Benchmarker) effectiveWarmupRuns() int {
+	if b.config.WarmupRuns <= 0 {
+		return 0
+	}
+	if b.directLLM != nil && strings.EqualFold(b.directLLM.ProviderName(), "claude-code") {
+		return 0
+	}
+	return b.config.WarmupRuns
+}
+
+func benchmarkMaxIterations(contextTokens, configured int) int {
+	if configured <= 0 {
+		configured = 30
+	}
+
+	switch {
+	case contextTokens < 100000 && configured > 8:
+		return 8
+	case contextTokens < 200000 && configured > 12:
+		return 12
+	default:
+		return configured
+	}
+}
+
+func applyPerCallOverhead(rawPrompt, rawCompletion, callCount, promptOverheadPerCall, completionOverheadPerCall int) (adjustedPrompt, adjustedCompletion, promptOverheadTotal, completionOverheadTotal int) {
+	if callCount <= 0 {
+		callCount = 1
+	}
+
+	promptOverheadTotal = promptOverheadPerCall * callCount
+	completionOverheadTotal = completionOverheadPerCall * callCount
+	adjustedPrompt = rawPrompt - promptOverheadTotal
+	adjustedCompletion = rawCompletion - completionOverheadTotal
+	if adjustedPrompt < 0 {
+		adjustedPrompt = 0
+	}
+	if adjustedCompletion < 0 {
+		adjustedCompletion = 0
+	}
+	return adjustedPrompt, adjustedCompletion, promptOverheadTotal, completionOverheadTotal
+}
+
+func adjustPromptPressureSeries(promptSeries []int, contextWindowTokens, promptOverheadPerCall int) (adjustedPromptSeries []int, adjustedFillSeries []float64, maxPromptTokens int, peakFillRatio float64) {
+	if len(promptSeries) == 0 {
+		return []int{}, []float64{}, 0, 0
+	}
+	if contextWindowTokens <= 0 {
+		contextWindowTokens = defaultContextWindowTokens
+	}
+
+	adjustedPromptSeries = make([]int, len(promptSeries))
+	adjustedFillSeries = make([]float64, len(promptSeries))
+	for i, promptTokens := range promptSeries {
+		adjusted := promptTokens - promptOverheadPerCall
+		if adjusted < 0 {
+			adjusted = 0
+		}
+		adjustedPromptSeries[i] = adjusted
+		if adjusted > maxPromptTokens {
+			maxPromptTokens = adjusted
+		}
+
+		fillRatio := float64(adjusted) / float64(contextWindowTokens)
+		adjustedFillSeries[i] = fillRatio
+		if fillRatio > peakFillRatio {
+			peakFillRatio = fillRatio
+		}
+	}
+
+	return adjustedPromptSeries, adjustedFillSeries, maxPromptTokens, peakFillRatio
+}
+
 func calculateStats(runs []RunResult) RunStats {
 	stats := RunStats{TotalRuns: len(runs)}
 	if len(runs) == 0 {
@@ -371,25 +832,35 @@ func calculateStats(runs []RunResult) RunStats {
 	}
 
 	var totalDuration, totalPrompt, totalComp, totalTokens, totalCost, totalQuality float64
+	var totalMaxPrompt, totalPeakFill float64
 	var minDuration, maxDuration float64 = -1, 0
 
+	seen := make(map[string]bool)
 	for _, run := range runs {
-		if run.Error == "" {
-			stats.SuccessfulRuns++
-			durationMs := float64(run.Duration.Milliseconds())
-			totalDuration += durationMs
-			totalPrompt += float64(run.PromptTokens)
-			totalComp += float64(run.CompletionTokens)
-			totalTokens += float64(run.TotalTokens)
-			totalCost += run.CostUSD
-			totalQuality += run.QualityScore
+		if run.Error != "" {
+			stats.FailedRuns++
+			if !seen[run.Error] {
+				seen[run.Error] = true
+				stats.Errors = append(stats.Errors, run.Error)
+			}
+			continue
+		}
+		stats.SuccessfulRuns++
+		durationMs := float64(run.Duration.Milliseconds())
+		totalDuration += durationMs
+		totalPrompt += float64(run.PromptTokens)
+		totalComp += float64(run.CompletionTokens)
+		totalTokens += float64(run.TotalTokens)
+		totalCost += run.CostUSD
+		totalQuality += run.QualityScore
+		totalMaxPrompt += float64(run.MaxPromptTokens)
+		totalPeakFill += run.PeakPromptFillRatio
 
-			if minDuration < 0 || durationMs < minDuration {
-				minDuration = durationMs
-			}
-			if durationMs > maxDuration {
-				maxDuration = durationMs
-			}
+		if minDuration < 0 || durationMs < minDuration {
+			minDuration = durationMs
+		}
+		if durationMs > maxDuration {
+			maxDuration = durationMs
 		}
 	}
 
@@ -403,6 +874,8 @@ func calculateStats(runs []RunResult) RunStats {
 		stats.AvgTotalTokens = totalTokens / n
 		stats.TotalCostUSD = totalCost
 		stats.AvgQualityScore = totalQuality / n
+		stats.AvgMaxPromptTokens = totalMaxPrompt / n
+		stats.AvgPeakPromptFillRatio = totalPeakFill / n
 	}
 
 	return stats
@@ -425,6 +898,9 @@ func calculateComparison(direct, rlm RunStats) Comparison {
 
 	if direct.AvgQualityScore > 0 {
 		comp.QualityDiffPercent = ((rlm.AvgQualityScore - direct.AvgQualityScore) / direct.AvgQualityScore) * 100
+	}
+	if direct.AvgPeakPromptFillRatio > 0 {
+		comp.PromptPressureReductionPercent = ((direct.AvgPeakPromptFillRatio - rlm.AvgPeakPromptFillRatio) / direct.AvgPeakPromptFillRatio) * 100
 	}
 
 	// Efficiency ratio: token savings per quality point maintained
@@ -451,26 +927,54 @@ func calculateComparison(direct, rlm RunStats) Comparison {
 func calculateSummary(results []BenchTestResult) ReportSummary {
 	summary := ReportSummary{TotalTestCases: len(results)}
 
-	var totalTokenSavings, totalCostSavings, totalLatency, totalQuality float64
-	var comparableTests int
+	var allTokenSavings, allCostSavings, allLatency, allQuality, allPromptPressure float64
+	var allComparableTests int
+	var eligibleWeightedTokenSavings, eligibleContextWeight float64
+	var eligibleCostSavings, eligibleLatency, eligibleQuality, eligiblePromptPressure float64
+	var eligibleComparableTests int
 
 	for _, r := range results {
 		if r.DirectStats.SuccessfulRuns > 0 && r.RLMStats.SuccessfulRuns > 0 {
 			summary.PassedTestCases++
-			totalTokenSavings += r.Comparison.TokenSavingsPercent
-			totalCostSavings += r.Comparison.CostSavingsPercent
-			totalLatency += r.Comparison.LatencyDiffPercent
-			totalQuality += r.Comparison.QualityDiffPercent
-			comparableTests++
+			allTokenSavings += r.Comparison.TokenSavingsPercent
+			allCostSavings += r.Comparison.CostSavingsPercent
+			allLatency += r.Comparison.LatencyDiffPercent
+			allQuality += r.Comparison.QualityDiffPercent
+			allPromptPressure += r.Comparison.PromptPressureReductionPercent
+			allComparableTests++
+
+			contextTokens := estimateTokens(r.TestCase.Context)
+			if contextTokens <= 0 {
+				contextTokens = 1
+			}
+			fillRatio := float64(contextTokens) / float64(defaultContextWindowTokens)
+			if fillRatio >= minRLMFillRatio {
+				weight := float64(contextTokens)
+				eligibleWeightedTokenSavings += r.Comparison.TokenSavingsPercent * weight
+				eligibleContextWeight += weight
+				eligibleCostSavings += r.Comparison.CostSavingsPercent
+				eligibleLatency += r.Comparison.LatencyDiffPercent
+				eligibleQuality += r.Comparison.QualityDiffPercent
+				eligiblePromptPressure += r.Comparison.PromptPressureReductionPercent
+				eligibleComparableTests++
+			}
 		}
 	}
 
-	if comparableTests > 0 {
-		n := float64(comparableTests)
-		summary.AvgTokenSavings = totalTokenSavings / n
-		summary.AvgCostSavings = totalCostSavings / n
-		summary.AvgLatencyOverhead = totalLatency / n
-		summary.AvgQualityDiff = totalQuality / n
+	if eligibleComparableTests > 0 && eligibleContextWeight > 0 {
+		n := float64(eligibleComparableTests)
+		summary.AvgTokenSavings = eligibleWeightedTokenSavings / eligibleContextWeight
+		summary.AvgCostSavings = eligibleCostSavings / n
+		summary.AvgLatencyOverhead = eligibleLatency / n
+		summary.AvgQualityDiff = eligibleQuality / n
+		summary.AvgPromptPressureReduction = eligiblePromptPressure / n
+	} else if allComparableTests > 0 {
+		n := float64(allComparableTests)
+		summary.AvgTokenSavings = allTokenSavings / n
+		summary.AvgCostSavings = allCostSavings / n
+		summary.AvgLatencyOverhead = allLatency / n
+		summary.AvgQualityDiff = allQuality / n
+		summary.AvgPromptPressureReduction = allPromptPressure / n
 	}
 
 	// Overall recommendation
@@ -487,6 +991,17 @@ func calculateSummary(results []BenchTestResult) ReportSummary {
 	}
 
 	return summary
+}
+
+func contextFillRatio(context string, contextWindowTokens int) float64 {
+	window := contextWindowTokens
+	if window <= 0 {
+		window = defaultContextWindowTokens
+	}
+	if window <= 0 {
+		return 0
+	}
+	return float64(estimateTokens(context)) / float64(window)
 }
 
 func estimateDirectCost(promptTokens, completionTokens int) float64 {
@@ -571,6 +1086,7 @@ func generateMarkdownReport(report *BenchmarkReport) string {
 	md += fmt.Sprintf("| Avg Cost Savings | %.1f%% |\n", report.Summary.AvgCostSavings)
 	md += fmt.Sprintf("| Avg Latency Overhead | %.1f%% |\n", report.Summary.AvgLatencyOverhead)
 	md += fmt.Sprintf("| Avg Quality Diff | %.1f%% |\n", report.Summary.AvgQualityDiff)
+	md += fmt.Sprintf("| Avg Prompt Pressure Reduction | %.1f%% |\n", report.Summary.AvgPromptPressureReduction)
 	md += fmt.Sprintf("| **Recommended Mode** | **%s** |\n", report.Summary.RecommendedMode)
 	md += fmt.Sprintf("| Reason | %s |\n\n", report.Summary.RecommendationReason)
 
@@ -580,13 +1096,31 @@ func generateMarkdownReport(report *BenchmarkReport) string {
 		md += fmt.Sprintf("### %s\n\n", result.TestCase.Name)
 		md += fmt.Sprintf("%s\n\n", result.TestCase.Description)
 
-		if result.DirectStats.TotalRuns > 0 && result.RLMStats.TotalRuns > 0 {
+		// Report errors for any mode with failures
+		for _, stats := range []struct {
+			label string
+			s     RunStats
+		}{{"Direct", result.DirectStats}, {"RLM", result.RLMStats}} {
+			if stats.s.FailedRuns > 0 {
+				md += fmt.Sprintf("**%s mode**: %d/%d runs failed\n\n", stats.label, stats.s.FailedRuns, stats.s.TotalRuns)
+				for _, e := range stats.s.Errors {
+					md += fmt.Sprintf("- `%s`\n", e)
+				}
+				md += "\n"
+			}
+		}
+
+		if result.DirectStats.SuccessfulRuns > 0 && result.RLMStats.SuccessfulRuns > 0 {
 			md += "| Metric | Direct | RLM | Diff |\n"
 			md += "|--------|--------|-----|------|\n"
 			md += fmt.Sprintf("| Avg Tokens | %.0f | %.0f | %.1f%% |\n",
 				result.DirectStats.AvgTotalTokens, result.RLMStats.AvgTotalTokens, result.Comparison.TokenSavingsPercent)
 			md += fmt.Sprintf("| Avg Duration (ms) | %.0f | %.0f | %.1f%% |\n",
 				result.DirectStats.AvgDuration, result.RLMStats.AvgDuration, result.Comparison.LatencyDiffPercent)
+			md += fmt.Sprintf("| Avg Max Prompt Tokens | %.0f | %.0f | %.1f%% |\n",
+				result.DirectStats.AvgMaxPromptTokens, result.RLMStats.AvgMaxPromptTokens, result.Comparison.PromptPressureReductionPercent)
+			md += fmt.Sprintf("| Avg Peak Fill Ratio | %.3f | %.3f | %.1f%% |\n",
+				result.DirectStats.AvgPeakPromptFillRatio, result.RLMStats.AvgPeakPromptFillRatio, result.Comparison.PromptPressureReductionPercent)
 			md += fmt.Sprintf("| Total Cost | $%.4f | $%.4f | %.1f%% |\n",
 				result.DirectStats.TotalCostUSD, result.RLMStats.TotalCostUSD, result.Comparison.CostSavingsPercent)
 			md += fmt.Sprintf("| Quality Score | %.2f | %.2f | %.1f%% |\n",

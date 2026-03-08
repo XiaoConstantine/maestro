@@ -279,12 +279,59 @@ func TestBudgetManager_UnlimitedBudget(t *testing.T) {
 	}
 }
 
+func TestBudgetManager_StepLimit(t *testing.T) {
+	bm := NewBudgetManager(BudgetConfig{
+		MaxSteps:      2,
+		MaxBudgetUSD:  10,
+		WarnThreshold: 0.8,
+	})
+
+	if err := bm.Step(); err != nil {
+		t.Fatalf("first step should succeed: %v", err)
+	}
+	if err := bm.Step(); err != nil {
+		t.Fatalf("second step should succeed: %v", err)
+	}
+	if err := bm.Step(); err == nil {
+		t.Fatal("expected step budget error on third step")
+	}
+
+	if got := bm.StepsUsed(); got != 2 {
+		t.Fatalf("expected 2 used steps, got %d", got)
+	}
+	if got := bm.RemainingSteps(); got != 0 {
+		t.Fatalf("expected 0 remaining steps, got %d", got)
+	}
+}
+
+func TestBudgetManager_TokenLimit(t *testing.T) {
+	bm := NewBudgetManager(BudgetConfig{
+		MaxTokens:     100,
+		MaxBudgetUSD:  10,
+		WarnThreshold: 0.8,
+	})
+
+	if err := bm.Tokens(60); err != nil {
+		t.Fatalf("first token increment should succeed: %v", err)
+	}
+	if err := bm.Tokens(50); err == nil {
+		t.Fatal("expected token budget error")
+	}
+
+	if got := bm.TokensUsed(); got != 110 {
+		t.Fatalf("expected 110 used tokens, got %d", got)
+	}
+	if got := bm.RemainingTokens(); got != 0 {
+		t.Fatalf("expected 0 remaining tokens, got %d", got)
+	}
+}
+
 // budgetMockSubAgent implements SubAgent for budget testing.
 type budgetMockSubAgent struct {
-	name         string
-	inputPrice   float64
-	outputPrice  float64
-	queryFunc    func(ctx context.Context, prompt string) (dspyrlm.QueryResponse, error)
+	name        string
+	inputPrice  float64
+	outputPrice float64
+	queryFunc   func(ctx context.Context, prompt string) (dspyrlm.QueryResponse, error)
 }
 
 func (m *budgetMockSubAgent) Query(ctx context.Context, prompt string) (dspyrlm.QueryResponse, error) {
@@ -369,6 +416,42 @@ func TestBudgetAwareSubClient(t *testing.T) {
 	t.Error("expected budget to be exceeded")
 }
 
+func TestBudgetAwareSubClient_QueryBatchedChecksBudgetPerItem(t *testing.T) {
+	bm := NewBudgetManager(BudgetConfig{
+		MaxBudgetUSD:  0.03,
+		WarnThreshold: 0.8,
+		TrackByAgent:  true,
+	})
+
+	agent := &budgetMockSubAgent{
+		name:        "test-agent",
+		inputPrice:  0.01,
+		outputPrice: 0.01,
+		queryFunc: func(ctx context.Context, prompt string) (dspyrlm.QueryResponse, error) {
+			return dspyrlm.QueryResponse{
+				Response:         "ok:" + prompt,
+				PromptTokens:     1000,
+				CompletionTokens: 1000,
+			}, nil
+		},
+	}
+
+	client := NewBudgetAwareSubClient(agent, bm)
+	results, err := client.QueryBatched(context.Background(), []string{"one", "two", "three"})
+	if err == nil {
+		t.Fatal("expected budget exceeded error")
+	}
+	if len(results) != 2 {
+		t.Fatalf("expected partial results with 2 completed items, got %d", len(results))
+	}
+	if results[0].Response != "ok:one" || results[1].Response != "ok:two" {
+		t.Fatalf("unexpected responses: %#v", results)
+	}
+	if bm.TotalSpent() <= 0.03 {
+		t.Fatalf("expected spending to exceed budget, got %f", bm.TotalSpent())
+	}
+}
+
 func TestEstimateCost(t *testing.T) {
 	config := DefaultBudgetConfig()
 	bm := NewBudgetManager(config)
@@ -382,6 +465,43 @@ func TestEstimateCost(t *testing.T) {
 	delta := cost - expected
 	if delta < -0.0001 || delta > 0.0001 {
 		t.Errorf("expected cost ~%f, got %f", expected, cost)
+	}
+}
+
+func TestBudgetAwareLLM_StepAndTokenTracking(t *testing.T) {
+	root := &mockLLM{
+		response:         "ok",
+		promptTokens:     40,
+		completionTokens: 10,
+		provider:         "openai",
+		model:            "gpt-4o",
+	}
+	bm := NewBudgetManager(BudgetConfig{
+		MaxSteps:      1,
+		MaxTokens:     100,
+		MaxBudgetUSD:  10,
+		WarnThreshold: 0.8,
+		TrackByAgent:  true,
+	})
+	wrapped := NewBudgetAwareLLM(root, bm)
+
+	_, err := wrapped.Generate(context.Background(), "q1")
+	if err != nil {
+		t.Fatalf("first generate should succeed: %v", err)
+	}
+	if bm.StepsUsed() != 1 {
+		t.Fatalf("expected 1 used step, got %d", bm.StepsUsed())
+	}
+	if bm.TokensUsed() != 50 {
+		t.Fatalf("expected 50 used tokens, got %d", bm.TokensUsed())
+	}
+	if bm.TotalSpent() <= 0 {
+		t.Fatalf("expected non-zero spend from root LLM tracking")
+	}
+
+	_, err = wrapped.Generate(context.Background(), "q2")
+	if err == nil {
+		t.Fatal("expected step budget error on second generate")
 	}
 }
 

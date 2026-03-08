@@ -2,8 +2,12 @@ package rlm
 
 import (
 	"context"
+	"fmt"
 	"regexp"
+	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	dspyrlm "github.com/XiaoConstantine/dspy-go/pkg/modules/rlm"
 )
@@ -396,6 +400,60 @@ func TestQueryRouter_QueryBatched(t *testing.T) {
 		if result.Response != "mock response" {
 			t.Errorf("result %d: unexpected response: %s", i, result.Response)
 		}
+	}
+}
+
+func TestQueryRouter_QueryBatched_ResilientAndParallel(t *testing.T) {
+	registry := NewSubAgentRegistry()
+
+	var active int32
+	var maxActive int32
+	mock := &mockSubAgent{
+		name:        "test-agent",
+		inputPrice:  0.003,
+		outputPrice: 0.015,
+		queryFunc: func(ctx context.Context, prompt string) (dspyrlm.QueryResponse, error) {
+			current := atomic.AddInt32(&active, 1)
+			for {
+				seen := atomic.LoadInt32(&maxActive)
+				if current <= seen {
+					break
+				}
+				if atomic.CompareAndSwapInt32(&maxActive, seen, current) {
+					break
+				}
+			}
+			defer atomic.AddInt32(&active, -1)
+
+			time.Sleep(40 * time.Millisecond)
+			if prompt == "bad" {
+				return dspyrlm.QueryResponse{}, fmt.Errorf("boom")
+			}
+			return dspyrlm.QueryResponse{Response: "ok:" + prompt}, nil
+		},
+	}
+	registry.Register(mock)
+
+	config := DefaultRouterConfig()
+	config.DefaultAgent = "test-agent"
+	config.BatchMaxConcurrent = 4
+	router := NewQueryRouter(registry, config)
+
+	results, err := router.QueryBatched(context.Background(), []string{"a", "bad", "c", "d"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(results) != 4 {
+		t.Fatalf("expected 4 results, got %d", len(results))
+	}
+	if results[0].Response != "ok:a" || results[2].Response != "ok:c" || results[3].Response != "ok:d" {
+		t.Fatalf("unexpected success responses: %#v", results)
+	}
+	if !strings.HasPrefix(results[1].Response, "Error:") {
+		t.Fatalf("expected error response at index 1, got %q", results[1].Response)
+	}
+	if atomic.LoadInt32(&maxActive) <= 1 {
+		t.Fatalf("expected concurrent execution, maxActive=%d", atomic.LoadInt32(&maxActive))
 	}
 }
 

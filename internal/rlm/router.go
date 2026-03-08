@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/XiaoConstantine/dspy-go/pkg/modules/rlm"
+	"github.com/sourcegraph/conc/pool"
 )
 
 // QueryIntent represents the classified intent of a query.
@@ -70,29 +71,33 @@ type RouterConfig struct {
 	// FallbackOnError uses fallback agent if primary fails
 	FallbackOnError bool
 
+	// BatchMaxConcurrent controls parallelism for QueryBatched.
+	BatchMaxConcurrent int
+
 	// CustomRules allows custom routing rules
 	CustomRules []RoutingRule
 }
 
 // RoutingRule defines a custom routing rule.
 type RoutingRule struct {
-	Name       string
-	Pattern    *regexp.Regexp
-	Keywords   []string
+	Name        string
+	Pattern     *regexp.Regexp
+	Keywords    []string
 	TargetAgent string
-	Priority   int
+	Priority    int
 }
 
 // DefaultRouterConfig returns a configuration with sensible defaults.
 func DefaultRouterConfig() RouterConfig {
 	return RouterConfig{
-		DefaultAgent:    "anthropic-claude-sonnet",
-		AnalysisAgents:  []string{"anthropic-claude-sonnet", "anthropic-claude-opus"},
-		CodeGenAgents:   []string{"openai-gpt-4o", "openai-codex", "anthropic-claude-sonnet"},
-		FastAgents:      []string{"anthropic-claude-haiku", "openai-gpt-4o-mini"},
-		BestAgents:      []string{"anthropic-claude-opus", "openai-o3"},
-		EnableMetrics:   true,
-		FallbackOnError: true,
+		DefaultAgent:       "anthropic-claude-sonnet",
+		AnalysisAgents:     []string{"anthropic-claude-sonnet", "anthropic-claude-opus"},
+		CodeGenAgents:      []string{"openai-gpt-4o", "openai-codex", "anthropic-claude-sonnet"},
+		FastAgents:         []string{"anthropic-claude-haiku", "openai-gpt-4o-mini"},
+		BestAgents:         []string{"anthropic-claude-opus", "openai-o3"},
+		EnableMetrics:      true,
+		FallbackOnError:    true,
+		BatchMaxConcurrent: defaultBatchConcurrency,
 	}
 }
 
@@ -101,32 +106,32 @@ type QueryRouter struct {
 	config   RouterConfig
 	registry *SubAgentRegistry
 
-	mu       sync.RWMutex
-	metrics  RouterMetrics
-	history  []RoutingDecision
+	mu      sync.RWMutex
+	metrics RouterMetrics
+	history []RoutingDecision
 }
 
 // RouterMetrics tracks routing statistics.
 type RouterMetrics struct {
-	TotalRouted       int
-	ByIntent          map[QueryIntent]int
-	ByAgent           map[string]int
-	FallbackCount     int
-	AverageLatencyMS  float64
-	SuccessRate       float64
-	totalLatencyMS    float64
-	successCount      int
+	TotalRouted      int
+	ByIntent         map[QueryIntent]int
+	ByAgent          map[string]int
+	FallbackCount    int
+	AverageLatencyMS float64
+	SuccessRate      float64
+	totalLatencyMS   float64
+	successCount     int
 }
 
 // RoutingDecision records a routing decision for analysis.
 type RoutingDecision struct {
-	Query       string
-	Intent      QueryIntent
+	Query         string
+	Intent        QueryIntent
 	SelectedAgent string
-	FallbackUsed bool
-	LatencyMS   float64
-	Success     bool
-	Timestamp   time.Time
+	FallbackUsed  bool
+	LatencyMS     float64
+	Success       bool
+	Timestamp     time.Time
 }
 
 // NewQueryRouter creates a new query router.
@@ -152,7 +157,8 @@ func (r *QueryRouter) Route(ctx context.Context, query string) (rlm.QueryRespons
 	intent := r.ClassifyIntent(query)
 
 	// Select agent
-	agentName := r.selectAgent(intent)
+	originalAgent := r.selectAgent(intent)
+	agentName := originalAgent
 	agent, err := r.registry.Get(agentName)
 	if err != nil {
 		// Try fallback
@@ -176,7 +182,7 @@ func (r *QueryRouter) Route(ctx context.Context, query string) (rlm.QueryRespons
 		Query:         truncateQuery(query, 100),
 		Intent:        intent,
 		SelectedAgent: agentName,
-		FallbackUsed:  agentName != r.selectAgent(intent),
+		FallbackUsed:  agentName != originalAgent,
 		LatencyMS:     latency,
 		Success:       err == nil,
 		Timestamp:     start,
@@ -244,18 +250,31 @@ func (r *QueryRouter) Query(ctx context.Context, prompt string) (rlm.QueryRespon
 
 // QueryBatched implements rlm.SubLLMClient for batched queries.
 func (r *QueryRouter) QueryBatched(ctx context.Context, prompts []string) ([]rlm.QueryResponse, error) {
-	results := make([]rlm.QueryResponse, len(prompts))
-
-	// Route each query independently
-	for i, prompt := range prompts {
-		resp, err := r.Route(ctx, prompt)
-		if err != nil {
-			results[i] = rlm.QueryResponse{Response: fmt.Sprintf("Error: %v", err)}
-			continue
-		}
-		results[i] = resp
+	if len(prompts) == 0 {
+		return nil, nil
 	}
 
+	results := make([]rlm.QueryResponse, len(prompts))
+	maxConcurrent := r.config.BatchMaxConcurrent
+	if maxConcurrent <= 0 {
+		maxConcurrent = defaultBatchConcurrency
+	}
+	p := pool.New().WithMaxGoroutines(maxConcurrent).WithContext(ctx)
+
+	for i, prompt := range prompts {
+		i, prompt := i, prompt
+		p.Go(func(ctx context.Context) error {
+			resp, err := r.Route(ctx, prompt)
+			if err != nil {
+				results[i] = rlm.QueryResponse{Response: fmt.Sprintf("Error: %v", err)}
+				return nil
+			}
+			results[i] = resp
+			return nil
+		})
+	}
+
+	p.Wait()
 	return results, nil
 }
 
@@ -392,10 +411,13 @@ func (r *QueryRouter) recordDecision(decision RoutingDecision) {
 	r.metrics.AverageLatencyMS = r.metrics.totalLatencyMS / float64(r.metrics.TotalRouted)
 	r.metrics.SuccessRate = float64(r.metrics.successCount) / float64(r.metrics.TotalRouted)
 
-	// Keep recent history (last 100 decisions)
+	// Keep recent history (last 100 decisions).
+	// Copy to a fresh slice to release the old backing array.
 	r.history = append(r.history, decision)
 	if len(r.history) > 100 {
-		r.history = r.history[1:]
+		fresh := make([]RoutingDecision, 100)
+		copy(fresh, r.history[len(r.history)-100:])
+		r.history = fresh
 	}
 }
 
