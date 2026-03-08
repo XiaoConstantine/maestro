@@ -587,6 +587,13 @@ func (m *MaestroModel) handleCommand(cmd string, args []string) tea.Cmd {
 			prompt = strings.Join(args[1:], " ")
 		}
 		return m.cmdGemini(prompt, taskType)
+	case "rlm":
+		if len(args) == 0 {
+			return func() tea.Msg {
+				return ErrorMsg{Error: fmt.Errorf("usage: /rlm <question> [--path <content-path>] [--tier fast|smart|best]")}
+			}
+		}
+		return m.cmdRLM(args)
 	case "exit", "quit":
 		return tea.Quit
 	case "clear":
@@ -667,6 +674,8 @@ func (m *MaestroModel) cmdHelp() tea.Cmd {
   /help                  Show this help message
   /review <PR#>          Review a pull request
   /ask <question>        Ask a question about the repository
+  /rlm <question>        Analyze with RLM (Recursive Language Model)
+                         Options: --path <file>, --tier fast|smart|best
   /claude <prompt>       Send prompt to Claude CLI subagent
   /gemini <prompt>       Send prompt to Gemini CLI subagent
   /gemini search <q>     Search the web with Gemini
@@ -777,6 +786,62 @@ func (m *MaestroModel) cmdAsk(question string) tea.Cmd {
 	}
 
 	return tea.Batch(startCmd, askCmd)
+}
+
+func (m *MaestroModel) cmdRLM(args []string) tea.Cmd {
+	// Parse arguments: /rlm <question> [--path <path>] [--tier fast|smart|best]
+	opts := RLMOptions{
+		ModelTier: "smart", // Default tier
+	}
+	var questionParts []string
+
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--path":
+			if i+1 < len(args) {
+				opts.ContentPath = args[i+1]
+				i++
+			}
+		case "--tier":
+			if i+1 < len(args) {
+				opts.ModelTier = args[i+1]
+				i++
+			}
+		default:
+			questionParts = append(questionParts, args[i])
+		}
+	}
+
+	question := strings.Join(questionParts, " ")
+	if question == "" {
+		return func() tea.Msg {
+			return ErrorMsg{Error: fmt.Errorf("usage: /rlm <question> [--path <content-path>] [--tier fast|smart|best]")}
+		}
+	}
+
+	startCmd := m.progressModel.Start("Processing with RLM...")
+	prog := m.program
+
+	// Set up progress callback
+	opts.OnProgress = func(status string) {
+		prog.Send(ProgressMsg{Status: status})
+	}
+
+	rlmCmd := func() tea.Msg {
+		if m.backend == nil || !m.backend.IsReady() {
+			prog.Send(ProgressMsg{Status: ""})
+			return ResponseMsg{Content: "Backend not ready. Please configure the agent."}
+		}
+
+		response, err := m.backend.AskWithRLM(m.ctx, question, opts)
+		prog.Send(ProgressMsg{Status: ""})
+		if err != nil {
+			return ErrorMsg{Error: err}
+		}
+		return ResponseMsg{Content: response}
+	}
+
+	return tea.Batch(startCmd, rlmCmd)
 }
 
 func (m *MaestroModel) cmdClaude(prompt string) tea.Cmd {

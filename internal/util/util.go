@@ -68,7 +68,7 @@ func ConstructModelID(cfg *ModelConfig) core.ModelID {
 
 // ValidateModelConfig validates the model configuration.
 func ValidateModelConfig(cfg *ModelConfig) error {
-	if cfg.ModelProvider == "anthropic" || cfg.ModelProvider == "google" {
+	if cfg.ModelProvider == "anthropic" || cfg.ModelProvider == "google" || cfg.ModelProvider == "openai" {
 		key, err := CheckProviderAPIKey(cfg.ModelProvider, cfg.APIKey)
 		if err != nil {
 			return err
@@ -78,7 +78,7 @@ func ValidateModelConfig(cfg *ModelConfig) error {
 	}
 	// Validate provider
 	switch cfg.ModelProvider {
-	case "llamacpp:", "ollama", "anthropic", "google", "llamacpp":
+	case "llamacpp:", "ollama", "anthropic", "google", "llamacpp", "openai", "claude-code":
 		// Valid providers
 	default:
 		return fmt.Errorf("unsupported model provider: %s", cfg.ModelProvider)
@@ -86,14 +86,16 @@ func ValidateModelConfig(cfg *ModelConfig) error {
 
 	// Validate provider-specific configurations
 	switch cfg.ModelProvider {
-	case "anthropic", "google":
+	case "anthropic", "google", "openai":
 		if cfg.APIKey == "" {
-			return fmt.Errorf("API key required for external providers like anthropic, google")
+			return fmt.Errorf("API key required for external providers like anthropic, google, openai")
 		}
 	case "ollama":
 		if cfg.ModelName == "" {
 			return fmt.Errorf("model name required for Ollama models")
 		}
+	case "claude-code":
+		// No API key required - uses local Claude Code CLI authentication
 	}
 
 	return nil
@@ -110,8 +112,9 @@ func CheckProviderAPIKey(provider, apiKey string) (string, error) {
 	var envKey string
 	switch provider {
 	case "anthropic":
-		// Check both older and newer Anthropic environment variable patterns
+		// Check OAuth token first, then standard API keys
 		envKey = FirstNonEmpty(
+			os.Getenv("ANTHROPIC_OAUTH_TOKEN"),
 			os.Getenv("ANTHROPIC_API_KEY"),
 			os.Getenv("CLAUDE_API_KEY"),
 		)
@@ -122,6 +125,9 @@ func CheckProviderAPIKey(provider, apiKey string) (string, error) {
 			os.Getenv("GOOGLE_GEMINI_KEY"),
 			os.Getenv("GEMINI_API_KEY"),
 		)
+	case "openai":
+		// OpenAI uses OPENAI_API_KEY
+		envKey = os.Getenv("OPENAI_API_KEY")
 	default:
 		// For other providers, we don't check environment variables
 		return "", fmt.Errorf("API key required for %s provider", provider)
@@ -132,9 +138,11 @@ func CheckProviderAPIKey(provider, apiKey string) (string, error) {
 		var envVars []string
 		switch provider {
 		case "anthropic":
-			envVars = []string{"ANTHROPIC_API_KEY", "CLAUDE_API_KEY"}
+			envVars = []string{"ANTHROPIC_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "CLAUDE_API_KEY"}
 		case "google":
 			envVars = []string{"GOOGLE_API_KEY", "GOOGLE_GEMINI_KEY", "GEMINI_API_KEY"}
+		case "openai":
+			envVars = []string{"OPENAI_API_KEY"}
 		}
 		return "", fmt.Errorf("API key required for %s provider. Please provide via --api-key flag or set one of these environment variables: %s",
 			provider, strings.Join(envVars, ", "))

@@ -11,6 +11,11 @@ type MaestroBackend interface {
 	// AskQuestion sends a question to the agent and returns the response.
 	AskQuestion(ctx context.Context, question string) (string, error)
 
+	// AskWithRLM uses Recursive Language Model for large-context analysis.
+	// It enables efficient processing of large content by keeping state in
+	// REPL variables rather than the conversation context.
+	AskWithRLM(ctx context.Context, question string, opts RLMOptions) (string, error)
+
 	// Claude sends a prompt to Claude CLI subagent and returns the response.
 	Claude(ctx context.Context, prompt string) (string, error)
 
@@ -35,6 +40,19 @@ type MaestroBackend interface {
 
 	// GetCurrentSession returns the current session name.
 	GetCurrentSession() string
+}
+
+// RLMOptions configures RLM (Recursive Language Model) processing.
+type RLMOptions struct {
+	// ContentPath is the path to content to analyze (file or directory).
+	// If empty, uses the cloned repository.
+	ContentPath string
+	// MaxIterations limits the number of REPL iterations (0 = default).
+	MaxIterations int
+	// ModelTier selects the model tier: "fast", "smart", or "best".
+	ModelTier string
+	// OnProgress is called with status updates during processing.
+	OnProgress func(status string)
 }
 
 // SessionInfo contains metadata about a session.
@@ -86,6 +104,10 @@ func (b *NoOpBackend) ReviewPR(ctx context.Context, prNumber int, onProgress fun
 
 func (b *NoOpBackend) AskQuestion(ctx context.Context, question string) (string, error) {
 	return "Backend not configured. Please initialize with a valid agent.", nil
+}
+
+func (b *NoOpBackend) AskWithRLM(ctx context.Context, question string, opts RLMOptions) (string, error) {
+	return "RLM backend not configured. Please initialize with a valid agent.", nil
 }
 
 func (b *NoOpBackend) Claude(ctx context.Context, prompt string) (string, error) {

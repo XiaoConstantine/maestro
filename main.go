@@ -17,16 +17,14 @@ import (
 	"github.com/XiaoConstantine/dspy-go/pkg/llms"
 	"github.com/XiaoConstantine/dspy-go/pkg/logging"
 	maestroace "github.com/XiaoConstantine/maestro/internal/ace"
-	"github.com/XiaoConstantine/maestro/internal/agent"
 	"github.com/XiaoConstantine/maestro/internal/github"
 	"github.com/XiaoConstantine/maestro/internal/orchestration"
 	"github.com/XiaoConstantine/maestro/internal/review"
-	"github.com/XiaoConstantine/maestro/internal/search"
+	"github.com/XiaoConstantine/maestro/internal/rlm"
 	"github.com/XiaoConstantine/maestro/internal/types"
 	"github.com/XiaoConstantine/maestro/internal/util"
 	"github.com/XiaoConstantine/maestro/terminal"
-	"github.com/briandowns/spinner"
-	gh "github.com/google/go-github/v68/github"
+	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/logrusorgru/aurora"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
@@ -87,11 +85,19 @@ type config struct {
 
 	indexWorkers  int // Number of concurrent workers for indexing
 	reviewWorkers int // Number of concurrent workers for review
+
+	// RLM-specific provider configuration
+	rlmProvider string // "anthropic", "openai" for RLM processing
+	rlmModel    string // Model name for RLM (e.g., "gpt-4o", "claude-sonnet-4-5")
 }
 
 const (
 	DefaultModelProvider = "llamacpp:"
 	DefaultModelName     = "llamacpp:"
+
+	// RLM-specific defaults.
+	DefaultRLMProvider = "anthropic"
+	DefaultRLMModel    = "" // Use provider default
 )
 
 func printMaestroBanner() {
@@ -228,13 +234,25 @@ Available slash commands in interactive mode:
 	// improves throughput by overlapping HTTP requests.
 	rootCmd.PersistentFlags().IntVar(&cfg.reviewWorkers, "review-workers", 120, "Number of concurrent workers for parallel review")
 
+	// RLM provider flags - these control which LLM provider is used for RLM processing
+	rootCmd.PersistentFlags().StringVar(&cfg.rlmProvider, "rlm-provider", DefaultRLMProvider, "LLM provider for RLM processing (anthropic, openai, codex, claude-code)")
+	rootCmd.PersistentFlags().StringVar(&cfg.rlmModel, "rlm-model", DefaultRLMModel, "Model name for RLM (e.g., gpt-4o, gpt-4o-mini, o3, o3-mini, claude-sonnet-4-5)")
+
 	// Mark required flags
 	rootCmd.PersistentPreRun = func(cmd *cobra.Command, args []string) {
+		// Skip github token check for benchmark command
+		if cmd.Name() == "benchmark" {
+			return
+		}
 		if cfg.githubToken == "" {
 			fmt.Fprintln(os.Stderr, "GitHub token required via --github-token or MAESTRO_GITHUB_TOKEN")
 			os.Exit(1)
 		}
 	}
+
+	// Add benchmark subcommand
+	benchmarkCmd := createBenchmarkCmd(cfg)
+	rootCmd.AddCommand(benchmarkCmd)
 
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
@@ -305,7 +323,10 @@ func runCLIWithoutBanner(cfg *config) error {
 	if err := core.ConfigureTeacherLLM(cfg.apiKey, core.ModelGoogleGeminiPro); err != nil {
 		return fmt.Errorf("failed to configure teacher LLM: %w", err)
 	}
-	githubTools := github.NewTools(cfg.githubToken, cfg.owner, cfg.repo)
+	githubTools, err := github.NewToolsWithError(cfg.githubToken, cfg.owner, cfg.repo)
+	if err != nil {
+		return fmt.Errorf("github client is not initialized: %w", err)
+	}
 
 	// Initialize MCP bash helper for GitHub operations
 	var mcpHelper *github.MCPBashHelper
@@ -382,7 +403,10 @@ func runCLIWithoutBanner(cfg *config) error {
 func runFullPRReview(ctx context.Context, prNumber int, cfg *config, console types.ConsoleInterface, agent types.ReviewAgent, mcpHelper *github.MCPBashHelper) error {
 	logger := logging.GetLogger()
 
-	githubTools := github.NewTools(cfg.githubToken, cfg.owner, cfg.repo)
+	githubTools, err := github.NewToolsWithError(cfg.githubToken, cfg.owner, cfg.repo)
+	if err != nil {
+		return fmt.Errorf("github client is not initialized: %w", err)
+	}
 
 	// Fetching PR changes
 	if console.Color() {
@@ -504,255 +528,6 @@ func runFullPRReview(ctx context.Context, prNumber int, cfg *config, console typ
 	return nil
 }
 
-// TUIBackendAdapter adapts ReviewAgent to terminal.MaestroBackend.
-type TUIBackendAdapter struct {
-	agent       types.ReviewAgent
-	githubTools types.GitHubInterface
-	owner       string
-	repo        string
-}
-
-// NewTUIBackendAdapter creates a new backend adapter.
-func NewTUIBackendAdapter(agent types.ReviewAgent, githubTools types.GitHubInterface, owner, repo string) *TUIBackendAdapter {
-	return &TUIBackendAdapter{
-		agent:       agent,
-		githubTools: githubTools,
-		owner:       owner,
-		repo:        repo,
-	}
-}
-
-// ReviewPR implements terminal.MaestroBackend.
-func (a *TUIBackendAdapter) ReviewPR(ctx context.Context, prNumber int, onProgress func(status string)) ([]terminal.ReviewComment, error) {
-	if a.agent == nil {
-		return nil, fmt.Errorf("agent not initialized")
-	}
-
-	// Create a progress console adapter
-	progressConsole := &tuiProgressConsole{onProgress: onProgress}
-
-	// Fetch PR changes (like runFullPRReview does)
-	if onProgress != nil {
-		onProgress("Fetching PR changes...")
-	}
-	changes, err := a.githubTools.GetPullRequestChanges(ctx, prNumber)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get PR changes: %w", err)
-	}
-
-	// Create review tasks from the changes
-	tasks := make([]types.PRReviewTask, 0, len(changes.Files))
-	for _, file := range changes.Files {
-		tasks = append(tasks, types.PRReviewTask{
-			FilePath:    file.FilePath,
-			FileContent: file.FileContent,
-			Changes:     file.Patch,
-		})
-	}
-
-	if onProgress != nil {
-		onProgress(fmt.Sprintf("Reviewing %d files...", len(tasks)))
-	}
-
-	// Call ReviewPRWithChanges with tasks and preloaded changes
-	comments, err := a.agent.ReviewPRWithChanges(ctx, prNumber, tasks, progressConsole, changes)
-	if err != nil {
-		return nil, err
-	}
-
-	result := make([]terminal.ReviewComment, 0, len(comments))
-	for _, c := range comments {
-		result = append(result, terminal.ReviewComment{
-			FilePath:   c.FilePath,
-			LineNumber: c.LineNumber,
-			Content:    c.Content,
-			Severity:   c.Severity,
-			Suggestion: c.Suggestion,
-			Category:   c.Category,
-		})
-	}
-
-	return result, nil
-}
-
-// AskQuestion implements terminal.MaestroBackend.
-// It uses the UnifiedReActAgent which can iteratively search and read files to answer questions.
-func (a *TUIBackendAdapter) AskQuestion(ctx context.Context, question string) (string, error) {
-	if a.agent == nil {
-		return "", fmt.Errorf("agent not initialized")
-	}
-
-	logger := logging.GetLogger()
-	logger.Info(ctx, "Processing question with ReAct agent: %s", question)
-
-	// Get the cloned repo path
-	repoPath := a.agent.ClonedRepoPath()
-	if repoPath == "" {
-		return "Repository is still being cloned. Please wait a moment and try again.", nil
-	}
-
-	// Create a SimpleSearchTool for the cloned repo
-	searchTool := search.NewSimpleSearchTool(logger, repoPath)
-
-	// Create a UnifiedReActAgent that can iteratively explore the codebase
-	reactAgent, err := agent.NewUnifiedReActAgent("qa-agent", searchTool, logger)
-	if err != nil {
-		logger.Error(ctx, "Failed to create ReAct agent: %v", err)
-		return "", fmt.Errorf("failed to initialize question answering: %w", err)
-	}
-
-	// Create search request with the question
-	searchRequest := &search.SearchRequest{
-		Query:         question,
-		Context:       fmt.Sprintf("Repository: %s/%s. Answer the user's question by exploring the codebase. For overview questions, start by reading README.md.", a.owner, a.repo),
-		MaxResults:    10,
-		RequiredDepth: 3,
-	}
-
-	// Execute the search using the ReAct agent
-	response, err := reactAgent.ExecuteSearch(ctx, searchRequest)
-	if err != nil {
-		logger.Error(ctx, "ReAct agent search failed: %v", err)
-		return "", fmt.Errorf("failed to answer question: %w", err)
-	}
-
-	// Format the response
-	var result strings.Builder
-
-	// Extract the answer from the ReAct agent results
-	// The agent's answer is stored in a result with FilePath like "phase-X-output"
-	var answer string
-	var sourceFiles []string
-	seenFiles := make(map[string]bool)
-
-	for _, r := range response.Results {
-		if r.SearchResult == nil {
-			continue
-		}
-		// Phase outputs contain the agent's synthesized answer
-		if strings.HasPrefix(r.FilePath, "phase-") || strings.HasPrefix(r.FilePath, "react-") {
-			if r.Line != "" && len(r.Line) > len(answer) {
-				answer = r.Line
-			}
-		} else if r.FilePath != "" {
-			// Track actual source files explored
-			if !seenFiles[r.FilePath] {
-				seenFiles[r.FilePath] = true
-				sourceFiles = append(sourceFiles, r.FilePath)
-			}
-		}
-	}
-
-	// Use the agent's answer, fall back to synthesis
-	if answer != "" {
-		result.WriteString(answer)
-	} else if response.Synthesis != "" {
-		result.WriteString(response.Synthesis)
-	} else {
-		return fmt.Sprintf("I couldn't find relevant information about \"%s\" in this repository.", question), nil
-	}
-
-	// Add source files if available
-	if len(sourceFiles) > 0 {
-		result.WriteString("\n\n📁 Sources explored:\n")
-		for _, f := range sourceFiles {
-			result.WriteString(fmt.Sprintf("  • %s\n", f))
-		}
-	}
-
-	// Add confidence indicator
-	if response.Confidence < 0.5 {
-		result.WriteString("\n⚠️  Low confidence answer - results may be incomplete")
-	}
-
-	logger.Info(ctx, "ReAct agent completed in %v with confidence %.2f", response.Duration, response.Confidence)
-	return result.String(), nil
-}
-
-// GetRepoInfo implements terminal.MaestroBackend.
-func (a *TUIBackendAdapter) GetRepoInfo() terminal.RepoInfo {
-	return terminal.RepoInfo{
-		Owner:  a.owner,
-		Repo:   a.repo,
-		Branch: "main",
-	}
-}
-
-// IsReady implements terminal.MaestroBackend.
-func (a *TUIBackendAdapter) IsReady() bool {
-	return a.agent != nil
-}
-
-// Claude implements terminal.MaestroBackend (not supported in legacy adapter).
-func (a *TUIBackendAdapter) Claude(ctx context.Context, prompt string) (string, error) {
-	return "", fmt.Errorf("claude CLI not available in legacy mode - use TUI service adapter")
-}
-
-// Gemini implements terminal.MaestroBackend (not supported in legacy adapter).
-func (a *TUIBackendAdapter) Gemini(ctx context.Context, prompt string, taskType string) (string, error) {
-	return "", fmt.Errorf("gemini CLI not available in legacy mode - use TUI service adapter")
-}
-
-// tuiProgressConsole adapts progress callbacks to ConsoleInterface.
-type tuiProgressConsole struct {
-	onProgress func(status string)
-}
-
-func (c *tuiProgressConsole) StartSpinner(message string) {
-	if c.onProgress != nil {
-		c.onProgress(message)
-	}
-}
-func (c *tuiProgressConsole) StopSpinner() {}
-func (c *tuiProgressConsole) WithSpinner(ctx context.Context, message string, fn func() error) error {
-	return fn()
-}
-func (c *tuiProgressConsole) ShowComments(comments []types.PRReviewComment, metric types.MetricsCollector) {}
-func (c *tuiProgressConsole) ShowCommentsInteractive(comments []types.PRReviewComment, onPost func([]types.PRReviewComment) error) error {
-	return nil
-}
-func (c *tuiProgressConsole) ShowSummary(comments []types.PRReviewComment, metric types.MetricsCollector) {}
-func (c *tuiProgressConsole) StartReview(pr *gh.PullRequest) {
-	if c.onProgress != nil && pr != nil {
-		c.onProgress(fmt.Sprintf("Starting review: %s", pr.GetTitle()))
-	}
-}
-func (c *tuiProgressConsole) ReviewingFile(file string, current, total int) {
-	if c.onProgress != nil {
-		c.onProgress(fmt.Sprintf("Reviewing %s (%d/%d)", file, current, total))
-	}
-}
-func (c *tuiProgressConsole) ConfirmReviewPost(commentCount int) (bool, error) { return false, nil }
-func (c *tuiProgressConsole) ReviewComplete() {
-	if c.onProgress != nil {
-		c.onProgress("Review complete")
-	}
-}
-func (c *tuiProgressConsole) UpdateSpinnerText(text string) {
-	if c.onProgress != nil {
-		c.onProgress(text)
-	}
-}
-func (c *tuiProgressConsole) ShowReviewMetrics(metrics types.MetricsCollector, comments []types.PRReviewComment) {
-}
-func (c *tuiProgressConsole) CollectAllFeedback(comments []types.PRReviewComment, metric types.MetricsCollector) error {
-	return nil
-}
-func (c *tuiProgressConsole) Confirm(opts types.PromptOptions) (bool, error) { return false, nil }
-func (c *tuiProgressConsole) FileError(filepath string, err error) {
-	if c.onProgress != nil {
-		c.onProgress(fmt.Sprintf("Error in %s: %v", filepath, err))
-	}
-}
-func (c *tuiProgressConsole) Printf(format string, a ...interface{})    {}
-func (c *tuiProgressConsole) Println(a ...interface{})                  {}
-func (c *tuiProgressConsole) PrintHeader(text string)                   {}
-func (c *tuiProgressConsole) NoIssuesFound(file string, chunkNumber, totalChunks int) {}
-func (c *tuiProgressConsole) SeverityIcon(severity string) string { return "" }
-func (c *tuiProgressConsole) Color() bool                          { return false }
-func (c *tuiProgressConsole) Spinner() *spinner.Spinner            { return nil }
-func (c *tuiProgressConsole) IsInteractive() bool                  { return false }
-
 // TUIServiceAdapter wraps MaestroService for terminal.MaestroBackend.
 type TUIServiceAdapter struct {
 	service     *orchestration.MaestroService
@@ -803,14 +578,32 @@ func (a *TUIServiceAdapter) AskQuestion(ctx context.Context, question string) (s
 		return "", err
 	}
 
-	result := response.Answer
-	if sources, ok := response.Metadata["sources"].([]string); ok && len(sources) > 0 {
-		result += "\n\nSources:\n"
+	return formatAskResponse(response.Answer, response.Metadata), nil
+}
+
+// formatAskResponse formats an ask response with sources and confidence.
+func formatAskResponse(answer string, metadata map[string]interface{}) string {
+	var result strings.Builder
+	result.WriteString(answer)
+
+	// Add source files if available
+	if sources, ok := metadata["sources"].([]string); ok && len(sources) > 0 {
+		result.WriteString("\n\n📁 Sources explored:\n")
 		for _, s := range sources {
-			result += fmt.Sprintf("  - %s\n", s)
+			result.WriteString(fmt.Sprintf("  • %s\n", s))
 		}
 	}
-	return result, nil
+
+	// Add confidence indicator
+	if confidence, ok := metadata["confidence"].(float64); ok {
+		if confidence < 0.5 {
+			result.WriteString(fmt.Sprintf("\n⚠️  Confidence: %.0f%% - results may be incomplete", confidence*100))
+		} else {
+			result.WriteString(fmt.Sprintf("\n✓ Confidence: %.0f%%", confidence*100))
+		}
+	}
+
+	return result.String()
 }
 
 func (a *TUIServiceAdapter) GetRepoInfo() terminal.RepoInfo {
@@ -846,6 +639,66 @@ func (a *TUIServiceAdapter) Gemini(ctx context.Context, prompt string, taskType 
 		return "", err
 	}
 	return response.Answer, nil
+}
+
+func (a *TUIServiceAdapter) AskWithRLM(ctx context.Context, question string, opts terminal.RLMOptions) (string, error) {
+	response, err := a.service.ProcessRequest(ctx, orchestration.Request{
+		Type:     orchestration.RequestRLM,
+		Question: question,
+		Context: map[string]interface{}{
+			"content_path":   opts.ContentPath,
+			"max_iterations": opts.MaxIterations,
+			"model_tier":     opts.ModelTier,
+		},
+		OnProgress: opts.OnProgress,
+	})
+	if err != nil {
+		return "", err
+	}
+
+	// Format response with statistics
+	result := response.Answer
+	if response.Metadata != nil {
+		result += "\n\n📊 RLM Statistics:\n"
+
+		if iterations, ok := response.Metadata["iterations"].(int); ok {
+			result += fmt.Sprintf("  • Iterations: %d\n", iterations)
+		}
+
+		// Token breakdown
+		totalTokens, _ := response.Metadata["total_tokens"].(int)
+		rootTokens, _ := response.Metadata["root_tokens"].(int)
+		subTokens, _ := response.Metadata["sub_tokens"].(int)
+		promptTokens, _ := response.Metadata["prompt_tokens"].(int)
+		completionTokens, _ := response.Metadata["completion_tokens"].(int)
+
+		if totalTokens > 0 {
+			result += fmt.Sprintf("  • Total tokens: %d (prompt: %d, completion: %d)\n",
+				totalTokens, promptTokens, completionTokens)
+			result += fmt.Sprintf("  • Token breakdown: root=%d, sub-agents=%d\n", rootTokens, subTokens)
+		}
+
+		// Token savings
+		if savings, ok := response.Metadata["token_savings"].(float64); ok && savings > 0 {
+			result += fmt.Sprintf("  • Token savings vs naive: %.1f%%\n", savings*100)
+		}
+
+		// Cost
+		if cost, ok := response.Metadata["cost_usd"].(float64); ok && cost > 0 {
+			result += fmt.Sprintf("  • Estimated cost: $%.4f\n", cost)
+		}
+
+		// Duration
+		if durationMs, ok := response.Metadata["duration_ms"].(int64); ok {
+			result += fmt.Sprintf("  • Duration: %.1fs\n", float64(durationMs)/1000)
+		}
+
+		// Status
+		if status, ok := response.Metadata["status"].(string); ok && status != "success" {
+			result += fmt.Sprintf("  • Status: %s\n", status)
+		}
+	}
+	return result, nil
 }
 
 func (a *TUIServiceAdapter) CreateSession(ctx context.Context, name string) error {
@@ -921,10 +774,49 @@ func runModernUI(cfg *config) error {
 	}
 
 	// Initialize GitHub tools
-	githubTools := github.NewTools(cfg.githubToken, cfg.owner, cfg.repo)
+	githubTools, err := github.NewToolsWithError(cfg.githubToken, cfg.owner, cfg.repo)
+	if err != nil {
+		return fmt.Errorf("github client is not initialized: %w", err)
+	}
 	dbPath, err := util.CreateStoragePath(ctx, cfg.owner, cfg.repo)
 	if err != nil {
 		return fmt.Errorf("failed to create storage path: %w", err)
+	}
+
+	// Resolve RLM API key based on RLM provider (not main provider)
+	// This prevents using an incompatible key when providers differ
+	rlmProvider := strings.ToLower(cfg.rlmProvider)
+	mainProvider := strings.ToLower(cfg.modelProvider)
+	var rlmAPIKey string
+
+	switch rlmProvider {
+	case "openai", "codex":
+		// For OpenAI/Codex RLM, prefer OAuth subscription token, then API key.
+		rlmAPIKey = util.FirstNonEmpty(
+			os.Getenv("OPENAI_OAUTH_TOKEN"),
+			os.Getenv("OPENAI_API_KEY"),
+		)
+		if rlmAPIKey == "" && (mainProvider == "openai" || mainProvider == "codex") {
+			rlmAPIKey = cfg.apiKey
+		}
+	case "anthropic":
+		// For Anthropic RLM, prefer Anthropic env vars, fall back to main key only if main provider is also Anthropic
+		rlmAPIKey = util.FirstNonEmpty(
+			os.Getenv("ANTHROPIC_OAUTH_TOKEN"),
+			os.Getenv("ANTHROPIC_API_KEY"),
+			os.Getenv("CLAUDE_API_KEY"),
+		)
+		if rlmAPIKey == "" && mainProvider == "anthropic" {
+			rlmAPIKey = cfg.apiKey
+		}
+	case "claude-code", "cc":
+		// Claude Code uses CLI auth, no API key needed
+		rlmAPIKey = ""
+	default:
+		// For other providers, use main API key if providers match
+		if rlmProvider == mainProvider {
+			rlmAPIKey = cfg.apiKey
+		}
 	}
 
 	// Create MaestroService (singleton for this session)
@@ -936,6 +828,9 @@ func runModernUI(cfg *config) error {
 		GitHubToken:   cfg.githubToken,
 		IndexWorkers:  cfg.indexWorkers,
 		ReviewWorkers: cfg.reviewWorkers,
+		RLMProvider:   cfg.rlmProvider,
+		RLMModel:      cfg.rlmModel,
+		RLMAPIKey:     rlmAPIKey,
 	}, githubTools)
 	if err != nil {
 		return fmt.Errorf("failed to create service: %w", err)
@@ -978,3 +873,368 @@ func runModernUI(cfg *config) error {
 	return terminal.RunMaestro(tuiConfig, backend)
 }
 
+// createBenchmarkCmd creates the benchmark subcommand for RLM efficiency testing.
+func createBenchmarkCmd(cfg *config) *cobra.Command {
+	var (
+		benchMode   string
+		iterations  int
+		warmupRuns  int
+		outputDir   string
+		testDir     string
+		tags        []string
+		excludeTags []string
+		verbose     bool
+		contextFile string
+		query       string
+	)
+
+	cmd := &cobra.Command{
+		Use:   "benchmark",
+		Short: "Run RLM efficiency benchmarks",
+		Long: `Run benchmarks comparing Direct vs RLM approaches for context processing.
+
+Modes:
+  direct  - Run only direct context stuffing
+  rlm     - Run only RLM recursive processing
+  ab      - Run both and compare (default)
+
+Examples:
+  # Run A/B comparison with default test cases
+  maestro benchmark --rlm-provider anthropic
+  maestro benchmark --rlm-provider google --rlm-model gemini-2.5-flash
+
+  # Benchmark a specific file/directory
+  maestro benchmark --context ./src --query "Explain the architecture"
+
+  # Run with custom iterations
+  maestro benchmark --iterations 5 --warmup 2`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runBenchmark(cfg, benchMode, iterations, warmupRuns, outputDir, testDir, tags, excludeTags, verbose, contextFile, query)
+		},
+	}
+
+	cmd.Flags().StringVar(&benchMode, "mode", "ab", "Benchmark mode: direct, rlm, or ab (both)")
+	cmd.Flags().IntVar(&iterations, "iterations", 3, "Number of iterations per test")
+	cmd.Flags().IntVar(&warmupRuns, "warmup", 1, "Number of warmup runs before measurement")
+	cmd.Flags().StringVar(&outputDir, "output", filepath.Join(os.TempDir(), "maestro-benchmark-results"), "Output directory for reports")
+	cmd.Flags().StringVar(&testDir, "test-dir", "", "Directory containing test case files")
+	cmd.Flags().StringSliceVar(&tags, "tags", nil, "Filter tests by tags (e.g., small,medium)")
+	cmd.Flags().StringSliceVar(&excludeTags, "exclude-tags", nil, "Exclude tests by tags")
+	cmd.Flags().BoolVar(&verbose, "verbose", true, "Verbose output")
+	cmd.Flags().StringVar(&contextFile, "context", "", "File or directory to use as context")
+	cmd.Flags().StringVar(&query, "query", "", "Query to run against the context")
+
+	return cmd
+}
+
+func runBenchmark(cfg *config, mode string, iterations, warmupRuns int, outputDir, testDir string, tags, excludeTags []string, verbose bool, contextFile, query string) error {
+	ctx := context.Background()
+
+	// Configure dspy-go logger so RLM/Predict internals are captured
+	logLevel := logging.INFO
+	if verbose {
+		logLevel = logging.DEBUG
+	}
+	benchLogPath := filepath.Join(os.TempDir(), "maestro-benchmark-dspy.log")
+	fileOutput, _ := logging.NewFileOutput(
+		benchLogPath,
+		logging.WithRotation(100*1024*1024, 5),
+		logging.WithJSONFormat(true),
+	)
+	benchLogger := logging.NewLogger(logging.Config{
+		Severity: logLevel,
+		Outputs:  []logging.Output{fileOutput},
+	})
+	logging.SetLogger(benchLogger)
+
+	benchmarkTraceDir := filepath.Join(os.TempDir(), "maestro-rlm-traces")
+	if err := os.MkdirAll(benchmarkTraceDir, 0o755); err != nil && verbose {
+		fmt.Printf("Warning: failed to create benchmark trace directory %q: %v\n", benchmarkTraceDir, err)
+	}
+
+	fmt.Printf("dspy-go log: %s\n", benchLogPath)
+	fmt.Println("═══════════════════════════════════════════")
+	fmt.Println("         MAESTRO RLM BENCHMARK             ")
+	fmt.Println("═══════════════════════════════════════════")
+	fmt.Printf("Provider: %s\n", cfg.rlmProvider)
+	fmt.Printf("Model: %s\n", cfg.rlmModel)
+	fmt.Printf("Mode: %s\n", mode)
+	fmt.Println()
+
+	// Resolve API key based on RLM provider
+	rlmProvider := strings.ToLower(cfg.rlmProvider)
+	var rlmAPIKey string
+	switch rlmProvider {
+	case "openai", "codex":
+		rlmAPIKey = util.FirstNonEmpty(
+			os.Getenv("OPENAI_OAUTH_TOKEN"),
+			os.Getenv("OPENAI_API_KEY"),
+		)
+	case "google", "gemini":
+		rlmAPIKey = util.FirstNonEmpty(
+			os.Getenv("GEMINI_API_KEY"),
+			os.Getenv("GOOGLE_API_KEY"),
+		)
+	case "anthropic":
+		rlmAPIKey = util.FirstNonEmpty(
+			os.Getenv("ANTHROPIC_API_KEY"),
+			os.Getenv("CLAUDE_API_KEY"),
+		)
+	case "claude-code", "cc":
+		// Claude Code doesn't need API key
+	default:
+		rlmAPIKey = cfg.apiKey
+	}
+
+	if rlmAPIKey == "" && rlmProvider != "claude-code" && rlmProvider != "cc" {
+		return fmt.Errorf("API key required for provider %s (set via environment variable)", rlmProvider)
+	}
+
+	// Create the direct LLM and RLM processor based on provider
+	var directLLM core.LLM
+	var processor *rlm.Processor
+	var err error
+
+	switch rlmProvider {
+	case "claude-code", "cc":
+		// Use Claude Code CLI for both direct and RLM modes
+		// This uses your Claude Max/Pro subscription
+		claudeCodeLLM := rlm.NewClaudeCodeLLM(rlm.ClaudeCodeConfig{})
+		directLLM = claudeCodeLLM
+
+		processorConfig := rlm.ProcessorConfig{
+			Provider: "claude-code",
+			Verbose:  verbose,
+			TraceDir: benchmarkTraceDir,
+		}
+		processor, err = rlm.NewProcessor(processorConfig)
+		if err != nil {
+			return fmt.Errorf("failed to create processor: %w", err)
+		}
+
+	case "anthropic":
+		model := cfg.rlmModel
+		if model == "" {
+			model = "claude-sonnet-4-5-20250929"
+		}
+		directLLM, err = llms.NewAnthropicLLM(rlmAPIKey, anthropic.Model(model))
+		if err != nil {
+			return fmt.Errorf("failed to create direct LLM: %w", err)
+		}
+
+		subClient, err := rlm.NewTieredSubClientFromConfig(rlm.ProviderConfig{
+			Provider: rlmProvider,
+			Model:    cfg.rlmModel,
+			APIKey:   rlmAPIKey,
+		})
+		if err != nil {
+			return fmt.Errorf("failed to create tiered client: %w", err)
+		}
+
+		processorConfig := rlm.ProcessorConfig{Verbose: verbose, TraceDir: benchmarkTraceDir}
+		processor, err = rlm.NewProcessorWithLLM(directLLM, subClient, processorConfig)
+		if err != nil {
+			return fmt.Errorf("failed to create processor: %w", err)
+		}
+
+	case "openai", "codex":
+		model := cfg.rlmModel
+		if model == "" {
+			model = "gpt-4o"
+		}
+		directLLM, err = llms.NewOpenAI(core.ModelID(model), rlmAPIKey)
+		if err != nil {
+			return fmt.Errorf("failed to create direct LLM: %w", err)
+		}
+
+		subClient, err := rlm.NewTieredSubClientFromConfig(rlm.ProviderConfig{
+			Provider: rlmProvider,
+			Model:    cfg.rlmModel,
+			APIKey:   rlmAPIKey,
+		})
+		if err != nil {
+			return fmt.Errorf("failed to create tiered client: %w", err)
+		}
+
+		processorConfig := rlm.ProcessorConfig{Verbose: verbose, TraceDir: benchmarkTraceDir}
+		processor, err = rlm.NewProcessorWithLLM(directLLM, subClient, processorConfig)
+		if err != nil {
+			return fmt.Errorf("failed to create processor: %w", err)
+		}
+
+	case "google", "gemini":
+		model := cfg.rlmModel
+		if model == "" {
+			model = "gemini-2.5-flash"
+		}
+		directLLM, err = llms.NewGeminiLLM(rlmAPIKey, core.ModelID(model))
+		if err != nil {
+			return fmt.Errorf("failed to create direct Gemini LLM: %w", err)
+		}
+
+		subClient, err := rlm.NewTieredSubClientFromConfig(rlm.ProviderConfig{
+			Provider: rlmProvider,
+			Model:    cfg.rlmModel,
+			APIKey:   rlmAPIKey,
+		})
+		if err != nil {
+			return fmt.Errorf("failed to create tiered client: %w", err)
+		}
+
+		processorConfig := rlm.ProcessorConfig{Verbose: verbose, TraceDir: benchmarkTraceDir}
+		processor, err = rlm.NewProcessorWithLLM(directLLM, subClient, processorConfig)
+		if err != nil {
+			return fmt.Errorf("failed to create processor: %w", err)
+		}
+
+	default:
+		return fmt.Errorf("unsupported provider for benchmark: %s (supported: anthropic, openai, google, claude-code)", rlmProvider)
+	}
+
+	// If context and query provided, run single benchmark
+	if contextFile != "" && query != "" {
+		return runSingleBenchmark(ctx, processor, directLLM, mode, contextFile, query, iterations, warmupRuns, verbose)
+	}
+
+	// Otherwise run the full suite
+	cliConfig := rlm.BenchmarkCLIConfig{
+		Mode:       mode,
+		Iterations: iterations,
+		WarmupRuns: warmupRuns,
+		OutputDir:  outputDir,
+		TestDir:    testDir,
+		Tags:       tags,
+		ExcludeTag: excludeTags,
+		Verbose:    verbose,
+	}
+
+	runner := rlm.NewBenchmarkRunner(cliConfig, processor, directLLM)
+	report, err := runner.Run(ctx)
+	if err != nil {
+		return fmt.Errorf("benchmark failed: %w", err)
+	}
+
+	// Print efficiency report
+	fmt.Println()
+	fmt.Println(rlm.GenerateEfficiencyReport(report))
+
+	return nil
+}
+
+func runSingleBenchmark(ctx context.Context, processor *rlm.Processor, directLLM core.LLM, mode, contextFile, query string, iterations, warmupRuns int, verbose bool) error {
+	// Load context from file or directory
+	var contextContent string
+	info, err := os.Stat(contextFile)
+	if err != nil {
+		return fmt.Errorf("failed to stat context file: %w", err)
+	}
+
+	if info.IsDir() {
+		// Gather context from directory
+		var builder strings.Builder
+		err = filepath.Walk(contextFile, func(path string, info os.FileInfo, err error) error {
+			if err != nil || info.IsDir() {
+				return nil
+			}
+			// Only include code files
+			ext := strings.ToLower(filepath.Ext(path))
+			codeExts := map[string]bool{
+				".go": true, ".py": true, ".js": true, ".ts": true,
+				".java": true, ".c": true, ".cpp": true, ".h": true,
+				".rs": true, ".rb": true, ".php": true, ".md": true,
+			}
+			if !codeExts[ext] {
+				return nil
+			}
+			content, err := os.ReadFile(path)
+			if err != nil {
+				return nil
+			}
+			relPath, _ := filepath.Rel(contextFile, path)
+			builder.WriteString(fmt.Sprintf("=== %s ===\n", relPath))
+			builder.Write(content)
+			builder.WriteString("\n\n")
+			return nil
+		})
+		if err != nil {
+			return fmt.Errorf("failed to gather context: %w", err)
+		}
+		contextContent = builder.String()
+	} else {
+		content, err := os.ReadFile(contextFile)
+		if err != nil {
+			return fmt.Errorf("failed to read context file: %w", err)
+		}
+		contextContent = string(content)
+	}
+
+	fmt.Printf("Context size: %d bytes (~%d tokens)\n", len(contextContent), len(contextContent)/4)
+	fmt.Printf("Query: %s\n\n", query)
+
+	tc := rlm.TestCase{
+		ID:      "single-benchmark",
+		Name:    "Single Benchmark",
+		Context: contextContent,
+		Query:   query,
+	}
+
+	config := rlm.BenchmarkConfig{
+		Mode:           rlm.BenchmarkMode(mode),
+		Iterations:     iterations,
+		WarmupRuns:     warmupRuns,
+		Timeout:        10 * time.Minute,
+		CollectQuality: false,
+	}
+
+	benchmarker := rlm.NewBenchmarker(config, processor, directLLM)
+	result, err := benchmarker.RunTestCase(ctx, tc)
+	if err != nil {
+		return fmt.Errorf("benchmark failed: %w", err)
+	}
+
+	// Print results
+	fmt.Println("═══════════════════════════════════════════")
+	fmt.Println("                 RESULTS                   ")
+	fmt.Println("═══════════════════════════════════════════")
+
+	if len(result.DirectRuns) > 0 {
+		printModeResults("DIRECT MODE", result.DirectStats)
+	}
+
+	if len(result.RLMRuns) > 0 {
+		printModeResults("RLM MODE", result.RLMStats)
+	}
+
+	if len(result.DirectRuns) > 0 && len(result.RLMRuns) > 0 {
+		fmt.Println("\n  COMPARISON:")
+		fmt.Printf("  Token Savings:    %.1f%%\n", result.Comparison.TokenSavingsPercent)
+		fmt.Printf("  Cost Savings:     %.1f%%\n", result.Comparison.CostSavingsPercent)
+		fmt.Printf("  Latency Overhead: %.1f%%\n", result.Comparison.LatencyDiffPercent)
+		fmt.Printf("  Prompt Pressure Reduction: %.1f%%\n", result.Comparison.PromptPressureReductionPercent)
+		fmt.Printf("\n  %s\n", result.Comparison.Recommendation)
+	}
+
+	return nil
+}
+
+func printModeResults(label string, stats rlm.RunStats) {
+	fmt.Printf("\n%s (%d/%d succeeded):\n", label, stats.SuccessfulRuns, stats.TotalRuns)
+	if stats.SuccessfulRuns == 0 {
+		fmt.Println("  ALL RUNS FAILED")
+		for _, e := range stats.Errors {
+			fmt.Printf("  Error: %s\n", e)
+		}
+		return
+	}
+	fmt.Printf("  Avg Tokens:   %.0f\n", stats.AvgTotalTokens)
+	fmt.Printf("  Avg Duration: %.0fms\n", stats.AvgDuration)
+	fmt.Printf("  Avg Max Prompt: %.0f tokens (fill %.3f)\n",
+		stats.AvgMaxPromptTokens, stats.AvgPeakPromptFillRatio)
+	fmt.Printf("  Total Cost:   $%.4f\n", stats.TotalCostUSD)
+	if stats.FailedRuns > 0 {
+		fmt.Printf("  Failed Runs:  %d\n", stats.FailedRuns)
+		for _, e := range stats.Errors {
+			fmt.Printf("    Error: %s\n", e)
+		}
+	}
+}
