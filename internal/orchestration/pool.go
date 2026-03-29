@@ -7,8 +7,10 @@ import (
 	"sync"
 
 	"github.com/XiaoConstantine/dspy-go/pkg/agents"
+	"github.com/XiaoConstantine/dspy-go/pkg/agents/native"
+	"github.com/XiaoConstantine/dspy-go/pkg/agents/sessionevent"
+	"github.com/XiaoConstantine/dspy-go/pkg/core"
 	"github.com/XiaoConstantine/dspy-go/pkg/logging"
-	"github.com/XiaoConstantine/maestro/internal/search"
 	"github.com/XiaoConstantine/maestro/internal/types"
 )
 
@@ -19,6 +21,8 @@ type AgentPool struct {
 	githubTools types.GitHubInterface
 	config      *ServiceConfig
 	logger      *logging.Logger
+	qaSessionID string
+	qaStore     sessionevent.SessionEventStore
 
 	mu sync.RWMutex
 }
@@ -40,8 +44,19 @@ func (p *AgentPool) GetQAAgent(ctx context.Context) (*QAAgent, error) {
 		return p.qaAgent, nil
 	}
 
-	p.qaAgent = NewQAAgent(p.memory, p.logger)
+	p.qaAgent = NewQAAgent(p.memory, p.logger, p.qaStore, p.qaSessionID)
 	return p.qaAgent, nil
+}
+
+func (p *AgentPool) ConfigureQA(sessionStore sessionevent.SessionEventStore, sessionID string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	p.qaStore = sessionStore
+	p.qaSessionID = strings.TrimSpace(sessionID)
+	if p.qaAgent != nil {
+		p.qaAgent.ConfigureSession(sessionStore, p.qaSessionID)
+	}
 }
 
 func (p *AgentPool) GetReviewAgent(ctx context.Context) (types.ReviewAgent, error) {
@@ -72,67 +87,108 @@ func (p *AgentPool) Shutdown(ctx context.Context) {
 }
 
 type QAAgent struct {
-	memory agents.Memory
-	logger *logging.Logger
+	memory       agents.Memory
+	logger       *logging.Logger
+	sessionStore sessionevent.SessionEventStore
+	sessionID    string
+	repoPath     string
+	nativeAgent  *native.Agent
+
+	mu sync.Mutex
 }
 
-func NewQAAgent(memory agents.Memory, logger *logging.Logger) *QAAgent {
+func NewQAAgent(memory agents.Memory, logger *logging.Logger, sessionStore sessionevent.SessionEventStore, sessionID string) *QAAgent {
 	return &QAAgent{
-		memory: memory,
-		logger: logger,
+		memory:       memory,
+		logger:       logger,
+		sessionStore: sessionStore,
+		sessionID:    strings.TrimSpace(sessionID),
 	}
+}
+
+func (a *QAAgent) ConfigureSession(sessionStore sessionevent.SessionEventStore, sessionID string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	sessionID = strings.TrimSpace(sessionID)
+	if a.sessionID != sessionID {
+		a.nativeAgent = nil
+	}
+	a.sessionStore = sessionStore
+	a.sessionID = sessionID
 }
 
 func (a *QAAgent) Ask(ctx context.Context, question, repoPath, owner, repo string) (string, float64, []string, error) {
-	searchTool := search.NewSimpleSearchTool(a.logger, repoPath)
+	a.mu.Lock()
+	defer a.mu.Unlock()
 
-	reactAgent, err := createReActAgent("qa-agent-pooled", searchTool, a.logger)
-	if err != nil {
-		return "", 0, nil, fmt.Errorf("failed to create ReAct agent: %w", err)
+	if err := a.ensureNativeAgentLocked(repoPath); err != nil {
+		return "", 0, nil, fmt.Errorf("failed to create native QA agent: %w", err)
 	}
 
-	searchRequest := &search.SearchRequest{
-		Query:         question,
-		Context:       fmt.Sprintf("Repository: %s/%s. Answer the user's question by exploring the codebase. For overview questions, start by reading README.md.", owner, repo),
-		MaxResults:    10,
-		RequiredDepth: 3,
-	}
-
-	response, err := reactAgent.ExecuteSearch(ctx, searchRequest)
+	result, err := a.nativeAgent.Execute(ctx, map[string]interface{}{
+		"task": buildNativeQATask(question, owner, repo),
+	})
 	if err != nil {
 		return "", 0, nil, err
 	}
 
-	answer, sources := extractAnswerAndSources(response)
+	answer := strings.TrimSpace(stringValue(result["final_answer"]))
 	if answer == "" {
-		answer = response.Synthesis
+		if trace := a.nativeAgent.LastNativeTrace(); trace != nil {
+			answer = strings.TrimSpace(trace.FinalAnswer)
+		}
+	}
+	if answer == "" {
+		if execErr := strings.TrimSpace(stringValue(result["error"])); execErr != "" {
+			return "", 0, nil, fmt.Errorf("%s", execErr)
+		}
 	}
 	if answer == "" {
 		answer = fmt.Sprintf("I couldn't find relevant information about \"%s\" in this repository.", question)
 	}
 
-	return answer, response.Confidence, sources, nil
+	trace := a.nativeAgent.LastNativeTrace()
+	sources := extractSourcesFromNativeTrace(trace)
+	confidence := estimateNativeQAConfidence(trace, sources)
+
+	return answer, confidence, sources, nil
 }
 
-func extractAnswerAndSources(response *search.SearchResponse) (string, []string) {
-	var answer string
-	seen := make(map[string]bool)
-	var sources []string
+func (a *QAAgent) ensureNativeAgentLocked(repoPath string) error {
+	repoPath = strings.TrimSpace(repoPath)
+	if repoPath == "" {
+		return fmt.Errorf("repository path is required")
+	}
 
-	for _, r := range response.Results {
-		if r.SearchResult == nil {
-			continue
-		}
-		// Phase outputs contain the agent's synthesized answer
-		if strings.HasPrefix(r.FilePath, "phase-") || strings.HasPrefix(r.FilePath, "react-") {
-			if r.Line != "" && len(r.Line) > len(answer) {
-				answer = r.Line
-			}
-		} else if r.FilePath != "" && !seen[r.FilePath] {
-			seen[r.FilePath] = true
-			sources = append(sources, r.FilePath)
+	if a.nativeAgent != nil && a.repoPath == repoPath {
+		return nil
+	}
+
+	llm := core.GetDefaultLLM()
+	nativeAgent, err := native.NewAgent(llm, native.Config{
+		MaxTurns:                      12,
+		MaxTokens:                     2048,
+		Temperature:                   0.1,
+		SystemPrompt:                  qaNativeSystemPrompt,
+		Memory:                        a.memory,
+		SessionID:                     a.sessionID,
+		SessionEventStore:             a.sessionStore,
+		SessionRecallLimit:            4,
+		SessionRecallMaxChars:         1800,
+		MaxConsecutiveNoCallResponses: 4,
+	})
+	if err != nil {
+		return err
+	}
+
+	for _, tool := range buildNativeSearchTools(repoPath, a.logger) {
+		if err := nativeAgent.RegisterTool(tool); err != nil {
+			return fmt.Errorf("register %s: %w", tool.Name(), err)
 		}
 	}
 
-	return answer, sources
+	a.repoPath = repoPath
+	a.nativeAgent = nativeAgent
+	return nil
 }

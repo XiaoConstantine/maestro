@@ -181,6 +181,8 @@ func NewMaestroService(ctx context.Context, config *ServiceConfig, githubTools t
 		}
 	}
 
+	pool.ConfigureQA(sessionStore, sessionName)
+
 	// Initialize ACE (Agentic Context Engineering) manager for self-improving agents
 	aceConfig := maestroace.LoadConfigFromEnv()
 	var aceBasePath string
@@ -456,6 +458,7 @@ func (s *MaestroService) CreateSession(ctx context.Context, name string) error {
 	}
 
 	s.currentSession = name
+	s.pool.ConfigureQA(s.sessionStore, name)
 	s.logger.Info(ctx, "Created and switched to session: %s", name)
 	return nil
 }
@@ -479,6 +482,7 @@ func (s *MaestroService) SwitchSession(ctx context.Context, name string) error {
 	}
 
 	s.currentSession = name
+	s.pool.ConfigureQA(s.sessionStore, name)
 	s.logger.Info(ctx, "Switched to session: %s", name)
 	return nil
 }
