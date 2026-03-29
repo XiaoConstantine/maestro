@@ -92,6 +92,7 @@ type MaestroService struct {
 	config         *ServiceConfig
 	logger         *logging.Logger
 	sessionManager *subagent.SessionManager
+	sessionStore   *subagent.SQLiteSessionStore
 	claudeProc     *subagent.ClaudeProcessor
 	geminiProc     *subagent.GeminiProcessor
 	currentSession string
@@ -135,7 +136,22 @@ func NewMaestroService(ctx context.Context, config *ServiceConfig, githubTools t
 		sessionDir = filepath.Join(homeDir, ".maestro", "sessions")
 	}
 
-	sessionManager, err := subagent.NewSessionManager(sessionDir, logger)
+	sessionStorePath := filepath.Join(filepath.Dir(sessionDir), "sessionevent.db")
+	sessionStore, err := subagent.NewSQLiteSessionStore(sessionStorePath)
+	if err != nil {
+		logger.Warn(ctx, "Failed to create session event store: %v", err)
+	}
+
+	sessionOpts := []subagent.SessionManagerOption{}
+	if sessionStore != nil {
+		sessionOpts = append(sessionOpts, subagent.WithSessionEventStore(sessionStore))
+	}
+
+	sessionManager, err := subagent.NewSessionManager(
+		sessionDir,
+		logger,
+		sessionOpts...,
+	)
 	if err != nil {
 		logger.Warn(ctx, "Failed to create session manager: %v", err)
 	}
@@ -192,6 +208,7 @@ func NewMaestroService(ctx context.Context, config *ServiceConfig, githubTools t
 		config:         config,
 		logger:         logger,
 		sessionManager: sessionManager,
+		sessionStore:   sessionStore,
 		claudeProc:     claudeProc,
 		geminiProc:     geminiProc,
 		currentSession: sessionName,
@@ -379,6 +396,12 @@ func (s *MaestroService) IsReady() bool {
 
 func (s *MaestroService) Shutdown(ctx context.Context) error {
 	s.pool.Shutdown(ctx)
+
+	if s.sessionStore != nil {
+		if err := s.sessionStore.Close(); err != nil {
+			s.logger.Warn(ctx, "Failed to close session event store: %v", err)
+		}
+	}
 
 	// Close ACE manager to flush pending learnings
 	if s.aceManager != nil {
