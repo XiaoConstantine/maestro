@@ -12,9 +12,11 @@ import (
 	"strings"
 
 	"github.com/XiaoConstantine/dspy-go/pkg/agents/native"
+	"github.com/XiaoConstantine/dspy-go/pkg/agents/sessionevent"
 	"github.com/XiaoConstantine/dspy-go/pkg/core"
 	"github.com/XiaoConstantine/dspy-go/pkg/logging"
 	"github.com/XiaoConstantine/maestro/internal/search"
+	maestrosubagent "github.com/XiaoConstantine/maestro/internal/subagent"
 	models "github.com/XiaoConstantine/mcp-go/pkg/model"
 )
 
@@ -25,6 +27,7 @@ Start with a tool call instead of a plain-text answer.
 For overview or architecture questions, inspect README.md or top-level documentation early when present.
 Use read_file after search results to verify exact behavior.
 Prefer semantic_search for conceptual questions and search_content for concrete identifiers or strings.
+If Claude or Gemini delegation tools are available, use them only when the repository tools are not enough.
 Call Finish once you have enough evidence.`
 
 type nativeQATool struct {
@@ -89,10 +92,14 @@ Rules:
 }
 
 func buildNativeSearchTools(repoPath string, logger *logging.Logger) []core.Tool {
+	return buildNativeQATools(repoPath, "", "", logger, nil, nil, "")
+}
+
+func buildNativeQATools(repoPath, owner, repo string, logger *logging.Logger, sessionManager *maestrosubagent.SessionManager, sessionStore sessionevent.SessionEventStore, sessionID string) []core.Tool {
 	searchTool := search.NewSimpleSearchTool(logger, repoPath)
 	sgrepTool := search.NewSgrepTool(logger, repoPath)
 
-	return []core.Tool{
+	tools := []core.Tool{
 		&nativeQATool{
 			name:        "search_files",
 			description: "Search for files by glob, path fragment, basename, or extension.",
@@ -306,6 +313,39 @@ func buildNativeSearchTools(repoPath string, logger *logging.Logger) []core.Tool
 			},
 		},
 	}
+
+	if sessionManager == nil || sessionStore == nil || strings.TrimSpace(sessionID) == "" {
+		return tools
+	}
+
+	staticInput := map[string]any{
+		"repo_path": repoPath,
+	}
+	if strings.TrimSpace(owner) != "" {
+		staticInput["owner"] = owner
+	}
+	if strings.TrimSpace(repo) != "" {
+		staticInput["repo"] = repo
+	}
+
+	if maestrosubagent.ClaudeAvailable() {
+		tool, err := maestrosubagent.NewClaudeTool(logger, sessionManager, sessionID, staticInput)
+		if err != nil {
+			logger.Warn(context.Background(), "Failed to register Claude delegation tool: %v", err)
+		} else {
+			tools = append(tools, tool)
+		}
+	}
+	if maestrosubagent.GeminiAvailable() {
+		tool, err := maestrosubagent.NewGeminiTool(logger, sessionManager, sessionID, staticInput)
+		if err != nil {
+			logger.Warn(context.Background(), "Failed to register Gemini delegation tool: %v", err)
+		} else {
+			tools = append(tools, tool)
+		}
+	}
+
+	return tools
 }
 
 func newNativeToolResult(modelText, displayText string, details map[string]any) core.ToolResult {

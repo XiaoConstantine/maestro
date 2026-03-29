@@ -11,6 +11,7 @@ import (
 	"github.com/XiaoConstantine/dspy-go/pkg/agents/sessionevent"
 	"github.com/XiaoConstantine/dspy-go/pkg/core"
 	"github.com/XiaoConstantine/dspy-go/pkg/logging"
+	maestrosubagent "github.com/XiaoConstantine/maestro/internal/subagent"
 	"github.com/XiaoConstantine/maestro/internal/types"
 )
 
@@ -23,6 +24,7 @@ type AgentPool struct {
 	logger      *logging.Logger
 	qaSessionID string
 	qaStore     sessionevent.SessionEventStore
+	qaSessions  *maestrosubagent.SessionManager
 
 	mu sync.RWMutex
 }
@@ -44,18 +46,19 @@ func (p *AgentPool) GetQAAgent(ctx context.Context) (*QAAgent, error) {
 		return p.qaAgent, nil
 	}
 
-	p.qaAgent = NewQAAgent(p.memory, p.logger, p.qaStore, p.qaSessionID)
+	p.qaAgent = NewQAAgent(p.memory, p.logger, p.qaSessions, p.qaStore, p.qaSessionID)
 	return p.qaAgent, nil
 }
 
-func (p *AgentPool) ConfigureQA(sessionStore sessionevent.SessionEventStore, sessionID string) {
+func (p *AgentPool) ConfigureQA(sessionManager *maestrosubagent.SessionManager, sessionStore sessionevent.SessionEventStore, sessionID string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
+	p.qaSessions = sessionManager
 	p.qaStore = sessionStore
 	p.qaSessionID = strings.TrimSpace(sessionID)
 	if p.qaAgent != nil {
-		p.qaAgent.ConfigureSession(sessionStore, p.qaSessionID)
+		p.qaAgent.ConfigureSession(sessionManager, sessionStore, p.qaSessionID)
 	}
 }
 
@@ -87,26 +90,28 @@ func (p *AgentPool) Shutdown(ctx context.Context) {
 }
 
 type QAAgent struct {
-	memory       agents.Memory
-	logger       *logging.Logger
-	sessionStore sessionevent.SessionEventStore
-	sessionID    string
-	repoPath     string
-	nativeAgent  *native.Agent
+	memory         agents.Memory
+	logger         *logging.Logger
+	sessionManager *maestrosubagent.SessionManager
+	sessionStore   sessionevent.SessionEventStore
+	sessionID      string
+	repoPath       string
+	nativeAgent    *native.Agent
 
 	mu sync.Mutex
 }
 
-func NewQAAgent(memory agents.Memory, logger *logging.Logger, sessionStore sessionevent.SessionEventStore, sessionID string) *QAAgent {
+func NewQAAgent(memory agents.Memory, logger *logging.Logger, sessionManager *maestrosubagent.SessionManager, sessionStore sessionevent.SessionEventStore, sessionID string) *QAAgent {
 	return &QAAgent{
-		memory:       memory,
-		logger:       logger,
-		sessionStore: sessionStore,
-		sessionID:    strings.TrimSpace(sessionID),
+		memory:         memory,
+		logger:         logger,
+		sessionManager: sessionManager,
+		sessionStore:   sessionStore,
+		sessionID:      strings.TrimSpace(sessionID),
 	}
 }
 
-func (a *QAAgent) ConfigureSession(sessionStore sessionevent.SessionEventStore, sessionID string) {
+func (a *QAAgent) ConfigureSession(sessionManager *maestrosubagent.SessionManager, sessionStore sessionevent.SessionEventStore, sessionID string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
@@ -114,6 +119,7 @@ func (a *QAAgent) ConfigureSession(sessionStore sessionevent.SessionEventStore, 
 	if a.sessionID != sessionID {
 		a.nativeAgent = nil
 	}
+	a.sessionManager = sessionManager
 	a.sessionStore = sessionStore
 	a.sessionID = sessionID
 }
@@ -122,7 +128,7 @@ func (a *QAAgent) Ask(ctx context.Context, question, repoPath, owner, repo strin
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
-	if err := a.ensureNativeAgentLocked(repoPath); err != nil {
+	if err := a.ensureNativeAgentLocked(repoPath, owner, repo); err != nil {
 		return "", 0, nil, fmt.Errorf("failed to create native QA agent: %w", err)
 	}
 
@@ -155,7 +161,7 @@ func (a *QAAgent) Ask(ctx context.Context, question, repoPath, owner, repo strin
 	return answer, confidence, sources, nil
 }
 
-func (a *QAAgent) ensureNativeAgentLocked(repoPath string) error {
+func (a *QAAgent) ensureNativeAgentLocked(repoPath, owner, repo string) error {
 	repoPath = strings.TrimSpace(repoPath)
 	if repoPath == "" {
 		return fmt.Errorf("repository path is required")
@@ -182,7 +188,7 @@ func (a *QAAgent) ensureNativeAgentLocked(repoPath string) error {
 		return err
 	}
 
-	for _, tool := range buildNativeSearchTools(repoPath, a.logger) {
+	for _, tool := range buildNativeQATools(repoPath, owner, repo, a.logger, a.sessionManager, a.sessionStore, a.sessionID) {
 		if err := nativeAgent.RegisterTool(tool); err != nil {
 			return fmt.Errorf("register %s: %w", tool.Name(), err)
 		}

@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/XiaoConstantine/dspy-go/pkg/agents"
+	dspysubagent "github.com/XiaoConstantine/dspy-go/pkg/agents/subagent"
+	"github.com/XiaoConstantine/dspy-go/pkg/core"
 	"github.com/XiaoConstantine/dspy-go/pkg/logging"
 	maestroace "github.com/XiaoConstantine/maestro/internal/ace"
 	"github.com/XiaoConstantine/maestro/internal/subagent"
@@ -93,8 +95,8 @@ type MaestroService struct {
 	logger         *logging.Logger
 	sessionManager *subagent.SessionManager
 	sessionStore   *subagent.SQLiteSessionStore
-	claudeProc     *subagent.ClaudeProcessor
-	geminiProc     *subagent.GeminiProcessor
+	claudeTool     core.Tool
+	geminiTool     core.Tool
 	currentSession string
 	aceManager     *maestroace.MaestroACEManager
 
@@ -157,8 +159,8 @@ func NewMaestroService(ctx context.Context, config *ServiceConfig, githubTools t
 	}
 
 	// Create session for subagents with unique name
-	var claudeProc *subagent.ClaudeProcessor
-	var geminiProc *subagent.GeminiProcessor
+	var claudeTool core.Tool
+	var geminiTool core.Tool
 	sessionName := generateSessionName()
 	if sessionManager != nil {
 		defaultSession, err := sessionManager.GetOrCreateSession(ctx, sessionName, map[string]interface{}{
@@ -167,21 +169,25 @@ func NewMaestroService(ctx context.Context, config *ServiceConfig, githubTools t
 			"purpose": "Maestro CLI subagent communication",
 		})
 		if err == nil {
-			// Initialize Claude processor (uses ANTHROPIC_API_KEY env var)
-			claudeProc, err = subagent.NewClaudeProcessor(logger, defaultSession.Dir, "")
+			staticInput := map[string]any{
+				"owner": config.Owner,
+				"repo":  config.Repo,
+			}
+			// Initialize Claude subagent tool (uses ANTHROPIC_API_KEY env var)
+			claudeTool, err = subagent.NewClaudeTool(logger, sessionManager, defaultSession.ID, staticInput)
 			if err != nil {
 				logger.Info(ctx, "Claude subagent not available: %v", err)
 			}
 
-			// Initialize Gemini processor (uses GOOGLE_API_KEY or GEMINI_API_KEY env var)
-			geminiProc, err = subagent.NewGeminiProcessor(logger, defaultSession.Dir, "")
+			// Initialize Gemini subagent tool (uses GOOGLE_API_KEY or GEMINI_API_KEY env var)
+			geminiTool, err = subagent.NewGeminiTool(logger, sessionManager, defaultSession.ID, staticInput)
 			if err != nil {
 				logger.Info(ctx, "Gemini subagent not available: %v", err)
 			}
 		}
 	}
 
-	pool.ConfigureQA(sessionStore, sessionName)
+	pool.ConfigureQA(sessionManager, sessionStore, sessionName)
 
 	// Initialize ACE (Agentic Context Engineering) manager for self-improving agents
 	aceConfig := maestroace.LoadConfigFromEnv()
@@ -211,8 +217,8 @@ func NewMaestroService(ctx context.Context, config *ServiceConfig, githubTools t
 		logger:         logger,
 		sessionManager: sessionManager,
 		sessionStore:   sessionStore,
-		claudeProc:     claudeProc,
-		geminiProc:     geminiProc,
+		claudeTool:     claudeTool,
+		geminiTool:     geminiTool,
 		currentSession: sessionName,
 		aceManager:     aceManager,
 		initialized:    true,
@@ -300,77 +306,51 @@ func (s *MaestroService) handleAsk(ctx context.Context, request Request) (*Respo
 }
 
 func (s *MaestroService) handleClaude(ctx context.Context, request Request) (*Response, error) {
-	if s.claudeProc == nil {
-		return nil, fmt.Errorf("claude processor not initialized")
-	}
-
-	// Build task context
-	taskContext := s.buildTaskContext(ctx)
-	if request.Context != nil {
-		for k, v := range request.Context {
-			taskContext[k] = v
-		}
-	}
-
-	task := agents.Task{
-		ID:            fmt.Sprintf("claude-%d", ctx.Value("request_id")),
-		Type:          "claude",
-		ProcessorType: "claude",
-		Metadata: map[string]interface{}{
-			"prompt": request.Prompt,
-			"type":   request.TaskType,
-		},
-	}
-
-	result, err := s.claudeProc.Process(ctx, task, taskContext)
-	if err != nil {
-		return nil, fmt.Errorf("claude processing failed: %w", err)
-	}
-
-	resultMap, _ := result.(map[string]interface{})
-	response, _ := resultMap["response"].(string)
-
-	return &Response{
-		Type:     RequestClaude,
-		Answer:   response,
-		Metadata: resultMap,
-	}, nil
+	return s.executeSubagentTool(ctx, s.claudeTool, RequestClaude, "claude", request)
 }
 
 func (s *MaestroService) handleGemini(ctx context.Context, request Request) (*Response, error) {
-	if s.geminiProc == nil {
-		return nil, fmt.Errorf("gemini processor not initialized")
+	return s.executeSubagentTool(ctx, s.geminiTool, RequestGemini, "gemini", request)
+}
+
+func (s *MaestroService) executeSubagentTool(ctx context.Context, tool core.Tool, responseType RequestType, subagentName string, request Request) (*Response, error) {
+	if tool == nil {
+		return nil, fmt.Errorf("%s subagent not initialized", subagentName)
 	}
 
+	taskID := fmt.Sprintf("%s-%d", subagentName, time.Now().UnixNano())
 	taskContext := s.buildTaskContext(ctx)
 	if request.Context != nil {
 		for k, v := range request.Context {
 			taskContext[k] = v
 		}
 	}
+	taskContext["prompt"] = request.Prompt
+	taskContext["task_type"] = request.TaskType
+	taskContext["task_id"] = taskID
 
-	task := agents.Task{
-		ID:            fmt.Sprintf("gemini-%d", ctx.Value("request_id")),
-		Type:          "gemini",
-		ProcessorType: "gemini",
-		Metadata: map[string]interface{}{
-			"prompt": request.Prompt,
-			"type":   request.TaskType,
-		},
+	parent := dspysubagent.ParentContext{
+		TaskID:          taskID,
+		ParentAgentID:   "maestro-service",
+		ParentAgentType: "maestro-service",
+		SessionID:       s.currentSession,
+		Input:           core.ShallowCopyMap(taskContext),
 	}
-
-	result, err := s.geminiProc.Process(ctx, task, taskContext)
+	result, err := tool.Execute(dspysubagent.WithParentContext(ctx, parent), taskContext)
 	if err != nil {
-		return nil, fmt.Errorf("gemini processing failed: %w", err)
+		return nil, fmt.Errorf("%s processing failed: %w", subagentName, err)
 	}
 
-	resultMap, _ := result.(map[string]interface{})
-	response, _ := resultMap["response"].(string)
+	metadata := subagentToolMetadata(result)
+	answer := stringMetadata(metadata, "response")
+	if answer == "" {
+		answer = core.ToolResultMetadataString(result.Metadata, core.ToolResultDisplayTextMeta)
+	}
 
 	return &Response{
-		Type:     RequestGemini,
-		Answer:   response,
-		Metadata: resultMap,
+		Type:     responseType,
+		Answer:   answer,
+		Metadata: metadata,
 	}, nil
 }
 
@@ -452,13 +432,13 @@ func (s *MaestroService) CreateSession(ctx context.Context, name string) error {
 		return fmt.Errorf("failed to create session: %w", err)
 	}
 
-	// Reinitialize processors with new session
-	if err := s.switchToSession(ctx, session.Dir); err != nil {
+	// Reinitialize subagent tools with new session
+	if err := s.switchToSession(ctx, session.ID); err != nil {
 		return err
 	}
 
 	s.currentSession = name
-	s.pool.ConfigureQA(s.sessionStore, name)
+	s.pool.ConfigureQA(s.sessionManager, s.sessionStore, name)
 	s.logger.Info(ctx, "Created and switched to session: %s", name)
 	return nil
 }
@@ -477,33 +457,63 @@ func (s *MaestroService) SwitchSession(ctx context.Context, name string) error {
 		return fmt.Errorf("session not found: %s", name)
 	}
 
-	if err := s.switchToSession(ctx, session.Dir); err != nil {
+	if err := s.switchToSession(ctx, session.ID); err != nil {
 		return err
 	}
 
 	s.currentSession = name
-	s.pool.ConfigureQA(s.sessionStore, name)
+	s.pool.ConfigureQA(s.sessionManager, s.sessionStore, name)
 	s.logger.Info(ctx, "Switched to session: %s", name)
 	return nil
 }
 
-// switchToSession reinitializes processors for a session directory.
-func (s *MaestroService) switchToSession(ctx context.Context, sessionDir string) error {
-	// Try to create Claude processor
-	claudeProc, err := subagent.NewClaudeProcessor(s.logger, sessionDir, "")
+// switchToSession reinitializes subagent tools for an active session.
+func (s *MaestroService) switchToSession(ctx context.Context, sessionID string) error {
+	staticInput := s.buildTaskContext(ctx)
+
+	// Try to create Claude subagent tool
+	claudeTool, err := subagent.NewClaudeTool(s.logger, s.sessionManager, sessionID, staticInput)
 	if err != nil {
 		s.logger.Info(ctx, "Claude subagent not available: %v", err)
 	}
-	s.claudeProc = claudeProc
+	s.claudeTool = claudeTool
 
-	// Try to create Gemini processor
-	geminiProc, err := subagent.NewGeminiProcessor(s.logger, sessionDir, "")
+	// Try to create Gemini subagent tool
+	geminiTool, err := subagent.NewGeminiTool(s.logger, s.sessionManager, sessionID, staticInput)
 	if err != nil {
 		s.logger.Info(ctx, "Gemini subagent not available: %v", err)
 	}
-	s.geminiProc = geminiProc
+	s.geminiTool = geminiTool
 
 	return nil
+}
+
+func subagentToolMetadata(result core.ToolResult) map[string]interface{} {
+	metadata := make(map[string]interface{})
+	details, _ := result.Annotations[core.ToolResultDetailsAnnotation].(map[string]any)
+	if output, ok := details["output"].(map[string]any); ok {
+		for key, value := range output {
+			metadata[key] = value
+		}
+	}
+	for _, key := range []string{"subagent", "subagent_name", "session_policy", "completed", "duration_ms", "trace"} {
+		if value, ok := details[key]; ok {
+			metadata[key] = value
+		}
+	}
+	return metadata
+}
+
+func stringMetadata(values map[string]interface{}, key string) string {
+	raw, ok := values[key]
+	if !ok || raw == nil {
+		return ""
+	}
+	text, ok := raw.(string)
+	if !ok {
+		return ""
+	}
+	return text
 }
 
 // ListSessions returns all available sessions.
