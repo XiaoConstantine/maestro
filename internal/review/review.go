@@ -51,9 +51,9 @@ type PRReviewAgent struct {
 	sgrepTool           *search.SgrepTool     // Sgrep tool for semantic search
 
 	// ACE (Agentic Context Engineering) for self-improving reviews
-	aceManager        *ace.Manager           // ACE manager for trajectory recording and learnings
+	aceManager        *ace.Manager            // ACE manager for trajectory recording and learnings
 	currentTrajectory *ace.TrajectoryRecorder // Current review trajectory for learning
-	aceEnabled        bool                   // Whether ACE is enabled for this agent
+	aceEnabled        bool                    // Whether ACE is enabled for this agent
 }
 
 type ThreadTracker struct {
@@ -66,8 +66,8 @@ type ThreadTracker struct {
 	ParentCommentID     int64
 	OriginalAuthor      string // Who started the thread
 	ThreadID            int64
-	InReplyToMyComment  bool              // Whether this is a reply to our comment
-	IsResolved          bool              // Whether the thread is resolved
+	InReplyToMyComment  bool                    // Whether this is a reply to our comment
+	IsResolved          bool                    // Whether the thread is resolved
 	ConversationHistory []types.PRReviewComment // Full history of the thread
 }
 
@@ -255,7 +255,6 @@ func shouldUseDeclarativeWorkflows() bool {
 }
 
 // processChunkWithDeclarativeWorkflow processes a chunk using the declarative workflow system.
-
 
 func (a *PRReviewAgent) generateResponseWithDeclarativeWorkflow(ctx context.Context, responseContext map[string]interface{}) (*agents.OrchestratorResult, error) {
 	if a.declarativeChain == nil {
@@ -493,7 +492,6 @@ func (a *PRReviewAgent) GetGitHubTools() GitHubInterface {
 	return a.githubTools
 }
 
-
 func (a *PRReviewAgent) Metrics(ctx context.Context) MetricsCollector {
 	return a.metrics
 
@@ -504,7 +502,6 @@ func (a *PRReviewAgent) Metrics(ctx context.Context) MetricsCollector {
 func (a *PRReviewAgent) ClonedRepoPath() string {
 	return a.clonedRepoPath
 }
-
 
 // WaitForClone waits for the repository clone to complete, with a timeout.
 // Returns the cloned repo path, or empty string if timeout or clone failed.
@@ -820,10 +817,10 @@ func (a *PRReviewAgent) performInitialReview(ctx context.Context, tasks []PRRevi
 	// ACE: Record pattern analysis phase
 	if a.aceEnabled && a.currentTrajectory != nil {
 		a.currentTrajectory.RecordStep("pattern_analysis", "", fmt.Sprintf("Analyzed %d files, found %d patterns and %d guidelines", len(tasks), len(repoPatterns), len(guidelineMatches)), nil, map[string]any{
-			"file_count":       len(tasks),
-			"pattern_count":    len(repoPatterns),
-			"guideline_count":  len(guidelineMatches),
-			"duration_ms":      phase1Duration.Milliseconds(),
+			"file_count":      len(tasks),
+			"pattern_count":   len(repoPatterns),
+			"guideline_count": len(guidelineMatches),
+			"duration_ms":     phase1Duration.Milliseconds(),
 		}, nil)
 	}
 
@@ -846,9 +843,9 @@ func (a *PRReviewAgent) performInitialReview(ctx context.Context, tasks []PRRevi
 	// ACE: Record chunk preparation phase
 	if a.aceEnabled && a.currentTrajectory != nil {
 		a.currentTrajectory.RecordStep("chunk_preparation", "", fmt.Sprintf("Prepared %d chunks from %d files", phase2TotalChunks, len(processedTasks)), nil, map[string]any{
-			"chunk_count":    phase2TotalChunks,
-			"file_count":     len(processedTasks),
-			"duration_ms":    phase2Duration.Milliseconds(),
+			"chunk_count": phase2TotalChunks,
+			"file_count":  len(processedTasks),
+			"duration_ms": phase2Duration.Milliseconds(),
 		}, nil)
 	}
 
@@ -864,6 +861,11 @@ func (a *PRReviewAgent) performInitialReview(ctx context.Context, tasks []PRRevi
 		return nil, fmt.Errorf("failed to process chunks: %w", err)
 	}
 	phase3Duration := time.Since(phase3Start)
+
+	phase4Start := time.Now()
+	rawCommentCount := len(comments)
+	comments = postProcessReviewComments(comments)
+	phase4Duration := time.Since(phase4Start)
 	totalDuration := time.Since(totalStart)
 
 	if totalChunks > 0 {
@@ -871,12 +873,18 @@ func (a *PRReviewAgent) performInitialReview(ctx context.Context, tasks []PRRevi
 	} else {
 		logger.Info(ctx, "✅ Phase 3 completed in %v (no chunks to process)", phase3Duration)
 	}
+	if rawCommentCount != len(comments) {
+		logger.Info(ctx, "🧹 Phase 4 merged %d raw comments into %d final findings in %v", rawCommentCount, len(comments), phase4Duration)
+	} else {
+		logger.Info(ctx, "🧹 Phase 4 completed in %v (no merges applied)", phase4Duration)
+	}
 	if totalDuration > 0 {
-		logger.Info(ctx, "🎉 Total review completed in %v | Phase 1: %v (%.1f%%) | Phase 2: %v (%.1f%%) | Phase 3: %v (%.1f%%) | Generated %d comments",
+		logger.Info(ctx, "🎉 Total review completed in %v | Phase 1: %v (%.1f%%) | Phase 2: %v (%.1f%%) | Phase 3: %v (%.1f%%) | Phase 4: %v (%.1f%%) | Generated %d comments",
 			totalDuration,
 			phase1Duration, float64(phase1Duration)/float64(totalDuration)*100,
 			phase2Duration, float64(phase2Duration)/float64(totalDuration)*100,
 			phase3Duration, float64(phase3Duration)/float64(totalDuration)*100,
+			phase4Duration, float64(phase4Duration)/float64(totalDuration)*100,
 			len(comments))
 	} else {
 		logger.Info(ctx, "🎉 Total review completed instantly | Generated %d comments", len(comments))
@@ -885,10 +893,12 @@ func (a *PRReviewAgent) performInitialReview(ctx context.Context, tasks []PRRevi
 	// ACE: Record chunk processing phase
 	if a.aceEnabled && a.currentTrajectory != nil {
 		a.currentTrajectory.RecordStep("chunk_processing", "", fmt.Sprintf("Processed %d chunks, generated %d comments", totalChunks, len(comments)), nil, map[string]any{
-			"chunk_count":     totalChunks,
-			"comment_count":   len(comments),
-			"duration_ms":     phase3Duration.Milliseconds(),
-			"had_learnings":   learningsContext != "",
+			"chunk_count":              totalChunks,
+			"comment_count":            len(comments),
+			"raw_comment_count":        rawCommentCount,
+			"duration_ms":              phase3Duration.Milliseconds(),
+			"post_process_duration_ms": phase4Duration.Milliseconds(),
+			"had_learnings":            learningsContext != "",
 		}, nil)
 	}
 
@@ -931,7 +941,7 @@ func (a *PRReviewAgent) analyzePatterns(ctx context.Context, tasks []PRReviewTas
 
 		var totalRepoMatches, totalGuidelineMatches int
 		logger := logging.GetLogger()
-		
+
 		// Phase 1: Extract patterns from all chunks upfront for file-level deduplication
 		// This avoids redundant guideline searches for the same patterns across chunks
 		var allFilePatterns []types.SimpleCodePattern
@@ -947,10 +957,10 @@ func (a *PRReviewAgent) analyzePatterns(ctx context.Context, tasks []PRReviewTas
 				}
 			}
 		}
-		
-		logger.Debug(ctx, "File %s: extracted %d unique patterns from %d chunks", 
+
+		logger.Debug(ctx, "File %s: extracted %d unique patterns from %d chunks",
 			filepath.Base(task.FilePath), len(allFilePatterns), len(chunks))
-		
+
 		// Phase 2: Do single guideline search for all deduplicated patterns using sgrep
 		var fileGuidelineMatches []*Content
 		if len(allFilePatterns) > 0 && a.guidelineSearch != nil {
@@ -992,7 +1002,7 @@ func (a *PRReviewAgent) analyzePatterns(ctx context.Context, tasks []PRReviewTas
 			workChan := make(chan chunkWork, len(chunks))
 			resultChan := make(chan chunkResult, len(chunks))
 			var wg sync.WaitGroup
-			
+
 			// Track progress atomically
 			var processedCount atomic.Int32
 
@@ -1073,7 +1083,7 @@ func (a *PRReviewAgent) analyzePatterns(ctx context.Context, tasks []PRReviewTas
 
 			return nil
 		})
-		
+
 		// Add file-level guideline matches (already deduplicated and searched once)
 		if fileGuidelineMatches != nil {
 			guidelineMatches = append(guidelineMatches, fileGuidelineMatches...)
@@ -1187,8 +1197,8 @@ func (a *PRReviewAgent) processChunksManual(ctx context.Context, tasks []PRRevie
 	// Build chunk inputs for batch processing
 	chunks := make([]map[string]interface{}, 0, totalChunks)
 	chunkMeta := make([]struct {
-		filePath   string
-		chunkIdx   int
+		filePath    string
+		chunkIdx    int
 		totalInFile int
 	}, 0, totalChunks)
 
@@ -1223,8 +1233,8 @@ func (a *PRReviewAgent) processChunksManual(ctx context.Context, tasks []PRRevie
 
 			chunks = append(chunks, chunkInput)
 			chunkMeta = append(chunkMeta, struct {
-				filePath   string
-				chunkIdx   int
+				filePath    string
+				chunkIdx    int
 				totalInFile int
 			}{task.FilePath, chunkIdx, len(task.Chunks)})
 		}
@@ -1258,34 +1268,16 @@ func (a *PRReviewAgent) processChunksManual(ctx context.Context, tasks []PRRevie
 		meta := chunkMeta[i]
 
 		// Convert ReviewIssues to PRReviewComments
+		startIdx := len(allComments)
 		for _, issue := range result.Issues {
-			comment := PRReviewComment{
-				FilePath:   issue.FilePath,
-				LineNumber: issue.LineRange.Start,
-				Content:    issue.Description,
-				Category:   issue.Category,
-				Severity:   issue.Severity,
-				Suggestion: issue.Suggestion,
-			}
-			allComments = append(allComments, comment)
+			allComments = append(allComments, commentFromReviewIssue(issue))
 		}
 
 		// Update console
 		if len(result.Issues) == 0 {
 			console.NoIssuesFound(meta.filePath, meta.chunkIdx+1, meta.totalInFile)
 		} else {
-			comments := make([]PRReviewComment, len(result.Issues))
-			for j, issue := range result.Issues {
-				comments[j] = PRReviewComment{
-					FilePath:   issue.FilePath,
-					LineNumber: issue.LineRange.Start,
-					Content:    issue.Description,
-					Category:   issue.Category,
-					Severity:   issue.Severity,
-					Suggestion: issue.Suggestion,
-				}
-			}
-			console.ShowComments(comments, a.Metrics(ctx))
+			console.ShowComments(allComments[startIdx:], a.Metrics(ctx))
 		}
 
 		// Update progress
@@ -1295,6 +1287,19 @@ func (a *PRReviewAgent) processChunksManual(ctx context.Context, tasks []PRRevie
 
 	logger.Info(ctx, "✅ Parallel processing completed: %d comments from %d chunks", len(allComments), totalChunks)
 	return allComments, nil
+}
+
+func commentFromReviewIssue(issue types.ReviewIssue) PRReviewComment {
+	return PRReviewComment{
+		FilePath:   issue.FilePath,
+		LineNumber: issue.LineRange.Start,
+		EndLine:    issue.LineRange.End,
+		Content:    issue.Description,
+		Category:   issue.Category,
+		Severity:   issue.Severity,
+		Confidence: issue.Confidence,
+		Suggestion: issue.Suggestion,
+	}
 }
 
 func (a *PRReviewAgent) processExistingCommentsWithChanges(ctx context.Context, prNumber int, console ConsoleInterface, preloadedChanges *PRChanges) error {
@@ -1943,4 +1948,3 @@ func defaultAgentConfig() *AgentConfig {
 		ReviewWorkers: runtime.NumCPU(), // Default to CPU count for review
 	}
 }
-

@@ -153,14 +153,16 @@ func (lr LineRange) String() string {
 type PRReviewComment struct {
 	FilePath    string
 	LineNumber  int
+	EndLine     int
 	Content     string
 	Severity    string
+	Confidence  float64
 	Suggestion  string
-	Category    string      // e.g., "security", "performance", "style"
-	InReplyTo   *int64      // ID of the parent comment
-	ThreadID    *int64      // Unique thread identifier
-	Resolved    bool        // Track if the discussion is resolved
-	Timestamp   time.Time   // When the comment was made
+	Category    string    // e.g., "security", "performance", "style"
+	InReplyTo   *int64    // ID of the parent comment
+	ThreadID    *int64    // Unique thread identifier
+	Resolved    bool      // Track if the discussion is resolved
+	Timestamp   time.Time // When the comment was made
 	Author      string
 	MessageType MessageType
 }
