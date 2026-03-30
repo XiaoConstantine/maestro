@@ -682,7 +682,8 @@ Keyboard shortcuts:
   Ctrl+P                 Open command palette
   Ctrl+C                 Exit
   Up/Down                Scroll conversation
-  Enter                  Submit input`, currentSession)
+  i                      Enter insert mode
+  Enter                  Submit input (insert mode)`, currentSession)
 
 	return func() tea.Msg {
 		return ResponseMsg{Content: help}

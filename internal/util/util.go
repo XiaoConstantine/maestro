@@ -27,6 +27,26 @@ type ModelConfig struct {
 	APIKey        string
 }
 
+func normalizeModelName(provider, name string) string {
+	provider = strings.TrimSpace(provider)
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return ""
+	}
+
+	switch provider {
+	case "google":
+		switch strings.ToLower(name) {
+		case "gemini-3.0-pro", "gemini-3-pro":
+			return string(core.ModelGoogleGemini3ProPreview)
+		case "gemini-3.0-flash", "gemini-3-flash":
+			return string(core.ModelGoogleGemini3FlashPreview)
+		}
+	}
+
+	return name
+}
+
 // ParseModelString parses a model string into provider, name, and config parts.
 func ParseModelString(modelStr string) (provider, name, config string) {
 	parts := strings.Split(modelStr, ":")
@@ -47,11 +67,12 @@ func ConstructModelID(cfg *ModelConfig) core.ModelID {
 	var parts []string
 	parts = append(parts, cfg.ModelProvider)
 
-	if cfg.ModelName != "" {
-		if cfg.ModelName == "llamacpp:" {
+	modelName := normalizeModelName(cfg.ModelProvider, cfg.ModelName)
+	if modelName != "" {
+		if modelName == "llamacpp:" {
 			parts = append(parts, "")
 		} else {
-			parts = append(parts, cfg.ModelName)
+			parts = append(parts, modelName)
 		}
 	}
 
@@ -62,12 +83,15 @@ func ConstructModelID(cfg *ModelConfig) core.ModelID {
 	if cfg.ModelProvider == "ollama" || cfg.ModelProvider == "llamacpp" {
 		return core.ModelID(strings.Join(parts, ":"))
 	} else {
-		return core.ModelID(cfg.ModelName)
+		return core.ModelID(modelName)
 	}
 }
 
 // ValidateModelConfig validates the model configuration.
 func ValidateModelConfig(cfg *ModelConfig) error {
+	cfg.ModelProvider = strings.TrimSpace(cfg.ModelProvider)
+	cfg.ModelName = normalizeModelName(cfg.ModelProvider, cfg.ModelName)
+
 	if cfg.ModelProvider == "anthropic" || cfg.ModelProvider == "google" {
 		key, err := CheckProviderAPIKey(cfg.ModelProvider, cfg.APIKey)
 		if err != nil {
