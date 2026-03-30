@@ -254,7 +254,7 @@ func (m *InputModel) updateSuggestions() {
 
 	// Get the partial command (without leading /)
 	partial := strings.TrimPrefix(value, "/")
-	
+
 	// Handle empty partial (just typed "/")
 	if partial == "" {
 		m.showSuggestions = true
@@ -379,6 +379,7 @@ func (m *InputModel) SetSize(width, height int) {
 	m.width = width
 	m.height = height
 	m.textarea.SetWidth(width - 4) // Account for prompt and padding
+	m.textarea.SetHeight(max(1, height))
 }
 
 // Focus sets focus on the input.

@@ -14,6 +14,8 @@ github.com/Netflix/go-expect v0.0.0-20220104043353-73e0943537d2 h1:+vx7roKuyA63n
 github.com/Netflix/go-expect v0.0.0-20220104043353-73e0943537d2/go.mod h1:HBCaDeC1lPdgDeDbhX8XFpy1jqjK0IBG8W5K+xYqA0w=
 github.com/XiaoConstantine/dspy-go v0.82.1 h1:ZonAb6Yu53LTkWveLIwY3MUvM8bW0AEABzWiGHHmcPs=
 github.com/XiaoConstantine/dspy-go v0.82.1/go.mod h1:Gi9fVY8SELxLMJCe+AOD0jURiZzKvCJIBBn3qfH7wk8=
+github.com/XiaoConstantine/dspy-go v0.82.2-0.20260330035504-aef62d55078b h1:KXrWuwsV2d2oep77q1O85pdYdYR6i2KjkadbMABIPFM=
+github.com/XiaoConstantine/dspy-go v0.82.2-0.20260330035504-aef62d55078b/go.mod h1:Gi9fVY8SELxLMJCe+AOD0jURiZzKvCJIBBn3qfH7wk8=
 github.com/XiaoConstantine/mcp-go v0.3.1 h1:5aSrqvvulbKI1hxN7Aj3iSotX0VRSpDShXIDls4ZC+U=
 github.com/XiaoConstantine/mcp-go v0.3.1/go.mod h1:qsY3Gm4CYMREmoLXEMwtf0Hdb5F957kgcpF6huoNHcY=
 github.com/alecthomas/assert/v2 v2.7.0 h1:QtqSACNS3tF7oasA8CU6A6sXZSBDqnm7RfpLl9bZqbE=

@@ -107,21 +107,15 @@ type MaestroService struct {
 func NewMaestroService(ctx context.Context, config *ServiceConfig, githubTools types.GitHubInterface) (*MaestroService, error) {
 	logger := logging.GetLogger()
 
-	var memory agents.Memory
-	switch config.MemoryType {
-	case MemorySQLite:
-		if config.MemoryPath == "" {
-			return nil, fmt.Errorf("memory path required for SQLite")
-		}
-		// TODO: use SQLite store when available
-		memory = agents.NewInMemoryStore()
-	default:
-		memory = agents.NewInMemoryStore()
+	if config.MemoryType == MemorySQLite {
+		return nil, fmt.Errorf("MemorySQLite is no longer supported; Maestro now persists interactive state through sessionevent.db")
 	}
 
 	if envType := os.Getenv("MAESTRO_MEMORY_TYPE"); envType == "sqlite" {
-		logger.Info(ctx, "Memory type override from environment: sqlite")
+		return nil, fmt.Errorf("MAESTRO_MEMORY_TYPE=sqlite is no longer supported; Maestro now persists interactive state through sessionevent.db")
 	}
+
+	memory := agents.NewInMemoryStore()
 
 	pool := NewAgentPool(config, memory, githubTools, logger)
 
@@ -273,11 +267,6 @@ func (s *MaestroService) handleReview(ctx context.Context, request Request) (*Re
 }
 
 func (s *MaestroService) handleAsk(ctx context.Context, request Request) (*Response, error) {
-	agent, err := s.pool.GetQAAgent(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get QA agent: %w", err)
-	}
-
 	repoPath := ""
 	if reviewAgent, err := s.pool.GetReviewAgent(ctx); err == nil {
 		repoPath = reviewAgent.ClonedRepoPath()
@@ -288,6 +277,31 @@ func (s *MaestroService) handleAsk(ctx context.Context, request Request) (*Respo
 			Type:   RequestAsk,
 			Answer: "Repository is still being cloned. Please wait a moment and try again.",
 		}, nil
+	}
+
+	switch forcedAskStrategy() {
+	case "native":
+		s.logger.Debug(ctx, "Forcing native ask strategy for question: %q", request.Question)
+	case "rlm":
+		s.logger.Debug(ctx, "Forcing RLM ask strategy for question: %q", request.Question)
+		response, err := s.handleRLMOverview(ctx, request.Question, repoPath)
+		if err == nil {
+			return response, nil
+		}
+		s.logger.Warn(ctx, "Forced RLM overview path failed, falling back to native QA: %v", err)
+	default:
+		if shouldUseRLMOverviewQuery(request.Question) {
+			response, err := s.handleRLMOverview(ctx, request.Question, repoPath)
+			if err == nil {
+				return response, nil
+			}
+			s.logger.Warn(ctx, "RLM overview path failed, falling back to native QA: %v", err)
+		}
+	}
+
+	agent, err := s.pool.GetQAAgent(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get QA agent: %w", err)
 	}
 
 	answer, confidence, sources, err := agent.Ask(ctx, request.Question, repoPath, s.config.Owner, s.config.Repo)

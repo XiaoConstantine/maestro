@@ -137,7 +137,16 @@ func (a *QAAgent) Ask(ctx context.Context, question, repoPath, owner, repo strin
 
 	answer, confidence, sources, err := a.askWithNativeLocked(ctx, question, owner, repo)
 	if err == nil {
-		a.logger.Debug(ctx, "QAAgent native ask complete: answer_len=%d confidence=%.2f sources=%d", len(answer), confidence, len(sources))
+		trace := a.nativeAgent.LastNativeTrace()
+		var promptTokens, completionTokens, totalTokens int64
+		var steps int
+		if trace != nil {
+			promptTokens = trace.TokenUsage.PromptTokens
+			completionTokens = trace.TokenUsage.CompletionTokens
+			totalTokens = trace.TokenUsage.TotalTokens
+			steps = len(trace.Steps)
+		}
+		a.logger.Debug(ctx, "QAAgent native ask complete: answer_len=%d confidence=%.2f sources=%d prompt_tokens=%d completion_tokens=%d total_tokens=%d steps=%d", len(answer), confidence, len(sources), promptTokens, completionTokens, totalTokens, steps)
 		return answer, confidence, sources, nil
 	}
 	a.logger.Debug(ctx, "QAAgent native ask error: %v", err)

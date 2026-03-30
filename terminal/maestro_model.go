@@ -134,7 +134,7 @@ func (m *MaestroModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		// Forward to sub-models
 		if m.inputModel != nil {
-			m.inputModel.SetSize(m.width, 3)
+			m.inputModel.SetSize(m.width, inputTextareaHeightForPane(m.height))
 		}
 		if m.statusBar != nil {
 			newSB, cmd := m.statusBar.Update(msg)
@@ -395,43 +395,22 @@ func (m *MaestroModel) View() tea.View {
 
 // renderInputMode renders the default input mode view with Crush-style layout.
 func (m *MaestroModel) renderInputMode() string {
+	if m.inputModel != nil {
+		m.inputModel.SetSize(m.width, inputTextareaHeightForPane(m.height))
+	}
+
 	// Determine if we should show full logo or compact
 	showFullLogo := m.height > 25 && m.width > 70
 
 	var logoSection string
-	var logoHeight int
-
 	if showFullLogo {
 		logoSection = MaestroLogo(m.width, m.theme)
-		logoHeight = lipgloss.Height(logoSection)
 	} else {
 		logoSection = MaestroLogoSmall(m.width, m.theme)
-		logoHeight = 1
 	}
-
-	// Calculate remaining heights
-	statusHeight := 1
-	inputHeight := 3
-	infoHeight := 4 // For path, model info, etc.
-	progressHeight := 0
-	if m.progressModel.IsVisible() {
-		progressHeight = 2 // Progress section height when visible
-	}
-	conversationHeight := m.height - statusHeight - inputHeight - logoHeight - infoHeight - progressHeight - 2
 
 	// Info section (path + model info) - like Crush
 	infoSection := m.renderInfoSection()
-
-	// Conversation viewport
-	m.viewport.SetWidth(m.width - 4)
-	m.viewport.SetHeight(max(3, conversationHeight))
-	m.renderMessages()
-
-	conversationBox := lipgloss.NewStyle().
-		Width(m.width).
-		Height(max(3, conversationHeight)).
-		Padding(0, 2).
-		Render(m.viewport.View())
 
 	// Progress section (between conversation and input)
 	m.progressModel.SetWidth(m.width)
@@ -443,19 +422,45 @@ func (m *MaestroModel) renderInputMode() string {
 	// Status bar
 	statusView := m.statusBar.View()
 
+	layout := planInputModeLayout(
+		m.height,
+		sectionHeight(logoSection),
+		sectionHeight(infoSection),
+		sectionHeight(progressSection),
+		sectionHeight(inputBox),
+		sectionHeight(statusView),
+	)
+
+	// Conversation viewport
+	m.viewport.SetWidth(max(1, m.width-4))
+	m.viewport.SetHeight(layout.conversationHeight)
+	m.renderMessages()
+
+	conversationBox := lipgloss.NewStyle().
+		Width(m.width).
+		Height(layout.conversationHeight).
+		Padding(0, 2).
+		Render(m.viewport.View())
+
 	// Combine all sections
-	sections := []string{
-		logoSection,
-		infoSection,
-		conversationBox,
+	sections := make([]string, 0, 5)
+	if layout.showLogo {
+		sections = append(sections, logoSection)
 	}
+	if layout.showInfo {
+		sections = append(sections, infoSection)
+	}
+	sections = append(sections, conversationBox)
 
 	// Add progress section if visible
-	if progressSection != "" {
+	if layout.showProgress && progressSection != "" {
 		sections = append(sections, progressSection)
 	}
 
-	sections = append(sections, inputBox, statusView)
+	sections = append(sections, inputBox)
+	if layout.showStatus && statusView != "" {
+		sections = append(sections, statusView)
+	}
 
 	return lipgloss.JoinVertical(lipgloss.Left, sections...)
 }
@@ -515,6 +520,83 @@ func (m *MaestroModel) updateLayout() {
 
 	m.viewport.SetWidth(m.width - 2)
 	m.viewport.SetHeight(max(5, conversationHeight))
+}
+
+type inputModeLayout struct {
+	showLogo           bool
+	showInfo           bool
+	showProgress       bool
+	showStatus         bool
+	conversationHeight int
+}
+
+func planInputModeLayout(totalHeight, logoHeight, infoHeight, progressHeight, inputHeight, statusHeight int) inputModeLayout {
+	layout := inputModeLayout{
+		showLogo:     logoHeight > 0,
+		showInfo:     infoHeight > 0,
+		showProgress: progressHeight > 0,
+		showStatus:   statusHeight > 0,
+	}
+
+	reserved := inputHeight
+	if layout.showStatus {
+		reserved += statusHeight
+	}
+	if layout.showProgress {
+		reserved += progressHeight
+	}
+	if layout.showInfo {
+		reserved += infoHeight
+	}
+	if layout.showLogo {
+		reserved += logoHeight
+	}
+
+	targetConversationHeight := minConversationHeightForPane(totalHeight)
+	for totalHeight-reserved < targetConversationHeight {
+		switch {
+		case layout.showInfo:
+			layout.showInfo = false
+			reserved -= infoHeight
+		case layout.showLogo:
+			layout.showLogo = false
+			reserved -= logoHeight
+		case layout.showProgress:
+			layout.showProgress = false
+			reserved -= progressHeight
+		case layout.showStatus:
+			layout.showStatus = false
+			reserved -= statusHeight
+		default:
+			layout.conversationHeight = max(1, totalHeight-reserved)
+			return layout
+		}
+	}
+
+	layout.conversationHeight = max(1, totalHeight-reserved)
+	return layout
+}
+
+func inputTextareaHeightForPane(totalHeight int) int {
+	switch {
+	case totalHeight <= 8:
+		return 1
+	case totalHeight <= 12:
+		return 2
+	default:
+		return 3
+	}
+}
+
+func minConversationHeightForPane(totalHeight int) int {
+	return max(1, min(3, totalHeight-4))
+}
+
+func sectionHeight(section string) int {
+	if section == "" {
+		return 0
+	}
+	return lipgloss.Height(section)
 }
 
 // handleModeTransition handles mode transitions.

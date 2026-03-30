@@ -79,7 +79,9 @@ func buildNativeQATask(question, owner, repo string) string {
 		repoName = "current repository"
 	}
 
-	return fmt.Sprintf(`Answer the user's question about %s using the available repository tools.
+	analysis := analyzeQAQuery(question)
+	var builder strings.Builder
+	fmt.Fprintf(&builder, `Answer the user's question about %s using the available repository tools.
 
 Question: %s
 
@@ -89,6 +91,22 @@ Rules:
 - For overview questions, inspect README.md first if it exists.
 - Mention the most relevant files in the final answer when helpful.
 - Call Finish once you have enough evidence.`, repoName, strings.TrimSpace(question))
+
+	guidance := nativeQAGuidance(analysis)
+	if len(guidance) > 0 {
+		builder.WriteString("\n\nSearch guidance:\n")
+		for _, line := range guidance {
+			fmt.Fprintf(&builder, "- %s\n", line)
+		}
+	}
+	if len(analysis.RequiredTools) > 0 {
+		fmt.Fprintf(&builder, "- Prefer this initial tool sequence when it fits: %s.\n", strings.Join(analysis.RequiredTools, " -> "))
+	}
+	if analysis.MaxIterations > 0 {
+		fmt.Fprintf(&builder, "- Aim to finish within roughly %d focused tool turns once the repository evidence is sufficient.\n", analysis.MaxIterations)
+	}
+
+	return builder.String()
 }
 
 func buildNativeSearchTools(repoPath string, logger *logging.Logger) []core.Tool {
@@ -650,7 +668,7 @@ func formatFileMatches(matches []string) string {
 		return "No matching files found."
 	}
 
-	limit := minInt(len(matches), 20)
+	limit := min(len(matches), 20)
 	lines := make([]string, 0, limit+1)
 	for _, match := range matches[:limit] {
 		lines = append(lines, match)
@@ -666,7 +684,7 @@ func formatContentMatches(results []*search.Result) string {
 		return "No matching content found."
 	}
 
-	limit := minInt(len(results), 15)
+	limit := min(len(results), 15)
 	lines := make([]string, 0, limit+1)
 	for _, result := range results[:limit] {
 		lines = append(lines, fmt.Sprintf("%s:%d\n%s", result.FilePath, result.LineNumber, result.Line))
@@ -682,7 +700,7 @@ func formatSemanticMatches(results []search.SgrepSearchResult) string {
 		return "No semantic matches found."
 	}
 
-	limit := minInt(len(results), 10)
+	limit := min(len(results), 10)
 	lines := make([]string, 0, limit+1)
 	for _, result := range results[:limit] {
 		content := result.Content
@@ -749,11 +767,4 @@ func semanticResultsToTraceDetails(results []search.SgrepSearchResult) []map[str
 		})
 	}
 	return details
-}
-
-func minInt(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }
