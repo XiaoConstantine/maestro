@@ -343,7 +343,7 @@ func (c *Console) ShowSummary(comments []PRReviewComment, metric MetricsCollecto
 	}
 
 	// Print counts by severity
-	for _, severity := range []string{"critical", "warning", "suggestion"} {
+	for _, severity := range []string{"critical", "high", "medium", "low"} {
 		if count := bySeverity[severity]; count > 0 {
 			icon := c.SeverityIcon(severity)
 			c.Printf("%s %s: %d\n", icon, severity, count)
@@ -386,9 +386,11 @@ func (c *Console) SeverityIcon(severity string) string {
 	switch severity {
 	case "critical":
 		return aurora.Red("●").String()
-	case "warning":
+	case "high":
+		return aurora.Red("●").String()
+	case "warning", "medium":
 		return aurora.Yellow("●").String()
-	case "suggestion":
+	case "suggestion", "low":
 		return aurora.Blue("●").String()
 	default:
 		return "●"
@@ -428,7 +430,7 @@ func (c *Console) ShowReviewMetrics(metrics MetricsCollector, comments []PRRevie
 
 	// Show total comments with breakdown
 	if c.color {
-		c.Printf("Total Comments: %s\n", aurora.Blue(len(comments)).Bold())
+		c.Printf("Total Comments: %s\n", aurora.Blue(len(comments)).Bold().String())
 	} else {
 		c.Printf("Total Comments: %d\n", len(comments))
 	}
@@ -448,8 +450,8 @@ func (c *Console) ShowReviewMetrics(metrics MetricsCollector, comments []PRRevie
 
 			if c.color {
 				c.Printf("  %-25s %s (%0.1f%%)\n",
-					aurora.Blue(category),
-					aurora.White(count).Bold(),
+					aurora.Blue(category).String(),
+					aurora.White(count).Bold().String(),
 					percentage)
 			} else {
 				c.Printf("  %-25s %d (%0.1f%%)\n", category, count, percentage)
@@ -466,7 +468,7 @@ func (c *Console) ShowReviewMetrics(metrics MetricsCollector, comments []PRRevie
 	// Show severity distribution
 	if len(severityCounts) > 0 {
 		c.Println("\nComments by Severity:")
-		severities := []string{"critical", "warning", "suggestion"}
+		severities := []string{"critical", "high", "medium", "low"}
 		for _, severity := range severities {
 			if count := severityCounts[severity]; count > 0 {
 				percentage := float64(count) / float64(len(comments)) * 100
@@ -476,7 +478,7 @@ func (c *Console) ShowReviewMetrics(metrics MetricsCollector, comments []PRRevie
 					c.Printf("  %s %-12s %s (%0.1f%%)\n",
 						icon,
 						severity,
-						aurora.White(count).Bold(),
+						aurora.White(count).Bold().String(),
 						percentage)
 				} else {
 					c.Printf("  %s %-12s %d (%0.1f%%)\n",

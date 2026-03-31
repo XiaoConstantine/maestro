@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/XiaoConstantine/dspy-go/pkg/agents"
+	"github.com/XiaoConstantine/dspy-go/pkg/agents/skills"
 	dspysubagent "github.com/XiaoConstantine/dspy-go/pkg/agents/subagent"
 	"github.com/XiaoConstantine/dspy-go/pkg/core"
 	"github.com/XiaoConstantine/dspy-go/pkg/logging"
@@ -61,13 +62,18 @@ const (
 )
 
 type ServiceConfig struct {
-	MemoryType    MemoryType
-	MemoryPath    string
-	Owner         string
-	Repo          string
-	GitHubToken   string
-	IndexWorkers  int
-	ReviewWorkers int
+	MemoryType                MemoryType
+	MemoryPath                string
+	QAArtifactsPath           string
+	QASkillStorePath          string
+	QASkillDomain             string
+	RLMOverviewSkillStorePath string
+	RLMOverviewSkillDomain    string
+	Owner                     string
+	Repo                      string
+	GitHubToken               string
+	IndexWorkers              int
+	ReviewWorkers             int
 }
 
 type Request struct {
@@ -88,17 +94,19 @@ type Response struct {
 }
 
 type MaestroService struct {
-	pool           *AgentPool
-	memory         agents.Memory
-	githubTools    types.GitHubInterface
-	config         *ServiceConfig
-	logger         *logging.Logger
-	sessionManager *subagent.SessionManager
-	sessionStore   *subagent.SQLiteSessionStore
-	claudeTool     core.Tool
-	geminiTool     core.Tool
-	currentSession string
-	aceManager     *maestroace.MaestroACEManager
+	pool                   *AgentPool
+	memory                 agents.Memory
+	githubTools            types.GitHubInterface
+	config                 *ServiceConfig
+	logger                 *logging.Logger
+	sessionManager         *subagent.SessionManager
+	sessionStore           *subagent.SQLiteSessionStore
+	claudeTool             core.Tool
+	geminiTool             core.Tool
+	currentSession         string
+	aceManager             *maestroace.MaestroACEManager
+	rlmOverviewSkillStore  skills.Store
+	rlmOverviewSkillDomain string
 
 	mu          sync.RWMutex
 	initialized bool
@@ -117,7 +125,35 @@ func NewMaestroService(ctx context.Context, config *ServiceConfig, githubTools t
 
 	memory := agents.NewInMemoryStore()
 
-	pool := NewAgentPool(config, memory, githubTools, logger)
+	qaArtifacts, err := loadConfiguredQAArtifacts(config.QAArtifactsPath)
+	if err != nil {
+		return nil, fmt.Errorf("load QA artifacts: %w", err)
+	}
+
+	qaSkillStorePath, err := resolveQASkillStorePath(config.QASkillStorePath, config.MemoryPath)
+	if err != nil {
+		return nil, fmt.Errorf("resolve QA skill store: %w", err)
+	}
+	qaSkillDomain := resolveQASkillDomain(config.QASkillDomain)
+	qaSkillStore := skills.NewFileStore(qaSkillStorePath)
+	logger.Debug(ctx, "Configured QA skill store path=%q domain=%q", qaSkillStorePath, qaSkillDomain)
+
+	rlmOverviewSkillStorePath, err := resolveRLMOverviewSkillStorePath(config.RLMOverviewSkillStorePath, config.MemoryPath, qaSkillStorePath)
+	if err != nil {
+		return nil, fmt.Errorf("resolve RLM overview skill store: %w", err)
+	}
+	rlmOverviewSkillDomain := resolveRLMOverviewSkillDomain(config.RLMOverviewSkillDomain)
+	var rlmOverviewSkillStore skills.Store
+	// RLM overview defaults to the QA store path unless explicitly separated;
+	// domains keep the published skills isolated even when the JSON backing file is shared.
+	if rlmOverviewSkillStorePath == qaSkillStorePath {
+		rlmOverviewSkillStore = qaSkillStore
+	} else {
+		rlmOverviewSkillStore = skills.NewFileStore(rlmOverviewSkillStorePath)
+	}
+	logger.Debug(ctx, "Configured RLM overview skill store path=%q domain=%q", rlmOverviewSkillStorePath, rlmOverviewSkillDomain)
+
+	pool := NewAgentPool(config, memory, githubTools, logger, qaArtifacts, qaSkillStore, qaSkillDomain, qaSkillStorePath)
 
 	// Setup session directory for subagent context sharing
 	// MemoryPath is typically a .db file, so use its parent directory
@@ -204,18 +240,20 @@ func NewMaestroService(ctx context.Context, config *ServiceConfig, githubTools t
 	}
 
 	return &MaestroService{
-		pool:           pool,
-		memory:         memory,
-		githubTools:    githubTools,
-		config:         config,
-		logger:         logger,
-		sessionManager: sessionManager,
-		sessionStore:   sessionStore,
-		claudeTool:     claudeTool,
-		geminiTool:     geminiTool,
-		currentSession: sessionName,
-		aceManager:     aceManager,
-		initialized:    true,
+		pool:                   pool,
+		memory:                 memory,
+		githubTools:            githubTools,
+		config:                 config,
+		logger:                 logger,
+		sessionManager:         sessionManager,
+		sessionStore:           sessionStore,
+		claudeTool:             claudeTool,
+		geminiTool:             geminiTool,
+		currentSession:         sessionName,
+		aceManager:             aceManager,
+		rlmOverviewSkillStore:  rlmOverviewSkillStore,
+		rlmOverviewSkillDomain: rlmOverviewSkillDomain,
+		initialized:            true,
 	}, nil
 }
 
@@ -308,13 +346,16 @@ func (s *MaestroService) handleAsk(ctx context.Context, request Request) (*Respo
 	if err != nil {
 		return nil, err
 	}
+	skillDomain, skillVersion := agent.SkillState()
 
 	return &Response{
 		Type:   RequestAsk,
 		Answer: answer,
 		Metadata: map[string]interface{}{
-			"confidence": confidence,
-			"sources":    sources,
+			"confidence":       confidence,
+			"sources":          sources,
+			"qa_skill_domain":  skillDomain,
+			"qa_skill_version": skillVersion,
 		},
 	}, nil
 }

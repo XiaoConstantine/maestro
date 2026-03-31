@@ -25,7 +25,10 @@ type ModelConfig struct {
 	ModelName     string
 	ModelConfig   string
 	APIKey        string
+	BaseURL       string
 }
+
+const defaultOpenAIBaseURL = "https://us.api.openai.com"
 
 func normalizeModelName(provider, name string) string {
 	provider = strings.TrimSpace(provider)
@@ -87,12 +90,42 @@ func ConstructModelID(cfg *ModelConfig) core.ModelID {
 	}
 }
 
+func registryProviderName(provider string) string {
+	provider = strings.TrimSpace(provider)
+	if provider == "llamacpp:" {
+		return "llamacpp"
+	}
+	return provider
+}
+
+func resolveProviderBaseURL(cfg *ModelConfig) string {
+	if cfg == nil {
+		return ""
+	}
+
+	if baseURL := strings.TrimSpace(cfg.BaseURL); baseURL != "" {
+		return baseURL
+	}
+
+	switch registryProviderName(cfg.ModelProvider) {
+	case "openai":
+		return FirstNonEmpty(
+			strings.TrimSpace(os.Getenv("OPENAI_BASE_URL")),
+			strings.TrimSpace(os.Getenv("OPENAI_API_BASE")),
+			defaultOpenAIBaseURL,
+		)
+	default:
+		return ""
+	}
+}
+
 // ValidateModelConfig validates the model configuration.
 func ValidateModelConfig(cfg *ModelConfig) error {
 	cfg.ModelProvider = strings.TrimSpace(cfg.ModelProvider)
 	cfg.ModelName = normalizeModelName(cfg.ModelProvider, cfg.ModelName)
+	cfg.BaseURL = resolveProviderBaseURL(cfg)
 
-	if cfg.ModelProvider == "anthropic" || cfg.ModelProvider == "google" {
+	if cfg.ModelProvider == "anthropic" || cfg.ModelProvider == "google" || cfg.ModelProvider == "openai" {
 		key, err := CheckProviderAPIKey(cfg.ModelProvider, cfg.APIKey)
 		if err != nil {
 			return err
@@ -102,7 +135,7 @@ func ValidateModelConfig(cfg *ModelConfig) error {
 	}
 	// Validate provider
 	switch cfg.ModelProvider {
-	case "llamacpp:", "ollama", "anthropic", "google", "llamacpp":
+	case "llamacpp:", "ollama", "anthropic", "google", "openai", "llamacpp":
 		// Valid providers
 	default:
 		return fmt.Errorf("unsupported model provider: %s", cfg.ModelProvider)
@@ -110,9 +143,9 @@ func ValidateModelConfig(cfg *ModelConfig) error {
 
 	// Validate provider-specific configurations
 	switch cfg.ModelProvider {
-	case "anthropic", "google":
+	case "anthropic", "google", "openai":
 		if cfg.APIKey == "" {
-			return fmt.Errorf("API key required for external providers like anthropic, google")
+			return fmt.Errorf("API key required for external providers like anthropic, google, openai")
 		}
 	case "ollama":
 		if cfg.ModelName == "" {
@@ -121,6 +154,30 @@ func ValidateModelConfig(cfg *ModelConfig) error {
 	}
 
 	return nil
+}
+
+// ProviderConfigFromModelConfig converts a Maestro model config into a dspy-go provider config.
+func ProviderConfigFromModelConfig(cfg *ModelConfig) core.ProviderConfig {
+	providerCfg := core.ProviderConfig{
+		Name:   registryProviderName(cfg.ModelProvider),
+		APIKey: cfg.APIKey,
+	}
+
+	if cfg == nil {
+		return providerCfg
+	}
+
+	if baseURL := resolveProviderBaseURL(cfg); baseURL != "" {
+		providerCfg.BaseURL = baseURL
+		providerCfg.Endpoint = &core.EndpointConfig{BaseURL: baseURL}
+	}
+
+	return providerCfg
+}
+
+// LoadLLMFromModelConfig loads an LLM using the provider configuration derived from the model config.
+func LoadLLMFromModelConfig(ctx context.Context, cfg *ModelConfig, modelID core.ModelID) (core.LLM, error) {
+	return core.LoadLLMFromConfig(ctx, ProviderConfigFromModelConfig(cfg), modelID)
 }
 
 // CheckProviderAPIKey checks for an API key from various sources.
@@ -146,6 +203,10 @@ func CheckProviderAPIKey(provider, apiKey string) (string, error) {
 			os.Getenv("GOOGLE_GEMINI_KEY"),
 			os.Getenv("GEMINI_API_KEY"),
 		)
+	case "openai":
+		envKey = FirstNonEmpty(
+			os.Getenv("OPENAI_API_KEY"),
+		)
 	default:
 		// For other providers, we don't check environment variables
 		return "", fmt.Errorf("API key required for %s provider", provider)
@@ -159,6 +220,8 @@ func CheckProviderAPIKey(provider, apiKey string) (string, error) {
 			envVars = []string{"ANTHROPIC_API_KEY", "CLAUDE_API_KEY"}
 		case "google":
 			envVars = []string{"GOOGLE_API_KEY", "GOOGLE_GEMINI_KEY", "GEMINI_API_KEY"}
+		case "openai":
+			envVars = []string{"OPENAI_API_KEY"}
 		}
 		return "", fmt.Errorf("API key required for %s provider. Please provide via --api-key flag or set one of these environment variables: %s",
 			provider, strings.Join(envVars, ", "))

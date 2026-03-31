@@ -1,10 +1,12 @@
 package orchestration
 
 import (
+	"context"
 	"fmt"
 	"reflect"
 	"testing"
 
+	"github.com/XiaoConstantine/dspy-go/pkg/agents/skills"
 	"github.com/XiaoConstantine/maestro/internal/search"
 )
 
@@ -60,5 +62,41 @@ func TestExtractAnswerAndSources(t *testing.T) {
 	wantSources := []string{"pkg/core/agent.go", "pkg/modules/react.go"}
 	if !reflect.DeepEqual(sources, wantSources) {
 		t.Fatalf("sources = %#v, want %#v", sources, wantSources)
+	}
+}
+
+func TestBestPersistedSkillVersion(t *testing.T) {
+	store := skills.NewMemoryStore()
+	if err := store.Save(context.Background(), skills.Skill{
+		Name:    "qa-v1",
+		Domain:  "maestro:qa",
+		Content: "Prefer narrow repo reads.",
+		Version: 1,
+	}); err != nil {
+		t.Fatalf("save v1 skill: %v", err)
+	}
+	if err := store.Save(context.Background(), skills.Skill{
+		Name:    "qa-v2",
+		Domain:  "maestro:qa",
+		Content: "Prefer exact symbol lookups first.",
+		Version: 2,
+	}); err != nil {
+		t.Fatalf("save v2 skill: %v", err)
+	}
+
+	version, err := bestPersistedSkillVersion(context.Background(), store, "maestro:qa")
+	if err != nil {
+		t.Fatalf("bestPersistedSkillVersion() error = %v", err)
+	}
+	if version != 2 {
+		t.Fatalf("bestPersistedSkillVersion() = %d, want 2", version)
+	}
+
+	emptyVersion, err := bestPersistedSkillVersion(context.Background(), store, "maestro:missing")
+	if err != nil {
+		t.Fatalf("bestPersistedSkillVersion() missing error = %v", err)
+	}
+	if emptyVersion != 0 {
+		t.Fatalf("bestPersistedSkillVersion() missing = %d, want 0", emptyVersion)
 	}
 }

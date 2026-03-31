@@ -23,10 +23,11 @@ import (
 type Interface interface {
 	GetPullRequestChanges(ctx context.Context, prNumber int) (*types.PRChanges, error)
 	GetFileContent(ctx context.Context, path string) (string, error)
+	FilterReviewComments(ctx context.Context, prNumber int, comments []types.PRReviewComment) ([]types.PRReviewComment, error)
 	CreateReviewComments(ctx context.Context, prNumber int, comments []types.PRReviewComment) error
 	GetLatestCommitSHA(ctx context.Context, branch string) (string, error)
 	MonitorPRComments(ctx context.Context, prNumber int, callback func(comment *github.PullRequestComment)) error
-	PreviewReview(ctx context.Context, console types.ConsoleInterface, prNumber int, comments []types.PRReviewComment, metric types.MetricsCollector) (bool, error)
+	PreviewReview(ctx context.Context, console types.ConsoleInterface, prNumber int, comments []types.PRReviewComment, metric types.MetricsCollector) ([]types.PRReviewComment, bool, error)
 
 	GetAuthenticatedUser(ctx context.Context) string
 	GetRepositoryInfo(ctx context.Context) types.RepositoryInfo
@@ -215,8 +216,14 @@ func (g *Tools) CreateReviewComments(ctx context.Context, prNumber int, comments
 	}
 
 	var validComments []*github.DraftReviewComment
+	generalComments := make([]string, 0)
 
 	for _, comment := range comments {
+		if comment.LineNumber <= 0 {
+			generalComments = append(generalComments, formatGeneralReviewComment(comment))
+			continue
+		}
+
 		// Find hunks for this file
 		hunks, exists := hunksByFile[comment.FilePath]
 		if !exists {
@@ -249,14 +256,15 @@ func (g *Tools) CreateReviewComments(ctx context.Context, prNumber int, comments
 		})
 	}
 
-	if len(validComments) == 0 {
+	if len(validComments) == 0 && len(generalComments) == 0 {
 		return fmt.Errorf("no valid comments to create")
 	}
 
 	// Create the review
+	reviewBody := composeReviewBody(generalComments)
 	review := &github.PullRequestReviewRequest{
 		CommitID: nil,
-		Body:     github.Ptr("Code Review Comments"),
+		Body:     github.Ptr(reviewBody),
 		Event:    github.Ptr("COMMENT"),
 		Comments: validComments,
 	}
@@ -264,6 +272,15 @@ func (g *Tools) CreateReviewComments(ctx context.Context, prNumber int, comments
 	_, _, err = g.client.PullRequests.CreateReview(ctx, g.owner, g.repo,
 		prNumber, review)
 	return err
+}
+
+func (g *Tools) FilterReviewComments(ctx context.Context, prNumber int, comments []types.PRReviewComment) ([]types.PRReviewComment, error) {
+	changes, err := g.GetPullRequestChanges(ctx, prNumber)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get PR changes: %w", err)
+	}
+	validComments, _ := partitionReviewCommentsByChanges(comments, changes)
+	return validComments, nil
 }
 
 func (g *Tools) MonitorPRComments(ctx context.Context, prNumber int, callback func(comment *github.PullRequestComment)) error {
@@ -363,7 +380,7 @@ func (g *Tools) GetLatestCommitSHA(ctx context.Context, branch string) (string, 
 	return ref.Object.GetSHA(), nil
 }
 
-func (g *Tools) PreviewReview(ctx context.Context, console types.ConsoleInterface, prNumber int, comments []types.PRReviewComment, metric types.MetricsCollector) (bool, error) {
+func (g *Tools) PreviewReview(ctx context.Context, console types.ConsoleInterface, prNumber int, comments []types.PRReviewComment, metric types.MetricsCollector) ([]types.PRReviewComment, bool, error) {
 	// Use spinner while fetching PR changes
 	var changes *types.PRChanges
 	err := console.WithSpinner(ctx, "Fetching PR changes", func() error {
@@ -372,52 +389,26 @@ func (g *Tools) PreviewReview(ctx context.Context, console types.ConsoleInterfac
 		return err
 	})
 	if err != nil {
-		return false, fmt.Errorf("failed to get PR changes: %w", err)
+		return nil, false, fmt.Errorf("failed to get PR changes: %w", err)
 	}
-	var validComments []types.PRReviewComment
-
-	var skippedComments []types.PRReviewComment
-
-	for _, comment := range comments {
-		isValid := false
-		for _, file := range changes.Files {
-			if file.FilePath != comment.FilePath {
-				continue
-			}
-
-			// Check if comment is in any hunk
-			for _, hunk := range file.Hunks {
-				if comment.LineNumber >= hunk.StartLine &&
-					comment.LineNumber <= hunk.EndLine {
-					isValid = true
-					break
-				}
-			}
-		}
-
-		if isValid {
-			validComments = append(validComments, comment)
-		} else {
-			skippedComments = append(skippedComments, comment)
-			console.Printf("\nNote: Comment on %s line %d will be skipped (unchanged line)\n",
-				comment.FilePath, comment.LineNumber)
-		}
-	}
+	validComments, skippedComments := partitionReviewCommentsByChanges(comments, changes)
 	if len(skippedComments) != 0 {
 		console.Printf("\nSkipping :%d comments", len(skippedComments))
+		for _, comment := range skippedComments {
+			console.Printf("\nNote: Comment on %s line %d will be skipped (%s)\n",
+				comment.FilePath, comment.LineNumber, "outside changed hunks")
+		}
 	}
 	if len(validComments) == 0 {
 		console.Println("\nNo comments can be posted - all comments are on unchanged lines")
-		return false, nil
+		return nil, false, nil
 	}
 	// Group comments by file
 	commentsByFile := make(map[string][]types.PRReviewComment)
+	generalComments := make([]types.PRReviewComment, 0)
 	for _, comment := range validComments {
 		if comment.LineNumber <= 0 {
-			logging.GetLogger().Warn(ctx,
-				"Skipping comment with invalid line number %d for file %s",
-				comment.LineNumber,
-				comment.FilePath)
+			generalComments = append(generalComments, comment)
 			continue
 		}
 		commentsByFile[comment.FilePath] = append(commentsByFile[comment.FilePath], comment)
@@ -428,6 +419,32 @@ func (g *Tools) PreviewReview(ctx context.Context, console types.ConsoleInterfac
 		console.PrintHeader(aurora.Bold("Pull Request Review Preview").String())
 	} else {
 		console.PrintHeader("Pull Request Review Preview")
+	}
+
+	if len(generalComments) > 0 {
+		if console.Color() {
+			console.Println(aurora.Blue("📝").String(), aurora.Bold("General Review Comments").String())
+		} else {
+			console.Println("📝 General Review Comments")
+		}
+		console.Println(strings.Repeat("─", 80))
+		for _, comment := range generalComments {
+			if console.Color() {
+				console.Printf("%s %s\n", console.SeverityIcon(comment.Severity), aurora.Bold(comment.FilePath).String())
+			} else {
+				console.Printf("%s %s\n", console.SeverityIcon(comment.Severity), comment.FilePath)
+			}
+			console.Println(Indent(comment.Content, 2))
+			if comment.Suggestion != "" {
+				if console.Color() {
+					console.Println(aurora.Green("  ✨ Suggestion:").String())
+				} else {
+					console.Println("  ✨ Suggestion:")
+				}
+				console.Println(Indent(comment.Suggestion, 4))
+			}
+			console.Println()
+		}
 	}
 
 	// For each file with comments
@@ -544,11 +561,11 @@ func (g *Tools) PreviewReview(ctx context.Context, console types.ConsoleInterfac
 	}
 
 	// Print summary using existing console method
-	console.ShowSummary(comments, metric)
+	console.ShowSummary(validComments, metric)
 
-	shouldPost, err := console.ConfirmReviewPost(len(comments))
+	shouldPost, err := console.ConfirmReviewPost(len(validComments))
 	if err != nil {
-		return false, fmt.Errorf("failed to get confirmation: %w", err)
+		return nil, false, fmt.Errorf("failed to get confirmation: %w", err)
 	}
 
 	if !shouldPost {
@@ -557,10 +574,39 @@ func (g *Tools) PreviewReview(ctx context.Context, console types.ConsoleInterfac
 		} else {
 			console.Println("\nReview cancelled - no comments posted")
 		}
-		return false, nil
+		return validComments, false, nil
 	}
 
-	return true, nil
+	return validComments, true, nil
+}
+
+func partitionReviewCommentsByChanges(comments []types.PRReviewComment, changes *types.PRChanges) ([]types.PRReviewComment, []types.PRReviewComment) {
+	if changes == nil {
+		return nil, append([]types.PRReviewComment(nil), comments...)
+	}
+
+	lineSlack := types.DefaultCommentHunkLineSlack
+	hunksByFile := make(map[string][]types.ChangeHunk, len(changes.Files))
+	for _, file := range changes.Files {
+		hunksByFile[file.FilePath] = file.Hunks
+	}
+
+	validComments := make([]types.PRReviewComment, 0, len(comments))
+	skippedComments := make([]types.PRReviewComment, 0)
+	for _, comment := range comments {
+		// Preserve file-level comments as general review feedback.
+		if comment.LineNumber <= 0 {
+			validComments = append(validComments, comment)
+			continue
+		}
+		if types.CommentInChangedHunks(comment, hunksByFile[comment.FilePath], lineSlack) {
+			validComments = append(validComments, comment)
+			continue
+		}
+		skippedComments = append(skippedComments, comment)
+	}
+
+	return validComments, skippedComments
 }
 
 func (g *Tools) ListPullRequestComments(ctx context.Context, owner, repo string, prNumber int, opts *github.PullRequestListCommentsOptions) ([]*github.PullRequestComment, *github.Response, error) {
@@ -772,6 +818,22 @@ func formatCommentBody(comment types.PRReviewComment) string {
 	return sb.String()
 }
 
+func formatGeneralReviewComment(comment types.PRReviewComment) string {
+	body := formatCommentBody(comment)
+	if strings.TrimSpace(comment.FilePath) == "" {
+		return body
+	}
+	return fmt.Sprintf("**%s**\n\n%s", comment.FilePath, body)
+}
+
+func composeReviewBody(generalComments []string) string {
+	body := "Code Review Comments"
+	if len(generalComments) == 0 {
+		return body
+	}
+	return body + "\n\nGeneral review comments:\n\n" + strings.Join(generalComments, "\n\n---\n\n")
+}
+
 // VerifyTokenPermissions verifies the GitHub token has required permissions.
 func VerifyTokenPermissions(ctx context.Context, token, owner, repo string) error {
 	// Create an authenticated client
@@ -862,6 +924,7 @@ func ExtractContext(content string, line int, contextLines int) (*CodeContext, e
 func ParseHunks(patch string, filePath string) ([]types.ChangeHunk, error) {
 	var hunks []types.ChangeHunk
 	var currentHunk *types.ChangeHunk
+	newFileLine := 0
 
 	lines := strings.Split(patch, "\n")
 	position := 0 // Track position in diff for GitHub API
@@ -884,26 +947,30 @@ func ParseHunks(patch string, filePath string) ([]types.ChangeHunk, error) {
 				currentHunk = &types.ChangeHunk{
 					FilePath:  filePath,
 					StartLine: start,
+					EndLine:   start - 1,
 					Position:  position,
 				}
+				newFileLine = start - 1
 			}
 
 		case strings.HasPrefix(line, "+"):
-			// This is new or modified code
+			// Added lines advance the new-file position and belong to the hunk range.
 			if currentHunk != nil {
 				currentHunk.Content += line[1:] + "\n"
-				currentHunk.EndLine = currentHunk.StartLine +
-					strings.Count(currentHunk.Content, "\n")
+				newFileLine++
+				currentHunk.EndLine = newFileLine
 			}
 
 		case strings.HasPrefix(line, " "):
-			// Context line - store in Before/After based on position
+			// Context lines also advance the new-file position even when they are unchanged.
 			if currentHunk != nil {
 				if currentHunk.Content == "" {
 					currentHunk.Context.Before += line[1:] + "\n"
 				} else {
 					currentHunk.Context.After += line[1:] + "\n"
 				}
+				newFileLine++
+				currentHunk.EndLine = newFileLine
 			}
 		}
 	}

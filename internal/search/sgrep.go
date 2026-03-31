@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -17,16 +18,30 @@ import (
 // SgrepTool provides semantic code search capabilities as an agentic tool.
 // It wraps the sgrep CLI for semantic search, indexing, and status operations.
 type SgrepTool struct {
-	logger   *logging.Logger
-	rootPath string // Root path for the repository
+	logger    *logging.Logger
+	rootPath  string // Root path for the repository
+	sgrepHome string
 }
 
 // NewSgrepTool creates a new sgrep tool instance.
 func NewSgrepTool(logger *logging.Logger, rootPath string) *SgrepTool {
+	return NewSgrepToolWithHome(logger, rootPath, "")
+}
+
+// NewSgrepToolWithHome creates a new sgrep tool instance with an explicit SGREP_HOME.
+func NewSgrepToolWithHome(logger *logging.Logger, rootPath, sgrepHome string) *SgrepTool {
 	return &SgrepTool{
-		logger:   logger,
-		rootPath: rootPath,
+		logger:    logger,
+		rootPath:  rootPath,
+		sgrepHome: strings.TrimSpace(sgrepHome),
 	}
+}
+
+func (s *SgrepTool) applyCommandEnv(cmd *exec.Cmd) {
+	if strings.TrimSpace(s.sgrepHome) == "" {
+		return
+	}
+	cmd.Env = append(os.Environ(), "SGREP_HOME="+s.sgrepHome)
 }
 
 // Name returns the tool name.
@@ -165,6 +180,7 @@ func (s *SgrepTool) executeSearch(ctx context.Context, params map[string]interfa
 	}
 
 	cmd := exec.CommandContext(ctx, "sgrep", args...)
+	s.applyCommandEnv(cmd)
 	if s.rootPath != "" {
 		cmd.Dir = s.rootPath
 	}
@@ -240,6 +256,7 @@ func (s *SgrepTool) executeIndex(ctx context.Context, params map[string]interfac
 	}
 
 	cmd := exec.CommandContext(ctx, "sgrep", "index", path)
+	s.applyCommandEnv(cmd)
 	if s.rootPath != "" && path == "." {
 		cmd.Dir = s.rootPath
 	}
@@ -264,6 +281,7 @@ func (s *SgrepTool) executeIndex(ctx context.Context, params map[string]interfac
 // executeStatus checks the index status.
 func (s *SgrepTool) executeStatus(ctx context.Context) (core.ToolResult, error) {
 	cmd := exec.CommandContext(ctx, "sgrep", "status")
+	s.applyCommandEnv(cmd)
 	if s.rootPath != "" {
 		cmd.Dir = s.rootPath
 	}
@@ -320,6 +338,7 @@ func (s *SgrepTool) IsAvailable(ctx context.Context) bool {
 // IsIndexed checks if the current repository is indexed.
 func (s *SgrepTool) IsIndexed(ctx context.Context) bool {
 	cmd := exec.CommandContext(ctx, "sgrep", "status")
+	s.applyCommandEnv(cmd)
 	if s.rootPath != "" {
 		cmd.Dir = s.rootPath
 	}
@@ -363,6 +382,7 @@ func (s *SgrepTool) Search(ctx context.Context, query string, limit int) ([]Sgre
 	args := []string{query, "--json", "-n", fmt.Sprintf("%d", limit)}
 
 	cmd := exec.CommandContext(ctx, "sgrep", args...)
+	s.applyCommandEnv(cmd)
 	if s.rootPath != "" {
 		cmd.Dir = s.rootPath
 	}
@@ -389,6 +409,7 @@ func (s *SgrepTool) HybridSearch(ctx context.Context, query string, limit int) (
 	args := []string{query, "--json", "-n", fmt.Sprintf("%d", limit), "--hybrid"}
 
 	cmd := exec.CommandContext(ctx, "sgrep", args...)
+	s.applyCommandEnv(cmd)
 	if s.rootPath != "" {
 		cmd.Dir = s.rootPath
 	}
@@ -417,6 +438,10 @@ func (s *SgrepTool) Index(ctx context.Context, path string) error {
 	}
 
 	cmd := exec.CommandContext(ctx, "sgrep", "index", path)
+	s.applyCommandEnv(cmd)
+	if s.rootPath != "" && path == "." {
+		cmd.Dir = s.rootPath
+	}
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("sgrep index failed: %s", string(output))
@@ -469,6 +494,7 @@ func (s *SgrepTool) SearchInPath(ctx context.Context, path, query string, limit 
 	args := []string{query, "--json", "-n", fmt.Sprintf("%d", limit)}
 
 	cmd := exec.CommandContext(ctx, "sgrep", args...)
+	s.applyCommandEnv(cmd)
 	cmd.Dir = path
 
 	output, err := cmd.Output()
@@ -494,6 +520,7 @@ func (s *SgrepTool) SearchInPath(ctx context.Context, path, query string, limit 
 // IndexPath indexes a specific directory for semantic search.
 func (s *SgrepTool) IndexPath(ctx context.Context, path string) error {
 	cmd := exec.CommandContext(ctx, "sgrep", "index", ".")
+	s.applyCommandEnv(cmd)
 	cmd.Dir = path
 
 	output, err := cmd.CombinedOutput()
@@ -508,6 +535,7 @@ func (s *SgrepTool) IndexPath(ctx context.Context, path string) error {
 // IsPathIndexed checks if a specific path is indexed.
 func (s *SgrepTool) IsPathIndexed(ctx context.Context, path string) bool {
 	cmd := exec.CommandContext(ctx, "sgrep", "status")
+	s.applyCommandEnv(cmd)
 	cmd.Dir = path
 	return cmd.Run() == nil
 }

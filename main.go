@@ -51,6 +51,38 @@ func runCleanup() {
 	cleanupRegistry.funcs = nil
 }
 
+func resolveCLIStoragePath(ctx context.Context, cfg *config) (string, error) {
+	if cfg == nil {
+		return "", fmt.Errorf("config is required")
+	}
+	if strings.TrimSpace(cfg.memoryPath) == "" {
+		return util.CreateStoragePath(ctx, cfg.owner, cfg.repo)
+	}
+
+	path := strings.TrimSpace(cfg.memoryPath)
+	if strings.HasPrefix(path, "~/") {
+		homeDir, err := os.UserHomeDir()
+		if err != nil {
+			return "", fmt.Errorf("failed to expand storage path %q: %w", path, err)
+		}
+		path = filepath.Join(homeDir, strings.TrimPrefix(path, "~/"))
+	}
+
+	cleaned := filepath.Clean(path)
+	if strings.HasSuffix(path, string(os.PathSeparator)) || filepath.Ext(cleaned) == "" {
+		if err := os.MkdirAll(cleaned, 0755); err != nil {
+			return "", fmt.Errorf("failed to create storage directory %q: %w", cleaned, err)
+		}
+		dbName := fmt.Sprintf("%s_%s.db", cfg.owner, cfg.repo)
+		return filepath.Join(cleaned, dbName), nil
+	}
+
+	if err := os.MkdirAll(filepath.Dir(cleaned), 0755); err != nil {
+		return "", fmt.Errorf("failed to create storage parent for %q: %w", cleaned, err)
+	}
+	return cleaned, nil
+}
+
 // setupSignalHandler sets up graceful shutdown on SIGINT/SIGTERM.
 func setupSignalHandler() {
 	sigChan := make(chan os.Signal, 1)
@@ -69,17 +101,25 @@ func setupSignalHandler() {
 }
 
 type config struct {
-	apiKey        string
-	githubToken   string
-	owner         string
-	memoryPath    string
-	repo          string
-	prNumber      int
-	verbose       bool
-	verifyOnly    bool
-	modelProvider string
-	modelName     string
-	modelConfig   string // For additional model-specific configuration
+	apiKey                 string
+	githubToken            string
+	owner                  string
+	memoryPath             string
+	repo                   string
+	prNumber               int
+	verbose                bool
+	verifyOnly             bool
+	modelProvider          string
+	modelName              string
+	modelConfig            string // For additional model-specific configuration
+	qaArtifacts            string
+	qaSkillStore           string
+	qaSkillDomain          string
+	reviewArtifacts        string
+	reviewSkillStore       string
+	reviewSkillDomain      string
+	rlmOverviewSkillStore  string
+	rlmOverviewSkillDomain string
 
 	indexWorkers  int // Number of concurrent workers for indexing
 	reviewWorkers int // Number of concurrent workers for review
@@ -216,6 +256,14 @@ Available slash commands in interactive mode:
 	rootCmd.PersistentFlags().StringVar(&cfg.modelProvider, "provider", DefaultModelProvider, "Model provider (llamacpp, ollama, anthropic)")
 	rootCmd.PersistentFlags().StringVar(&cfg.modelName, "model-name", DefaultModelName, "Specific model name")
 	rootCmd.PersistentFlags().StringVar(&cfg.modelConfig, "model-config", "", "Additional model configuration")
+	rootCmd.PersistentFlags().StringVar(&cfg.qaArtifacts, "qa-artifacts", os.Getenv("MAESTRO_QA_ARTIFACTS"), "Optional path to GEPA-tuned QA artifacts JSON")
+	rootCmd.PersistentFlags().StringVar(&cfg.qaSkillStore, "qa-skill-store", os.Getenv("MAESTRO_QA_SKILL_STORE"), "Optional path to the persisted QA skill store JSON")
+	rootCmd.PersistentFlags().StringVar(&cfg.qaSkillDomain, "qa-skill-domain", os.Getenv("MAESTRO_QA_SKILL_DOMAIN"), "Optional persisted QA skill domain (defaults to maestro:qa)")
+	rootCmd.PersistentFlags().StringVar(&cfg.reviewArtifacts, "review-artifacts", os.Getenv("MAESTRO_REVIEW_ARTIFACTS"), "Optional path to GEPA-tuned review artifacts JSON")
+	rootCmd.PersistentFlags().StringVar(&cfg.reviewSkillStore, "review-skill-store", os.Getenv("MAESTRO_REVIEW_SKILL_STORE"), "Optional path to the persisted review skill store JSON")
+	rootCmd.PersistentFlags().StringVar(&cfg.reviewSkillDomain, "review-skill-domain", os.Getenv("MAESTRO_REVIEW_SKILL_DOMAIN"), "Optional persisted review skill domain (defaults to maestro:review:go)")
+	rootCmd.PersistentFlags().StringVar(&cfg.rlmOverviewSkillStore, "rlm-overview-skill-store", os.Getenv("MAESTRO_RLM_OVERVIEW_SKILL_STORE"), "Optional path to the persisted RLM overview skill store JSON")
+	rootCmd.PersistentFlags().StringVar(&cfg.rlmOverviewSkillDomain, "rlm-overview-skill-domain", os.Getenv("MAESTRO_RLM_OVERVIEW_SKILL_DOMAIN"), "Optional persisted RLM overview skill domain (defaults to maestro:ask:rlm-overview)")
 
 	rootCmd.PersistentFlags().IntVar(&cfg.indexWorkers, "index-workers", runtime.NumCPU(), "Number of concurrent workers for repository indexing")
 
@@ -291,7 +339,10 @@ func runCLIWithoutBanner(cfg *config) error {
 	llms.EnsureFactory()
 
 	modelID := util.ConstructModelID(modelCfg)
-	err = core.ConfigureDefaultLLM(cfg.apiKey, modelID)
+	defaultLLM, err := util.LoadLLMFromModelConfig(ctx, modelCfg, modelID)
+	if err == nil {
+		core.GlobalConfig.DefaultLLM = defaultLLM
+	}
 
 	if err != nil {
 		logger.Error(ctx, "Failed to configure LLM: %v", err)
@@ -320,7 +371,7 @@ func runCLIWithoutBanner(cfg *config) error {
 		logger.Debug(ctx, "MCP bash helper initialized successfully")
 	}
 
-	dbPath, err := util.CreateStoragePath(ctx, cfg.owner, cfg.repo)
+	dbPath, err := resolveCLIStoragePath(ctx, cfg)
 	if err != nil {
 		logger.Error(ctx, "Failed to create storage path: %v", err)
 		return fmt.Errorf("failed to create storage path: %w", err)
@@ -347,8 +398,11 @@ func runCLIWithoutBanner(cfg *config) error {
 	}
 
 	agent, err := review.NewPRReviewAgentWithACE(ctx, githubTools, dbPath, &types.AgentConfig{
-		IndexWorkers:  cfg.indexWorkers,
-		ReviewWorkers: cfg.reviewWorkers,
+		IndexWorkers:         cfg.indexWorkers,
+		ReviewWorkers:        cfg.reviewWorkers,
+		ReviewArtifactsPath:  cfg.reviewArtifacts,
+		ReviewSkillStorePath: cfg.reviewSkillStore,
+		ReviewSkillDomain:    cfg.reviewSkillDomain,
 	}, aceReviewManager)
 	if err != nil {
 		logger.Error(ctx, "Failed to initialize review agent: %v", err)
@@ -466,29 +520,35 @@ func runFullPRReview(ctx context.Context, prNumber int, cfg *config, console typ
 		useInteractiveTUI := os.Getenv("MAESTRO_INTERACTIVE_TUI") == "true"
 
 		if useInteractiveTUI && console.IsInteractive() {
+			validComments, err := githubTools.FilterReviewComments(ctx, prNumber, comments)
+			if err != nil {
+				logger.Error(ctx, "Failed to filter interactive review comments: %v", err)
+				return fmt.Errorf("failed to filter interactive review comments: %w", err)
+			}
+
 			// Use the new lazygit-style TUI for reviewing comments
 			onPost := func(selectedComments []types.PRReviewComment) error {
 				logger.Info(ctx, "Posting %d review comments to GitHub", len(selectedComments))
 				return githubTools.CreateReviewComments(ctx, prNumber, selectedComments)
 			}
-			if err := console.ShowCommentsInteractive(comments, onPost); err != nil {
+			if err := console.ShowCommentsInteractive(validComments, onPost); err != nil {
 				logger.Error(ctx, "Interactive TUI error: %v", err)
 				// Fall back to standard preview
-				_, _ = githubTools.PreviewReview(ctx, console, prNumber, comments, agent.Metrics(ctx))
+				_, _, _ = githubTools.PreviewReview(ctx, console, prNumber, comments, agent.Metrics(ctx))
 			}
 		} else {
 			// Standard preview flow
-			shouldPost, err := githubTools.PreviewReview(ctx, console, prNumber, comments, agent.Metrics(ctx))
+			validComments, shouldPost, err := githubTools.PreviewReview(ctx, console, prNumber, comments, agent.Metrics(ctx))
 			if err != nil {
 				logger.Error(ctx, "Failed to preview review: %v", err)
 				return fmt.Errorf("failed to preview review: %w", err)
 			}
 
-			console.ShowReviewMetrics(agent.Metrics(ctx), comments)
+			console.ShowReviewMetrics(agent.Metrics(ctx), validComments)
 
 			if shouldPost {
 				logger.Info(ctx, "Posting review comments to GitHub")
-				err = githubTools.CreateReviewComments(ctx, prNumber, comments)
+				err = githubTools.CreateReviewComments(ctx, prNumber, validComments)
 				if err != nil {
 					logger.Error(ctx, "Failed to post review comments: %v", err)
 					return fmt.Errorf("failed to post review comments: %w", err)
@@ -553,6 +613,14 @@ func (a *TUIServiceAdapter) AskQuestion(ctx context.Context, question string) (s
 		result += "\n\nSources:\n"
 		for _, s := range sources {
 			result += fmt.Sprintf("  - %s\n", s)
+		}
+	}
+	if domain, ok := response.Metadata["qa_skill_domain"].(string); ok && strings.TrimSpace(domain) != "" {
+		version, _ := response.Metadata["qa_skill_version"].(int)
+		if version > 0 {
+			result += fmt.Sprintf("\n\nQA Skill: %s v%d", domain, version)
+		} else {
+			result += fmt.Sprintf("\n\nQA Skill: %s (base prompt only)", domain)
 		}
 	}
 	return result, nil
@@ -661,26 +729,33 @@ func runModernUI(cfg *config) error {
 	cfg.apiKey = modelCfg.APIKey // Update with resolved API key
 	llms.EnsureFactory()
 	modelID := util.ConstructModelID(modelCfg)
-	if err := core.ConfigureDefaultLLM(cfg.apiKey, modelID); err != nil {
+	defaultLLM, err := util.LoadLLMFromModelConfig(ctx, modelCfg, modelID)
+	if err != nil {
 		return fmt.Errorf("failed to configure LLM: %w", err)
 	}
+	core.GlobalConfig.DefaultLLM = defaultLLM
 
 	// Initialize GitHub tools
 	githubTools := github.NewTools(cfg.githubToken, cfg.owner, cfg.repo)
-	dbPath, err := util.CreateStoragePath(ctx, cfg.owner, cfg.repo)
+	dbPath, err := resolveCLIStoragePath(ctx, cfg)
 	if err != nil {
 		return fmt.Errorf("failed to create storage path: %w", err)
 	}
 
 	// Create MaestroService (singleton for this session)
 	service, err := orchestration.NewMaestroService(ctx, &orchestration.ServiceConfig{
-		MemoryType:    orchestration.MemoryInMemory,
-		MemoryPath:    dbPath,
-		Owner:         cfg.owner,
-		Repo:          cfg.repo,
-		GitHubToken:   cfg.githubToken,
-		IndexWorkers:  cfg.indexWorkers,
-		ReviewWorkers: cfg.reviewWorkers,
+		MemoryType:                orchestration.MemoryInMemory,
+		MemoryPath:                dbPath,
+		QAArtifactsPath:           cfg.qaArtifacts,
+		QASkillStorePath:          cfg.qaSkillStore,
+		QASkillDomain:             cfg.qaSkillDomain,
+		RLMOverviewSkillStorePath: cfg.rlmOverviewSkillStore,
+		RLMOverviewSkillDomain:    cfg.rlmOverviewSkillDomain,
+		Owner:                     cfg.owner,
+		Repo:                      cfg.repo,
+		GitHubToken:               cfg.githubToken,
+		IndexWorkers:              cfg.indexWorkers,
+		ReviewWorkers:             cfg.reviewWorkers,
 	}, githubTools)
 	if err != nil {
 		return fmt.Errorf("failed to create service: %w", err)
@@ -698,8 +773,11 @@ func runModernUI(cfg *config) error {
 	}
 
 	reviewAgent, err := review.NewPRReviewAgentWithACE(ctx, githubTools, dbPath, &types.AgentConfig{
-		IndexWorkers:  cfg.indexWorkers,
-		ReviewWorkers: cfg.reviewWorkers,
+		IndexWorkers:         cfg.indexWorkers,
+		ReviewWorkers:        cfg.reviewWorkers,
+		ReviewArtifactsPath:  cfg.reviewArtifacts,
+		ReviewSkillStorePath: cfg.reviewSkillStore,
+		ReviewSkillDomain:    cfg.reviewSkillDomain,
 	}, aceReviewManager)
 	if err != nil {
 		return fmt.Errorf("failed to initialize review agent: %w", err)

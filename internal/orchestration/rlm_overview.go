@@ -259,7 +259,18 @@ func (s *MaestroService) handleRLMOverview(ctx context.Context, question, repoPa
 
 	subClient := newCapturingSubLLMClient(modrlm.NewLLMSubClient(llm))
 	module := modrlm.New(llm, subClient, opts...)
-	result, trace, err := module.CompleteWithTrace(ctx, manifest.Context, buildRLMOverviewQuery(question))
+	overviewSkill, skillErr := s.loadRLMOverviewSkill(ctx)
+	if skillErr != nil {
+		s.logger.Warn(ctx, "Failed to load RLM overview skill for domain %q: %v", s.rlmOverviewSkillDomain, skillErr)
+	}
+	skillOverlay := ""
+	skillVersion := 0
+	if overviewSkill != nil {
+		skillOverlay = strings.TrimSpace(overviewSkill.Content)
+		skillVersion = overviewSkill.Version
+	}
+
+	result, trace, err := module.CompleteWithTrace(ctx, manifest.Context, buildRLMOverviewQueryWithOverlay(question, skillOverlay))
 	if err != nil {
 		return nil, fmt.Errorf("rlm overview failed: %w", err)
 	}
@@ -284,6 +295,12 @@ func (s *MaestroService) handleRLMOverview(ctx context.Context, question, repoPa
 		"sources":            sources,
 		"strategy":           "rlm_overview",
 		"needs_verification": verificationTargets,
+	}
+	if strings.TrimSpace(s.rlmOverviewSkillDomain) != "" {
+		metadata["rlm_skill_domain"] = s.rlmOverviewSkillDomain
+	}
+	if skillVersion > 0 {
+		metadata["rlm_skill_version"] = skillVersion
 	}
 	if trace != nil {
 		metadata["rlm_usage"] = map[string]any{
@@ -476,30 +493,6 @@ func buildRLMOverviewManifest(repoPath string, maxChars int) (rlmOverviewManifes
 		Context: builder.String(),
 		Sources: sources,
 	}, nil
-}
-
-func buildRLMOverviewQuery(question string) string {
-	return fmt.Sprintf(`Answer the user's repository overview question using only the provided manifest.
-
-Question: %s
-
-Return strict JSON with this schema and no markdown fences:
-{
-  "answer": "direct answer to the overview question",
-  "needs_verification": [
-    {
-      "package": "repo-relative package or directory path",
-      "reason": "why a scoped code-level verification would improve the answer"
-    }
-  ]
-}
-
-Rules:
-- Use the manifest only. Do not invent files or responsibilities that are not present.
-- Keep the answer concise but useful.
-- Only populate needs_verification when a specific package needs a follow-up code-level check.
-- If no follow-up is needed, return an empty array.
-- Verification requests must be scoped to a package or directory, not the whole repository.`, strings.TrimSpace(question))
 }
 
 func newCapturingSubLLMClient(base modrlm.SubLLMClient) *capturingSubLLMClient {

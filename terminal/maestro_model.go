@@ -335,6 +335,8 @@ func (m *MaestroModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		summary := fmt.Sprintf("Review complete: %d comments", counts["total"])
 		if counts["critical"] > 0 {
 			summary += fmt.Sprintf(" (%d critical)", counts["critical"])
+		} else if counts["high"] > 0 {
+			summary += fmt.Sprintf(" (%d high)", counts["high"])
 		}
 		m.addMessage("assistant", summary)
 
@@ -1368,12 +1370,14 @@ func (m *MaestroModel) renderReviewDetail(width int) string {
 
 // getSeverityIcon returns a colored icon for the severity level.
 func (m *MaestroModel) getSeverityIcon(severity string) string {
-	switch severity {
+	switch normalizedReviewSeverity(severity) {
 	case "critical":
 		return lipgloss.NewStyle().Foreground(lipgloss.Color("#FF6B6B")).Render("●")
-	case "warning":
+	case "high":
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("#FF6B6B")).Render("●")
+	case "medium":
 		return lipgloss.NewStyle().Foreground(lipgloss.Color("#FFD93D")).Render("●")
-	case "suggestion":
+	case "low":
 		return lipgloss.NewStyle().Foreground(m.theme.StatusHighlight).Render("●")
 	default:
 		return lipgloss.NewStyle().Foreground(m.theme.TextMuted).Render("○")
@@ -1382,16 +1386,18 @@ func (m *MaestroModel) getSeverityIcon(severity string) string {
 
 // getReviewCounts returns counts of review comments by severity.
 func (m *MaestroModel) getReviewCounts() map[string]int {
-	counts := map[string]int{"total": 0, "critical": 0, "warning": 0, "suggestion": 0}
+	counts := map[string]int{"total": 0, "critical": 0, "high": 0, "medium": 0, "low": 0}
 	for _, c := range m.reviewResults {
 		counts["total"]++
-		switch c.Severity {
+		switch normalizedReviewSeverity(c.Severity) {
 		case "critical":
 			counts["critical"]++
-		case "warning":
-			counts["warning"]++
-		case "suggestion":
-			counts["suggestion"]++
+		case "high":
+			counts["high"]++
+		case "medium":
+			counts["medium"]++
+		case "low":
+			counts["low"]++
 		}
 	}
 	return counts

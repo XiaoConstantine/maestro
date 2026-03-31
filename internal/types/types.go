@@ -172,6 +172,7 @@ type PRReviewTask struct {
 	FilePath    string
 	FileContent string
 	Changes     string // Git diff content
+	Guidelines  []*Content
 	Chunks      []ReviewChunk
 }
 
@@ -442,6 +443,19 @@ type AgentConfig struct {
 
 	// ReviewWorkers controls concurrent workers for parallel code review
 	ReviewWorkers int
+
+	// ReviewArtifactsPath points to an optional JSON file containing review
+	// artifact overrides, typically a GEPA checkpoint or a direct artifact dump.
+	ReviewArtifactsPath string
+
+	// ReviewSkillStorePath points to the persisted skill store used for loading
+	// published review overlays.
+	ReviewSkillStorePath string
+
+	// ReviewSkillDomain scopes persisted review overlays. Go-specific review
+	// optimizations should use a language-qualified domain such as
+	// "maestro:review:go".
+	ReviewSkillDomain string
 }
 
 // SpawnStrategy defines how to spawn child agents.
@@ -826,10 +840,11 @@ type RAGStore interface {
 type GitHubInterface interface {
 	GetPullRequestChanges(ctx context.Context, prNumber int) (*PRChanges, error)
 	GetFileContent(ctx context.Context, path string) (string, error)
+	FilterReviewComments(ctx context.Context, prNumber int, comments []PRReviewComment) ([]PRReviewComment, error)
 	CreateReviewComments(ctx context.Context, prNumber int, comments []PRReviewComment) error
 	GetLatestCommitSHA(ctx context.Context, branch string) (string, error)
 	MonitorPRComments(ctx context.Context, prNumber int, callback func(comment *github.PullRequestComment)) error
-	PreviewReview(ctx context.Context, console ConsoleInterface, prNumber int, comments []PRReviewComment, metric MetricsCollector) (bool, error)
+	PreviewReview(ctx context.Context, console ConsoleInterface, prNumber int, comments []PRReviewComment, metric MetricsCollector) ([]PRReviewComment, bool, error)
 
 	GetAuthenticatedUser(ctx context.Context) string
 	GetRepositoryInfo(ctx context.Context) RepositoryInfo

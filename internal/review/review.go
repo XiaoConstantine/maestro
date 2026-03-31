@@ -54,7 +54,29 @@ type PRReviewAgent struct {
 	aceManager        *ace.Manager            // ACE manager for trajectory recording and learnings
 	currentTrajectory *ace.TrajectoryRecorder // Current review trajectory for learning
 	aceEnabled        bool                    // Whether ACE is enabled for this agent
+	sgrepHome         string
 }
+
+type reviewPipelineResult struct {
+	ProcessedTasks       []PRReviewTask
+	Comments             []PRReviewComment
+	TotalChunks          int
+	SelectedChunks       int
+	RawCommentCount      int
+	PreVerificationCount int
+	SkippedAfterFilter   int
+	FilterDropReasons    map[string]int
+	FilterRejected       []ReviewFilterRejection
+	VerificationDropped  int
+	VerificationReasons  map[string]int
+	VerificationRejected []ReviewVerificationRejection
+	Phase2Duration       time.Duration
+	Phase3Duration       time.Duration
+	Phase4Duration       time.Duration
+	Phase5Duration       time.Duration
+}
+
+const reviewChunkContextRadius = 1
 
 type ThreadTracker struct {
 	LastComment  *types.PRReviewComment
@@ -82,6 +104,13 @@ type ReviewMetadata struct {
 	ReviewType     string
 	ReviewPatterns []*types.Content // Added for repository patterns
 	Guidelines     []*types.Content // Added for guidelines
+}
+
+type ReviewFilterRejection struct {
+	FilePath   string `json:"file_path,omitempty"`
+	LineNumber int    `json:"line_number,omitempty"`
+	ReasonCode string `json:"reason_code,omitempty"`
+	Content    string `json:"content,omitempty"`
 }
 
 func parseHunkHeader(line string) (int, error) {
@@ -166,11 +195,11 @@ func NewPRReviewAgent(ctx context.Context, githubTool GitHubInterface, dbPath st
 	}
 
 	// Use dbPath directory for .maestro storage (even though we don't use SQLite anymore)
-	dataDir := filepath.Dir(dbPath)
+	dataDir := reviewStateDirFromDBPath(dbPath)
+	sgrepHome := reviewSgrepHome(dataDir)
 
 	// Initialize sgrep-based guideline searcher with .maestro directory
-	maestroDir := filepath.Join(dataDir, ".maestro")
-	guidelineSearcher := guideline.NewSearcher(maestroDir, logger)
+	guidelineSearcher := guideline.NewSearcher(dataDir, logger)
 
 	// Ensure guidelines are cached and indexed in background
 	go func() {
@@ -189,14 +218,25 @@ func NewPRReviewAgent(ctx context.Context, githubTool GitHubInterface, dbPath st
 	metricsCollector := metrics.NewBusinessMetrics(logger)
 	metricsCollector.StartOptimizationCycle(ctx)
 
+	reviewArtifacts, bestSkill, reviewSkillStorePath, reviewSkillDomain, err := loadRuntimeReviewArtifacts(ctx, dbPath, config)
+	if err != nil {
+		return nil, fmt.Errorf("load review runtime artifacts: %w", err)
+	}
+	reviewInstructionOverlay := materializeReviewInstructionOverlay(reviewArtifacts, bestSkill)
+
 	// Create agent components immediately - don't wait for indexing
 	memory := agents.NewInMemoryStore()
 	stopper := NewStopper()
 	indexStatus := types.NewIndexingStatus()
 
 	// Create high-performance parallel review processor
-	reviewProcessor := reasoning.NewEnhancedCodeReviewProcessor(metricsCollector, logger)
+	reviewProcessor := reasoning.NewEnhancedCodeReviewProcessor(metricsCollector, logger, reviewInstructionOverlay)
 	logger.Debug(ctx, "✅ Created parallel review processor with %d workers", 120)
+	if bestSkill != nil {
+		logger.Info(ctx, "Loaded persisted review skill domain=%q version=%d name=%q store=%q", reviewSkillDomain, bestSkill.Version, bestSkill.Name, reviewSkillStorePath)
+	} else if strings.TrimSpace(reviewInstructionOverlay) != "" {
+		logger.Info(ctx, "Loaded review instruction overlay from artifacts path=%q", config.ReviewArtifactsPath)
+	}
 
 	// Initialize declarative workflow if Phase 2 features are enabled
 	var declarativeChain *workflow.DeclarativeReviewChain
@@ -217,6 +257,7 @@ func NewPRReviewAgent(ctx context.Context, githubTool GitHubInterface, dbPath st
 		metrics:          metricsCollector,
 		workers:          config,
 		indexStatus:      indexStatus,
+		sgrepHome:        sgrepHome,
 	}
 
 	// Start background indexing AFTER agent creation
@@ -224,6 +265,17 @@ func NewPRReviewAgent(ctx context.Context, githubTool GitHubInterface, dbPath st
 	go agent.startBackgroundIndexing(ctx, githubTool, config.IndexWorkers)
 
 	return agent, nil
+}
+
+func reviewStateDirFromDBPath(dbPath string) string {
+	return filepath.Dir(dbPath)
+}
+
+func reviewSgrepHome(stateDir string) string {
+	if strings.TrimSpace(stateDir) == "" {
+		return ""
+	}
+	return filepath.Join(stateDir, "sgrep")
 }
 
 // NewPRReviewAgentWithACE creates a new PR review agent with ACE (Agentic Context Engineering) enabled.
@@ -396,7 +448,7 @@ func (a *PRReviewAgent) cloneAndIndexWithSgrep(ctx context.Context, repoFullName
 	}
 
 	// Check if sgrep is available
-	sgrepTool := search.NewSgrepTool(logger, "")
+	sgrepTool := search.NewSgrepToolWithHome(logger, "", a.sgrepHome)
 	if !sgrepTool.IsAvailable(ctx) {
 		return fmt.Errorf("sgrep not installed")
 	}
@@ -452,12 +504,15 @@ func (a *PRReviewAgent) cloneAndIndexWithSgrep(ctx context.Context, repoFullName
 	logger.Info(ctx, "✅ Clone complete, indexing with sgrep...")
 
 	// Update sgrep tool with the cloned path
-	a.sgrepTool = search.NewSgrepTool(logger, tmpDir)
+	a.sgrepTool = search.NewSgrepToolWithHome(logger, tmpDir, a.sgrepHome)
 
 	// Index with sgrep (this takes the most time)
 	// Run sgrep index and capture output for progress
 	indexCmd := exec.CommandContext(ctx, "sgrep", "index", ".")
 	indexCmd.Dir = tmpDir
+	if strings.TrimSpace(a.sgrepHome) != "" {
+		indexCmd.Env = append(os.Environ(), "SGREP_HOME="+a.sgrepHome)
+	}
 
 	// Capture output to show progress
 	output, err := indexCmd.CombinedOutput()
@@ -698,7 +753,7 @@ func (a *PRReviewAgent) ReviewPRWithChanges(ctx context.Context, prNumber int, t
 			}
 		}
 		initialReviewStart := time.Now()
-		comments, err := a.performInitialReview(ctx, tasks, console)
+		comments, err := a.performInitialReview(ctx, tasks, console, preloadedChanges)
 		if err != nil {
 			return nil, fmt.Errorf("initial review failed: %w", err)
 		}
@@ -787,7 +842,7 @@ func (a *PRReviewAgent) Stop(ctx context.Context) {
 	})
 }
 
-func (a *PRReviewAgent) performInitialReview(ctx context.Context, tasks []PRReviewTask, console ConsoleInterface) ([]PRReviewComment, error) {
+func (a *PRReviewAgent) performInitialReview(ctx context.Context, tasks []PRReviewTask, console ConsoleInterface, changes *PRChanges) ([]PRReviewComment, error) {
 	logger := logging.GetLogger()
 	totalStart := time.Now()
 
@@ -800,7 +855,7 @@ func (a *PRReviewAgent) performInitialReview(ctx context.Context, tasks []PRRevi
 		}
 	}
 
-	// Phase 1: Pattern Matching - Keep this sequential as it's file-level analysis
+	// Phase 1: Pattern matching across files with bounded concurrency.
 	phase1Start := time.Now()
 	logger.Info(ctx, "🔍 Phase 1: Starting pattern analysis for %d files", len(tasks))
 	repoPatterns, guidelineMatches, err := a.analyzePatterns(ctx, tasks, console)
@@ -825,20 +880,26 @@ func (a *PRReviewAgent) performInitialReview(ctx context.Context, tasks []PRRevi
 	}
 
 	// Phase 2: Create chunks for all files
-	phase2Start := time.Now()
 	logger.Info(ctx, "🔧 Phase 2: Starting chunk preparation")
-	_, processedTasks, err := a.prepareChunks(ctx, tasks, console)
+	pipeline, err := a.runReviewPipeline(ctx, tasks, changes, console, repoPatterns, guidelineMatches, learningsContext, true)
 	if err != nil {
-		return nil, fmt.Errorf("failed to prepare chunks: %w", err)
+		return nil, err
 	}
-	phase2Duration := time.Since(phase2Start)
-	logger.Info(ctx, "✅ Phase 2 completed in %v", phase2Duration)
+	phase2Duration := pipeline.Phase2Duration
+	phase3Duration := pipeline.Phase3Duration
+	phase4Duration := pipeline.Phase4Duration
+	phase5Duration := pipeline.Phase5Duration
+	phase2TotalChunks := pipeline.TotalChunks
+	selectedChunks := pipeline.SelectedChunks
+	processedTasks := pipeline.ProcessedTasks
+	totalChunks := pipeline.TotalChunks
+	comments := pipeline.Comments
+	rawCommentCount := pipeline.RawCommentCount
+	verifiedCommentCount := pipeline.PreVerificationCount
+	skippedAfterFilter := pipeline.SkippedAfterFilter
+	totalDuration := time.Since(totalStart)
 
-	// Calculate total chunks for recording
-	phase2TotalChunks := 0
-	for _, task := range processedTasks {
-		phase2TotalChunks += len(task.Chunks)
-	}
+	logger.Info(ctx, "✅ Phase 2 completed in %v", phase2Duration)
 
 	// ACE: Record chunk preparation phase
 	if a.aceEnabled && a.currentTrajectory != nil {
@@ -849,42 +910,32 @@ func (a *PRReviewAgent) performInitialReview(ctx context.Context, tasks []PRRevi
 		}, nil)
 	}
 
-	// Phase 3: Parallel chunk processing
-	phase3Start := time.Now()
-	totalChunks := 0
-	for _, task := range processedTasks {
-		totalChunks += len(task.Chunks)
-	}
-	logger.Info(ctx, "⚡ Phase 3: Starting parallel processing of %d chunks across %d files", totalChunks, len(processedTasks))
-	comments, err := a.processChunksParallel(ctx, processedTasks, repoPatterns, guidelineMatches, console, learningsContext)
-	if err != nil {
-		return nil, fmt.Errorf("failed to process chunks: %w", err)
-	}
-	phase3Duration := time.Since(phase3Start)
-
-	phase4Start := time.Now()
-	rawCommentCount := len(comments)
-	comments = postProcessReviewComments(comments)
-	phase4Duration := time.Since(phase4Start)
-	totalDuration := time.Since(totalStart)
-
-	if totalChunks > 0 {
-		logger.Info(ctx, "✅ Phase 3 completed in %v (avg: %v/chunk)", phase3Duration, phase3Duration/time.Duration(totalChunks))
+	if selectedChunks > 0 {
+		logger.Info(ctx, "✅ Phase 3 completed in %v (avg: %v/chunk across %d selected of %d total)", phase3Duration, phase3Duration/time.Duration(selectedChunks), selectedChunks, totalChunks)
 	} else {
 		logger.Info(ctx, "✅ Phase 3 completed in %v (no chunks to process)", phase3Duration)
 	}
-	if rawCommentCount != len(comments) {
-		logger.Info(ctx, "🧹 Phase 4 merged %d raw comments into %d final findings in %v", rawCommentCount, len(comments), phase4Duration)
+	if rawCommentCount != verifiedCommentCount {
+		logger.Info(ctx, "🧹 Phase 4 merged %d raw comments into %d candidate findings in %v", rawCommentCount, verifiedCommentCount, phase4Duration)
 	} else {
 		logger.Info(ctx, "🧹 Phase 4 completed in %v (no merges applied)", phase4Duration)
 	}
+	if skippedAfterFilter > 0 {
+		logger.Info(ctx, "🪓 Phase 4 filtered %d comments outside changed hunks or without a valid line number before verification", skippedAfterFilter)
+	}
+	if verifiedCommentCount != len(comments) {
+		logger.Info(ctx, "🧪 Phase 5 verified %d candidate findings down to %d final comments in %v", verifiedCommentCount, len(comments), phase5Duration)
+	} else {
+		logger.Info(ctx, "🧪 Phase 5 completed in %v (no findings dropped)", phase5Duration)
+	}
 	if totalDuration > 0 {
-		logger.Info(ctx, "🎉 Total review completed in %v | Phase 1: %v (%.1f%%) | Phase 2: %v (%.1f%%) | Phase 3: %v (%.1f%%) | Phase 4: %v (%.1f%%) | Generated %d comments",
+		logger.Info(ctx, "🎉 Total review completed in %v | Phase 1: %v (%.1f%%) | Phase 2: %v (%.1f%%) | Phase 3: %v (%.1f%%) | Phase 4: %v (%.1f%%) | Phase 5: %v (%.1f%%) | Generated %d comments",
 			totalDuration,
 			phase1Duration, float64(phase1Duration)/float64(totalDuration)*100,
 			phase2Duration, float64(phase2Duration)/float64(totalDuration)*100,
 			phase3Duration, float64(phase3Duration)/float64(totalDuration)*100,
 			phase4Duration, float64(phase4Duration)/float64(totalDuration)*100,
+			phase5Duration, float64(phase5Duration)/float64(totalDuration)*100,
 			len(comments))
 	} else {
 		logger.Info(ctx, "🎉 Total review completed instantly | Generated %d comments", len(comments))
@@ -898,11 +949,249 @@ func (a *PRReviewAgent) performInitialReview(ctx context.Context, tasks []PRRevi
 			"raw_comment_count":        rawCommentCount,
 			"duration_ms":              phase3Duration.Milliseconds(),
 			"post_process_duration_ms": phase4Duration.Milliseconds(),
+			"verification_duration_ms": phase5Duration.Milliseconds(),
+			"verified_comment_count":   verifiedCommentCount,
 			"had_learnings":            learningsContext != "",
 		}, nil)
 	}
 
 	return comments, nil
+}
+
+func (a *PRReviewAgent) runReviewPipeline(ctx context.Context, tasks []PRReviewTask, changes *PRChanges, console ConsoleInterface, repoPatterns []*Content, guidelineMatches []*Content, learningsContext string, verify bool) (*reviewPipelineResult, error) {
+	phase2Start := time.Now()
+	_, processedTasks, err := a.prepareChunks(ctx, tasks, console)
+	if err != nil {
+		return nil, fmt.Errorf("failed to prepare chunks: %w", err)
+	}
+	phase2Duration := time.Since(phase2Start)
+	result, err := a.runPreparedReviewPipeline(ctx, processedTasks, changes, console, repoPatterns, guidelineMatches, learningsContext, verify)
+	if err != nil {
+		return nil, err
+	}
+	result.Phase2Duration = phase2Duration
+	return result, nil
+}
+
+func (a *PRReviewAgent) runPreparedReviewPipeline(ctx context.Context, processedTasks []PRReviewTask, changes *PRChanges, console ConsoleInterface, repoPatterns []*Content, guidelineMatches []*Content, learningsContext string, verify bool) (*reviewPipelineResult, error) {
+	logger := logging.GetLogger()
+
+	totalChunks := countReviewTaskChunks(processedTasks)
+	selectedTasks := selectTasksForChangedHunks(processedTasks, changes, reviewChunkContextRadius)
+	selectedChunks := countReviewTaskChunks(selectedTasks)
+	if selectedChunks != totalChunks {
+		logger.Info(ctx, "🎯 Phase 2.5: Selected %d/%d diff-relevant chunks for review", selectedChunks, totalChunks)
+	}
+
+	logger.Info(ctx, "⚡ Phase 3: Starting parallel processing of %d chunks across %d files", selectedChunks, len(selectedTasks))
+	phase3Start := time.Now()
+	comments, err := a.processChunksParallel(ctx, selectedTasks, repoPatterns, guidelineMatches, console, learningsContext)
+	if err != nil {
+		return nil, fmt.Errorf("failed to process chunks: %w", err)
+	}
+	phase3Duration := time.Since(phase3Start)
+
+	phase4Start := time.Now()
+	rawCommentCount := len(comments)
+	comments = postProcessReviewComments(comments)
+	skippedAfterFilter := 0
+	var filterDropReasons map[string]int
+	var filterRejected []ReviewFilterRejection
+	if changes != nil {
+		var skippedComments []PRReviewComment
+		comments, skippedComments, filterRejected = partitionReviewCommentsByChangesDetailed(comments, changes)
+		skippedAfterFilter = len(skippedComments)
+		if len(filterRejected) > 0 {
+			filterDropReasons = make(map[string]int)
+			for _, rejection := range filterRejected {
+				filterDropReasons[rejection.ReasonCode]++
+			}
+		}
+	}
+	phase4Duration := time.Since(phase4Start)
+
+	preVerificationCount := len(comments)
+	phase5Duration := time.Duration(0)
+	verificationDropped := 0
+	var verificationReasons map[string]int
+	var verificationRejected []ReviewVerificationRejection
+	if verify {
+		phase5Start := time.Now()
+		if verifiedComments, verificationReport, verifyErr := a.verifyReviewComments(ctx, comments, selectedTasks, console); verifyErr != nil {
+			logger.Warn(ctx, "Review verification skipped after failure: %v", verifyErr)
+		} else {
+			comments = verifiedComments
+			if verificationReport != nil {
+				verificationDropped = verificationReport.DroppedCount
+				verificationReasons = verificationReport.DropReasons
+				verificationRejected = verificationReport.Rejections
+			}
+		}
+		phase5Duration = time.Since(phase5Start)
+	}
+
+	return &reviewPipelineResult{
+		ProcessedTasks:       selectedTasks,
+		Comments:             comments,
+		TotalChunks:          totalChunks,
+		SelectedChunks:       selectedChunks,
+		RawCommentCount:      rawCommentCount,
+		PreVerificationCount: preVerificationCount,
+		SkippedAfterFilter:   skippedAfterFilter,
+		FilterDropReasons:    filterDropReasons,
+		FilterRejected:       filterRejected,
+		VerificationDropped:  verificationDropped,
+		VerificationReasons:  verificationReasons,
+		VerificationRejected: verificationRejected,
+		Phase3Duration:       phase3Duration,
+		Phase4Duration:       phase4Duration,
+		Phase5Duration:       phase5Duration,
+	}, nil
+}
+
+func countReviewTaskChunks(tasks []PRReviewTask) int {
+	total := 0
+	for _, task := range tasks {
+		total += len(task.Chunks)
+	}
+	return total
+}
+
+func selectTasksForChangedHunks(tasks []PRReviewTask, changes *PRChanges, contextRadius int) []PRReviewTask {
+	if changes == nil {
+		return tasks
+	}
+
+	hunksByFile := make(map[string][]ChangeHunk, len(changes.Files))
+	for _, file := range changes.Files {
+		hunksByFile[file.FilePath] = file.Hunks
+	}
+
+	selectedTasks := make([]PRReviewTask, len(tasks))
+	for i, task := range tasks {
+		selectedTasks[i] = task
+		hunks := hunksByFile[task.FilePath]
+		if len(task.Chunks) == 0 || len(hunks) == 0 {
+			continue
+		}
+		selectedTasks[i].Chunks = selectChunksForChangedHunks(task.Chunks, hunks, contextRadius)
+	}
+	return selectedTasks
+}
+
+func selectChunksForChangedHunks(chunks []ReviewChunk, hunks []ChangeHunk, contextRadius int) []ReviewChunk {
+	if len(chunks) == 0 || len(hunks) == 0 {
+		return chunks
+	}
+	if contextRadius < 0 {
+		contextRadius = 0
+	}
+
+	selected := make([]bool, len(chunks))
+	for i, chunk := range chunks {
+		if !chunkIntersectsChangedHunks(chunk, hunks) {
+			continue
+		}
+		start := i - contextRadius
+		if start < 0 {
+			start = 0
+		}
+		end := i + contextRadius
+		if end >= len(chunks) {
+			end = len(chunks) - 1
+		}
+		for j := start; j <= end; j++ {
+			selected[j] = true
+		}
+	}
+
+	filtered := make([]ReviewChunk, 0, len(chunks))
+	for i, keep := range selected {
+		if keep {
+			filtered = append(filtered, chunks[i])
+		}
+	}
+	if len(filtered) == 0 {
+		return chunks
+	}
+	return filtered
+}
+
+func chunkIntersectsChangedHunks(chunk ReviewChunk, hunks []ChangeHunk) bool {
+	for _, hunk := range hunks {
+		if chunk.EndLine >= hunk.StartLine && chunk.StartLine <= hunk.EndLine {
+			return true
+		}
+	}
+	return false
+}
+
+func partitionReviewCommentsByChanges(comments []PRReviewComment, changes *PRChanges) ([]PRReviewComment, []PRReviewComment) {
+	valid, skipped, _ := partitionReviewCommentsByChangesDetailed(comments, changes)
+	return valid, skipped
+}
+
+func partitionReviewCommentsByChangesDetailed(comments []PRReviewComment, changes *PRChanges) ([]PRReviewComment, []PRReviewComment, []ReviewFilterRejection) {
+	if changes == nil {
+		return comments, nil, nil
+	}
+
+	lineSlack := types.DefaultCommentHunkLineSlack
+	hunksByFile := make(map[string][]ChangeHunk, len(changes.Files))
+	for _, file := range changes.Files {
+		hunksByFile[file.FilePath] = file.Hunks
+	}
+
+	validComments := make([]PRReviewComment, 0, len(comments))
+	skippedComments := make([]PRReviewComment, 0)
+	filterRejected := make([]ReviewFilterRejection, 0)
+	for _, comment := range comments {
+		// Preserve general file-level comments. Only line-anchored comments
+		// need to be matched back to diff hunks.
+		if comment.LineNumber <= 0 {
+			validComments = append(validComments, comment)
+			continue
+		}
+		hunks := hunksByFile[comment.FilePath]
+		if types.CommentInChangedHunks(comment, hunks, lineSlack) {
+			validComments = append(validComments, comment)
+			continue
+		}
+		skippedComments = append(skippedComments, comment)
+		filterRejected = append(filterRejected, ReviewFilterRejection{
+			FilePath:   comment.FilePath,
+			LineNumber: comment.LineNumber,
+			ReasonCode: classifyChangedHunkMiss(comment.LineNumber, hunks, lineSlack),
+			Content:    strings.TrimSpace(comment.Content),
+		})
+	}
+
+	return validComments, skippedComments, filterRejected
+}
+
+func classifyChangedHunkMiss(lineNumber int, hunks []ChangeHunk, lineSlack int) string {
+	if lineNumber <= 0 {
+		return "missing_line"
+	}
+	if len(hunks) == 0 {
+		return "missing_hunks"
+	}
+	if lineSlack < 0 {
+		lineSlack = 0
+	}
+	if lineNumber < hunks[0].StartLine-lineSlack {
+		return "before_first_hunk"
+	}
+	last := hunks[len(hunks)-1]
+	if lineNumber > last.EndLine+lineSlack {
+		return "after_last_hunk"
+	}
+	for i := 0; i < len(hunks)-1; i++ {
+		if lineNumber > hunks[i].EndLine+lineSlack && lineNumber < hunks[i+1].StartLine-lineSlack {
+			return "between_hunks"
+		}
+	}
+	return "outside_changed_hunks"
 }
 
 // analyzePatterns keeps the existing pattern matching logic intact.
@@ -924,192 +1213,244 @@ func (a *PRReviewAgent) analyzePatterns(ctx context.Context, tasks []PRReviewTas
 		}
 	}
 
+	if len(tasks) == 0 {
+		return repoPatterns, guidelineMatches, nil
+	}
+
+	type patternTaskResult struct {
+		filePath            string
+		repoPatterns        []*Content
+		guidelineMatches    []*Content
+		repoMatchCount      int
+		guidelineMatchCount int
+		chunkCount          int
+		err                 error
+	}
+
+	fileWorkers, chunkWorkers := a.patternAnalysisWorkerCounts(len(tasks))
+	workChan := make(chan PRReviewTask, len(tasks))
+	resultChan := make(chan patternTaskResult, len(tasks))
+	var wg sync.WaitGroup
+
+	for worker := 0; worker < fileWorkers; worker++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for task := range workChan {
+				repo, guidelines, repoCount, guidelineCount, chunkCount, err := a.analyzePatternTask(ctx, task, chunkWorkers)
+				resultChan <- patternTaskResult{
+					filePath:            task.FilePath,
+					repoPatterns:        repo,
+					guidelineMatches:    guidelines,
+					repoMatchCount:      repoCount,
+					guidelineMatchCount: guidelineCount,
+					chunkCount:          chunkCount,
+					err:                 err,
+				}
+			}
+		}()
+	}
+
 	for _, task := range tasks {
+		workChan <- task
+	}
+	close(workChan)
 
-		// Create embedding for the entire file to find similar patterns
-		llm := core.GetTeacherLLM()
-		if llm == nil {
-			// Skip pattern analysis if teacher LLM is not configured
+	go func() {
+		wg.Wait()
+		close(resultChan)
+	}()
+
+	completed := 0
+	guidelinesByFile := make(map[string][]*Content, len(tasks))
+	for result := range resultChan {
+		completed++
+		if result.err != nil {
+			console.FileError(result.filePath, fmt.Errorf("failed to analyze patterns: %w", result.err))
 			continue
 		}
-
-		chunks, err := patterns.SplitContentBySize(task.FileContent, 1024) // Keep under 10KB limit
-		if err != nil {
-			return repoPatterns, guidelineMatches, fmt.Errorf("failed to split content for %s: %w", task.FilePath, err)
+		repoPatterns = append(repoPatterns, result.repoPatterns...)
+		guidelineMatches = append(guidelineMatches, result.guidelineMatches...)
+		if len(result.guidelineMatches) > 0 {
+			guidelinesByFile[result.filePath] = result.guidelineMatches
 		}
-		message := fmt.Sprintf("Processing %s (%d chunks)...", filepath.Base(task.FilePath), len(chunks))
-
-		var totalRepoMatches, totalGuidelineMatches int
-		logger := logging.GetLogger()
-
-		// Phase 1: Extract patterns from all chunks upfront for file-level deduplication
-		// This avoids redundant guideline searches for the same patterns across chunks
-		var allFilePatterns []types.SimpleCodePattern
-		seenPatterns := make(map[string]bool)
-		extractor := patterns.NewExtractor(logger)
-
-		for _, chunk := range chunks {
-			chunkPatterns := extractor.ExtractCodePatterns(ctx, chunk)
-			for _, p := range chunkPatterns {
-				if !seenPatterns[p.Name] {
-					seenPatterns[p.Name] = true
-					allFilePatterns = append(allFilePatterns, p)
-				}
-			}
-		}
-
-		logger.Debug(ctx, "File %s: extracted %d unique patterns from %d chunks",
-			filepath.Base(task.FilePath), len(allFilePatterns), len(chunks))
-
-		// Phase 2: Do single guideline search for all deduplicated patterns using sgrep
-		var fileGuidelineMatches []*Content
-		if len(allFilePatterns) > 0 && a.guidelineSearch != nil {
-			guidelineResults, err := a.guidelineSearch.SearchForPatterns(ctx, allFilePatterns, 10)
-			if err != nil {
-				logger.Warn(ctx, "Failed to use sgrep guideline search: %v", err)
-			} else {
-				fileGuidelineMatches = patterns.ConvertToContent(guidelineResults)
-
-				if util.GetEnvBool("MAESTRO_RAG_DEBUG_ENABLED", false) {
-					logger.Debug(ctx, "Sgrep guideline search found %d results", len(guidelineResults))
-					for i, result := range guidelineResults {
-						logger.Debug(ctx, "  %d. %s (score: %.3f, pattern: %s)",
-							i+1, result.Content.ID, result.FinalScore, result.Pattern)
-					}
-				}
-			}
-		}
-
-		err = console.WithSpinner(ctx, message, func() error {
-			// Parallel chunk processing with worker pool
-			numWorkers := runtime.NumCPU()
-			if numWorkers > len(chunks) {
-				numWorkers = len(chunks)
-			}
-			if numWorkers < 1 {
-				numWorkers = 1
-			}
-
-			type chunkWork struct {
-				index int
-				chunk string
-			}
-			type chunkResult struct {
-				patterns []*Content
-				err      error
-			}
-
-			workChan := make(chan chunkWork, len(chunks))
-			resultChan := make(chan chunkResult, len(chunks))
-			var wg sync.WaitGroup
-
-			// Track progress atomically
-			var processedCount atomic.Int32
-
-			// Start workers - use sgrep for semantic code pattern search
-			for w := 0; w < numWorkers; w++ {
-				wg.Add(1)
-				go func() {
-					defer wg.Done()
-					for work := range workChan {
-						var patterns []*Content
-
-						// Use sgrep for semantic search if repo is indexed
-						if a.clonedRepoPath != "" && a.sgrepTool != nil && a.sgrepTool.IsPathIndexed(ctx, a.clonedRepoPath) {
-							// Extract a search query from the chunk (first meaningful line or truncated content)
-							query := extractSearchQuery(work.chunk)
-							if query != "" {
-								results, err := a.sgrepTool.SearchInPath(ctx, a.clonedRepoPath, query, 5)
-								if err != nil {
-									if util.GetEnvBool("MAESTRO_RAG_DEBUG_ENABLED", false) {
-										logger.Debug(ctx, "Sgrep search failed for chunk: %v", err)
-									}
-								} else {
-									// Convert sgrep results to Content
-									for _, r := range results {
-										relevance := 1.0 - r.Score
-										if relevance < 0 {
-											relevance = 0
-										}
-										patterns = append(patterns, &Content{
-											ID:   fmt.Sprintf("%s:%d-%d", r.FilePath, r.StartLine, r.EndLine),
-											Text: r.Content,
-											Metadata: map[string]string{
-												"file_path":    r.FilePath,
-												"start_line":   fmt.Sprintf("%d", r.StartLine),
-												"end_line":     fmt.Sprintf("%d", r.EndLine),
-												"relevance":    fmt.Sprintf("%.4f", relevance),
-												"content_type": "repository",
-												"source":       "sgrep",
-											},
-										})
-									}
-								}
-							}
-						}
-
-						resultChan <- chunkResult{patterns: patterns}
-
-						// Update spinner progress
-						processed := processedCount.Add(1)
-						if s := console.Spinner(); s != nil {
-							s.Suffix = fmt.Sprintf(" (chunk %d/%d) of %s", processed, len(chunks), task.FilePath)
-						}
-					}
-				}()
-			}
-
-			// Send work
-			for i, chunk := range chunks {
-				workChan <- chunkWork{index: i, chunk: chunk}
-			}
-			close(workChan)
-
-			// Wait for workers to finish and close result channel
-			go func() {
-				wg.Wait()
-				close(resultChan)
-			}()
-
-			// Collect results
-			for result := range resultChan {
-				if result.err != nil {
-					console.FileError(task.FilePath, result.err)
-					continue
-				}
-				repoPatterns = append(repoPatterns, result.patterns...)
-				totalRepoMatches += len(result.patterns)
-			}
-
-			return nil
-		})
-
-		// Add file-level guideline matches (already deduplicated and searched once)
-		if fileGuidelineMatches != nil {
-			guidelineMatches = append(guidelineMatches, fileGuidelineMatches...)
-			totalGuidelineMatches = len(fileGuidelineMatches)
-		}
-
-		if err != nil {
-			console.FileError(task.FilePath, fmt.Errorf("failed to analyze patterns: %w", err))
-			continue
-		}
+		console.UpdateSpinnerText(fmt.Sprintf("Analyzing patterns... %d/%d (%s)", completed, len(tasks), filepath.Base(result.filePath)))
 		if console.Color() {
 			console.Printf("%s %s %s %s %s\n",
 				aurora.Green("✓").Bold(),
 				aurora.White("Analysis complete for").Bold(),
-				aurora.Cyan(filepath.Base(task.FilePath)).Bold(),
+				aurora.Cyan(filepath.Base(result.filePath)).Bold(),
 				aurora.White(fmt.Sprintf("found %d repository patterns and %d guideline matches across %d chunks",
-					totalRepoMatches, totalGuidelineMatches, len(chunks))).Bold(),
+					result.repoMatchCount, result.guidelineMatchCount, result.chunkCount)).Bold(),
 				aurora.Blue("...").String(),
 			)
 		} else {
 			console.Printf("✓ Analysis complete for %s: found %d repository patterns and %d guideline matches across %d chunks\n",
-				filepath.Base(task.FilePath), totalRepoMatches, totalGuidelineMatches, len(chunks))
+				filepath.Base(result.filePath), result.repoMatchCount, result.guidelineMatchCount, result.chunkCount)
 		}
 	}
 
+	for i := range tasks {
+		tasks[i].Guidelines = guidelinesByFile[tasks[i].FilePath]
+	}
+
 	return repoPatterns, guidelineMatches, nil
+}
+
+func (a *PRReviewAgent) patternAnalysisWorkerCounts(taskCount int) (int, int) {
+	totalWorkers := runtime.NumCPU()
+	if a.workers != nil && a.workers.ReviewWorkers > 0 {
+		totalWorkers = a.workers.ReviewWorkers
+	}
+	if totalWorkers < 1 {
+		totalWorkers = 1
+	}
+
+	fileWorkers := totalWorkers
+	if fileWorkers > taskCount {
+		fileWorkers = taskCount
+	}
+	if fileWorkers > 4 {
+		fileWorkers = 4
+	}
+	if fileWorkers < 1 {
+		fileWorkers = 1
+	}
+
+	chunkWorkers := totalWorkers / fileWorkers
+	if chunkWorkers < 1 {
+		chunkWorkers = 1
+	}
+	if chunkWorkers > 4 {
+		chunkWorkers = 4
+	}
+
+	return fileWorkers, chunkWorkers
+}
+
+func (a *PRReviewAgent) analyzePatternTask(ctx context.Context, task PRReviewTask, chunkWorkers int) ([]*Content, []*Content, int, int, int, error) {
+	logger := logging.GetLogger()
+
+	if core.GetTeacherLLM() == nil {
+		return nil, nil, 0, 0, 0, nil
+	}
+
+	chunks, err := patterns.SplitContentBySize(task.FileContent, 1024)
+	if err != nil {
+		return nil, nil, 0, 0, 0, fmt.Errorf("failed to split content for %s: %w", task.FilePath, err)
+	}
+
+	var allFilePatterns []types.SimpleCodePattern
+	seenPatterns := make(map[string]bool)
+	extractor := patterns.NewExtractor(logger)
+
+	for _, chunk := range chunks {
+		chunkPatterns := extractor.ExtractCodePatterns(ctx, chunk)
+		for _, p := range chunkPatterns {
+			if !seenPatterns[p.Name] {
+				seenPatterns[p.Name] = true
+				allFilePatterns = append(allFilePatterns, p)
+			}
+		}
+	}
+
+	logger.Debug(ctx, "File %s: extracted %d unique patterns from %d chunks",
+		filepath.Base(task.FilePath), len(allFilePatterns), len(chunks))
+
+	var guidelineMatches []*Content
+	if len(allFilePatterns) > 0 && a.guidelineSearch != nil {
+		guidelineResults, err := a.guidelineSearch.SearchForPatterns(ctx, allFilePatterns, 10)
+		if err != nil {
+			logger.Warn(ctx, "Failed to use sgrep guideline search: %v", err)
+		} else {
+			guidelineMatches = patterns.ConvertToContent(guidelineResults)
+			if util.GetEnvBool("MAESTRO_RAG_DEBUG_ENABLED", false) {
+				logger.Debug(ctx, "Sgrep guideline search found %d results", len(guidelineResults))
+				for i, result := range guidelineResults {
+					logger.Debug(ctx, "  %d. %s (score: %.3f, pattern: %s)",
+						i+1, result.Content.ID, result.FinalScore, result.Pattern)
+				}
+			}
+		}
+	}
+
+	repoPatterns := make([]*Content, 0)
+	if a.clonedRepoPath == "" || a.sgrepTool == nil || !a.sgrepTool.IsPathIndexed(ctx, a.clonedRepoPath) {
+		return repoPatterns, guidelineMatches, 0, len(guidelineMatches), len(chunks), nil
+	}
+
+	numWorkers := chunkWorkers
+	if numWorkers > len(chunks) {
+		numWorkers = len(chunks)
+	}
+	if numWorkers < 1 {
+		numWorkers = 1
+	}
+
+	type chunkResult struct {
+		patterns []*Content
+	}
+
+	workChan := make(chan string, len(chunks))
+	resultChan := make(chan chunkResult, len(chunks))
+	var wg sync.WaitGroup
+	var processedCount atomic.Int32
+
+	for worker := 0; worker < numWorkers; worker++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for chunk := range workChan {
+				var foundPatterns []*Content
+				query := extractSearchQuery(chunk)
+				if query != "" {
+					results, err := a.sgrepTool.SearchInPath(ctx, a.clonedRepoPath, query, 5)
+					if err != nil {
+						if util.GetEnvBool("MAESTRO_RAG_DEBUG_ENABLED", false) {
+							logger.Debug(ctx, "Sgrep search failed for chunk: %v", err)
+						}
+					} else {
+						for _, r := range results {
+							relevance := 1.0 - r.Score
+							if relevance < 0 {
+								relevance = 0
+							}
+							foundPatterns = append(foundPatterns, &Content{
+								ID:   fmt.Sprintf("%s:%d-%d", r.FilePath, r.StartLine, r.EndLine),
+								Text: r.Content,
+								Metadata: map[string]string{
+									"file_path":    r.FilePath,
+									"start_line":   fmt.Sprintf("%d", r.StartLine),
+									"end_line":     fmt.Sprintf("%d", r.EndLine),
+									"relevance":    fmt.Sprintf("%.4f", relevance),
+									"content_type": "repository",
+									"source":       "sgrep",
+								},
+							})
+						}
+					}
+				}
+				resultChan <- chunkResult{patterns: foundPatterns}
+				processedCount.Add(1)
+			}
+		}()
+	}
+
+	for _, chunk := range chunks {
+		workChan <- chunk
+	}
+	close(workChan)
+
+	go func() {
+		wg.Wait()
+		close(resultChan)
+	}()
+
+	for result := range resultChan {
+		repoPatterns = append(repoPatterns, result.patterns...)
+	}
+
+	return repoPatterns, guidelineMatches, len(repoPatterns), len(guidelineMatches), int(processedCount.Load()), nil
 }
 
 // prepareChunks handles chunk creation for all files.
@@ -1200,31 +1541,20 @@ func (a *PRReviewAgent) processChunksManual(ctx context.Context, tasks []PRRevie
 		filePath    string
 		chunkIdx    int
 		totalInFile int
+		startLine   int
 	}, 0, totalChunks)
 
-	// Format guidelines for the prompt
-	guidelinesText := "Follow Go best practices and code review standards"
-	if len(guidelineMatches) > 0 {
-		var sb strings.Builder
-		sb.WriteString("Apply these guidelines:\n")
-		for i, g := range guidelineMatches {
-			if i >= 5 {
-				break
-			}
-			if g.Text != "" {
-				sb.WriteString(g.Text)
-				sb.WriteString("\n")
-			}
-		}
-		guidelinesText = sb.String()
-	}
-
 	for _, task := range tasks {
+		guidelinesText := buildReviewGuidelinesText(task.Guidelines)
+		if learningsContext != "" {
+			guidelinesText += "\n\n## Learned Strategies from Past Reviews\n" + learningsContext
+		}
 		for chunkIdx, chk := range task.Chunks {
 			chunkInput := map[string]interface{}{
 				"file_path":        task.FilePath,
 				"file_content":     chk.Content,
 				"changes":          chk.Changes,
+				"guidelines":       guidelinesText,
 				"leading_context":  chk.LeadingContext,
 				"trailing_context": chk.TrailingContext,
 				"chunk_start":      chk.StartLine,
@@ -1236,20 +1566,20 @@ func (a *PRReviewAgent) processChunksManual(ctx context.Context, tasks []PRRevie
 				filePath    string
 				chunkIdx    int
 				totalInFile int
-			}{task.FilePath, chunkIdx, len(task.Chunks)})
+				startLine   int
+			}{task.FilePath, chunkIdx, len(task.Chunks), chk.StartLine})
 		}
 	}
 
 	// Create task context with guidelines and ACE learnings
 	taskContext := map[string]interface{}{
-		"guidelines":   guidelinesText,
-		"repo_context": "Repository patterns and practices",
+		"repo_context":  "Repository patterns and practices",
+		"chunk_context": reasoning.ChunkReviewContext(),
 	}
 
 	// ACE: Inject learned strategies into review context
 	if learningsContext != "" {
 		taskContext["ace_learnings"] = learningsContext
-		taskContext["guidelines"] = guidelinesText + "\n\n## Learned Strategies from Past Reviews\n" + learningsContext
 	}
 
 	// Process all chunks in parallel using the high-performance processor
@@ -1266,6 +1596,11 @@ func (a *PRReviewAgent) processChunksManual(ctx context.Context, tasks []PRRevie
 		}
 
 		meta := chunkMeta[i]
+		if chunkContent, ok := chunks[i]["file_content"].(string); ok {
+			result.Issues = filterChunkBoundaryIssues(result.Issues, chunkContent)
+		}
+		result.Issues = filterLowSignalAdvisoryIssues(result.Issues)
+		shiftReviewIssuesToFileLines(result.Issues, meta.startLine)
 
 		// Convert ReviewIssues to PRReviewComments
 		startIdx := len(allComments)
@@ -1300,6 +1635,268 @@ func commentFromReviewIssue(issue types.ReviewIssue) PRReviewComment {
 		Confidence: issue.Confidence,
 		Suggestion: issue.Suggestion,
 	}
+}
+
+func buildReviewGuidelinesText(guidelineMatches []*Content) string {
+	const base = "Use Go best practices and project guidelines only to confirm concrete issues in the changed code. Ignore preference-only guidance such as naming, compile-time interface assertions, error-string wording, enum/type-alias refactors, or broad encapsulation advice unless the change introduces a real bug, compatibility problem, or maintenance hazard."
+
+	if len(guidelineMatches) == 0 {
+		return base
+	}
+
+	var sb strings.Builder
+	sb.WriteString(base)
+	sb.WriteString("\n\nOnly use these guideline excerpts when the changed code clearly violates them:\n")
+
+	seen := make(map[string]struct{}, len(guidelineMatches))
+	count := 0
+	for _, match := range guidelineMatches {
+		text := abbreviateGuidelineText(match.Text, 240)
+		if text == "" {
+			continue
+		}
+		if _, ok := seen[text]; ok {
+			continue
+		}
+		seen[text] = struct{}{}
+		sb.WriteString("- ")
+		sb.WriteString(text)
+		sb.WriteString("\n")
+		count++
+		if count >= 3 {
+			break
+		}
+	}
+
+	if count == 0 {
+		return base
+	}
+
+	return strings.TrimSpace(sb.String())
+}
+
+func abbreviateGuidelineText(text string, maxLen int) string {
+	text = strings.Join(strings.Fields(strings.TrimSpace(text)), " ")
+	if text == "" || maxLen <= 0 {
+		return ""
+	}
+	if len(text) <= maxLen {
+		return text
+	}
+
+	cut := maxLen
+	for cut > maxLen/2 && cut < len(text) && text[cut] != ' ' {
+		cut--
+	}
+	if cut <= maxLen/2 {
+		cut = maxLen
+	}
+
+	return strings.TrimSpace(text[:cut]) + "..."
+}
+
+func shiftReviewIssuesToFileLines(issues []types.ReviewIssue, chunkStartLine int) {
+	if chunkStartLine <= 1 {
+		return
+	}
+	lineOffset := chunkStartLine - 1
+	for i := range issues {
+		if issues[i].LineRange.Start > 0 {
+			issues[i].LineRange.Start += lineOffset
+		}
+		if issues[i].LineRange.End > 0 {
+			issues[i].LineRange.End += lineOffset
+		}
+	}
+}
+
+func filterChunkBoundaryIssues(issues []types.ReviewIssue, chunkContent string) []types.ReviewIssue {
+	if len(issues) == 0 || chunkContent == "" {
+		return issues
+	}
+
+	chunkLineCount := 1 + strings.Count(chunkContent, "\n")
+	filtered := make([]types.ReviewIssue, 0, len(issues))
+	for _, issue := range issues {
+		if isChunkBoundarySyntaxArtifact(issue, chunkLineCount) {
+			continue
+		}
+		filtered = append(filtered, issue)
+	}
+	return filtered
+}
+
+func isChunkBoundarySyntaxArtifact(issue types.ReviewIssue, chunkLineCount int) bool {
+	if chunkLineCount <= 0 {
+		return false
+	}
+
+	startLine := issue.LineRange.Start
+	endLine := issue.LineRange.End
+	if endLine <= 0 {
+		endLine = startLine
+	}
+	if startLine <= 0 && endLine <= 0 {
+		return false
+	}
+
+	const boundarySlack = 3
+	atChunkStart := startLine > 0 && startLine <= boundarySlack
+	atChunkEnd := endLine > 0 && endLine >= chunkLineCount-boundarySlack+1
+	if !atChunkStart && !atChunkEnd {
+		return false
+	}
+
+	text := strings.ToLower(issue.Description + "\n" + issue.Suggestion + "\n" + issue.Reasoning)
+	for _, marker := range []string{
+		"syntax error",
+		"invalid go syntax",
+		"compile error",
+		"compilation error",
+		"will not compile",
+		"outside of any function",
+		"outside a function",
+		"within a function body",
+		"closing brace",
+		"missing brace",
+		"unmatched brace",
+		"extraneous",
+		"incomplete statement",
+		"function cannot be closed twice",
+	} {
+		if strings.Contains(text, marker) {
+			return true
+		}
+	}
+
+	return false
+}
+
+func filterLowSignalAdvisoryIssues(issues []types.ReviewIssue) []types.ReviewIssue {
+	if len(issues) == 0 {
+		return issues
+	}
+
+	filtered := make([]types.ReviewIssue, 0, len(issues))
+	for _, issue := range issues {
+		if isLowSignalAdvisoryIssue(issue) {
+			continue
+		}
+		filtered = append(filtered, issue)
+	}
+	return filtered
+}
+
+func isLowSignalAdvisoryIssue(issue types.ReviewIssue) bool {
+	category := strings.ToLower(strings.TrimSpace(issue.Category))
+	switch category {
+	case "bug", "security", "performance", "correctness":
+		return false
+	}
+
+	text := strings.ToLower(strings.TrimSpace(issue.Description + "\n" + issue.Suggestion + "\n" + issue.Reasoning))
+	if text == "" {
+		return false
+	}
+	if containsAny(text, []string{
+		"panic",
+		"nil pointer",
+		"compile error",
+		"compilation error",
+		"will not compile",
+		"syntax error",
+		"data race",
+		"deadlock",
+		"leak",
+		"out of bounds",
+		"incorrect",
+		"wrong result",
+		"security",
+		"vulnerability",
+		"broken",
+		"runtime",
+	}) {
+		return false
+	}
+
+	if strings.HasSuffix(strings.ToLower(issue.FilePath), ".md") {
+		return containsAny(text, []string{
+			"clarify",
+			"documentation",
+			"confusion",
+			"unusual",
+			"speculative",
+		})
+	}
+
+	if containsAny(text, []string{
+		"compile-time check",
+		"compile-time interface",
+		"compile-time verification",
+		"interface compliance",
+		"implements the interface",
+		"var _ ",
+		"error message uses 'failed to' prefix",
+		"error string uses",
+		"error strings should",
+		"breaks encapsulation",
+		"exposes the underlying",
+		"underlying client",
+		"enum-like behavior",
+		"define a custom type",
+		"lacks compile-time type safety",
+	}) {
+		return true
+	}
+
+	if !containsAny(text, []string{
+		"not idiomatic",
+		"magic number",
+		"named constant",
+		"consider renaming",
+		"rename the",
+		"more descriptive",
+		"too generic",
+		"smaller, more focused interfaces",
+		"break this monolithic interface",
+		"clear documentation",
+		"assertion library",
+		"add a test case",
+		"consider adding",
+		"edge case",
+		"readability",
+		"maintainability",
+		"go naming conventions",
+		"hardcoded",
+		"could be defined as",
+		"reconsider the need for",
+		"move the",
+		"global constant",
+	}) {
+		return false
+	}
+
+	return containsAny(text, []string{
+		"consider",
+		"could",
+		"would",
+		"better practice",
+		"improve readability",
+		"improve maintainability",
+		"more descriptive",
+		"clarify",
+		"rename",
+		"documentation",
+	})
+}
+
+func containsAny(text string, markers []string) bool {
+	for _, marker := range markers {
+		if strings.Contains(text, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func (a *PRReviewAgent) processExistingCommentsWithChanges(ctx context.Context, prNumber int, console ConsoleInterface, preloadedChanges *PRChanges) error {

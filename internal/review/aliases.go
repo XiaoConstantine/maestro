@@ -17,6 +17,7 @@ type (
 type (
 	AgentConfig    = types.AgentConfig
 	IndexingStatus = types.IndexingStatus
+	PromptOptions  = types.PromptOptions
 )
 
 // Core review types.

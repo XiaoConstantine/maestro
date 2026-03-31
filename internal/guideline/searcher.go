@@ -4,6 +4,7 @@ package guideline
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"sync"
 
 	"github.com/XiaoConstantine/dspy-go/pkg/logging"
@@ -22,9 +23,13 @@ type Searcher struct {
 
 // NewSearcher creates a new guideline searcher.
 func NewSearcher(baseDir string, logger *logging.Logger) *Searcher {
+	sgrepHome := ""
+	if baseDir != "" {
+		sgrepHome = filepath.Join(baseDir, "sgrep")
+	}
 	return &Searcher{
 		fetcher:   NewFetcherWithStorage(logger, baseDir),
-		sgrepTool: search.NewSgrepTool(logger, ""),
+		sgrepTool: search.NewSgrepToolWithHome(logger, "", sgrepHome),
 		logger:    logger,
 	}
 }

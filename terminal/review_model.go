@@ -38,8 +38,9 @@ type FilterMode int
 const (
 	FilterNone FilterMode = iota
 	FilterCritical
-	FilterWarning
-	FilterSuggestion
+	FilterHigh
+	FilterMedium
+	FilterLow
 )
 
 // ReviewModel is the main TUI model for displaying review comments (Crush-style).
@@ -48,10 +49,10 @@ type ReviewModel struct {
 	fileGroups     []FileGroup
 	filteredGroups []FileGroup
 
-	selectedIdx      int // Global index in flattened list
-	selectedFileIdx  int // Currently selected file group index
-	selectedInFile   int // Index within current file group
-	filterMode       FilterMode
+	selectedIdx     int // Global index in flattened list
+	selectedFileIdx int // Currently selected file group index
+	selectedInFile  int // Index within current file group
+	filterMode      FilterMode
 
 	listViewport   viewport.Model
 	detailViewport viewport.Model
@@ -89,12 +90,12 @@ type ReviewStyles struct {
 	SeveritySuggestion lipgloss.Style
 
 	// Detail view
-	DetailTitle    lipgloss.Style
-	DetailContent  lipgloss.Style
-	CodeBlock      lipgloss.Style
-	DiffAdded      lipgloss.Style
-	DiffRemoved    lipgloss.Style
-	Suggestion     lipgloss.Style
+	DetailTitle   lipgloss.Style
+	DetailContent lipgloss.Style
+	CodeBlock     lipgloss.Style
+	DiffAdded     lipgloss.Style
+	DiffRemoved   lipgloss.Style
+	Suggestion    lipgloss.Style
 
 	// Status elements
 	StatusMuted lipgloss.Style
@@ -278,10 +279,13 @@ func (m *ReviewModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.setFilter(FilterCritical)
 
 		case "2":
-			m.setFilter(FilterWarning)
+			m.setFilter(FilterHigh)
 
 		case "3":
-			m.setFilter(FilterSuggestion)
+			m.setFilter(FilterMedium)
+
+		case "4":
+			m.setFilter(FilterLow)
 
 		case "0":
 			m.setFilter(FilterNone)
@@ -453,17 +457,19 @@ func (m *ReviewModel) applyFilter() {
 	switch m.filterMode {
 	case FilterCritical:
 		severity = "critical"
-	case FilterWarning:
-		severity = "warning"
-	case FilterSuggestion:
-		severity = "suggestion"
+	case FilterHigh:
+		severity = "high"
+	case FilterMedium:
+		severity = "medium"
+	case FilterLow:
+		severity = "low"
 	}
 
 	var filtered []FileGroup
 	for _, g := range m.fileGroups {
 		var comments []ReviewComment
 		for _, c := range g.Comments {
-			if c.Severity == severity {
+			if normalizedReviewSeverity(c.Severity) == severity {
 				comments = append(comments, c)
 			}
 		}
@@ -593,15 +599,20 @@ func (m *ReviewModel) renderHeader() string {
 			m.styles.SeverityCritical.Render("●"),
 			counts["critical"])
 	}
-	if counts["warning"] > 0 {
-		countStr += fmt.Sprintf(" • %s %d warning",
-			m.styles.SeverityWarning.Render("●"),
-			counts["warning"])
+	if counts["high"] > 0 {
+		countStr += fmt.Sprintf(" • %s %d high",
+			m.styles.SeverityCritical.Render("●"),
+			counts["high"])
 	}
-	if counts["suggestion"] > 0 {
-		countStr += fmt.Sprintf(" • %s %d suggestion",
+	if counts["medium"] > 0 {
+		countStr += fmt.Sprintf(" • %s %d medium",
+			m.styles.SeverityWarning.Render("●"),
+			counts["medium"])
+	}
+	if counts["low"] > 0 {
+		countStr += fmt.Sprintf(" • %s %d low",
 			m.styles.SeveritySuggestion.Render("●"),
-			counts["suggestion"])
+			counts["low"])
 	}
 
 	countStyled := m.styles.StatusMuted.Render(countStr)
@@ -625,8 +636,9 @@ func (m *ReviewModel) renderFilterTabs() string {
 	}{
 		{FilterNone, "All", "0"},
 		{FilterCritical, "Critical", "1"},
-		{FilterWarning, "Warning", "2"},
-		{FilterSuggestion, "Suggestion", "3"},
+		{FilterHigh, "High", "2"},
+		{FilterMedium, "Medium", "3"},
+		{FilterLow, "Low", "4"},
 	}
 
 	var parts []string
@@ -875,13 +887,17 @@ func (m *ReviewModel) renderConfirmPost() string {
 		lines = append(lines, fmt.Sprintf("  %s Critical: %d",
 			m.styles.SeverityCritical.Render("●"), counts["critical"]))
 	}
-	if counts["warning"] > 0 {
-		lines = append(lines, fmt.Sprintf("  %s Warning: %d",
-			m.styles.SeverityWarning.Render("●"), counts["warning"]))
+	if counts["high"] > 0 {
+		lines = append(lines, fmt.Sprintf("  %s High: %d",
+			m.styles.SeverityCritical.Render("●"), counts["high"]))
 	}
-	if counts["suggestion"] > 0 {
-		lines = append(lines, fmt.Sprintf("  %s Suggestion: %d",
-			m.styles.SeveritySuggestion.Render("●"), counts["suggestion"]))
+	if counts["medium"] > 0 {
+		lines = append(lines, fmt.Sprintf("  %s Medium: %d",
+			m.styles.SeverityWarning.Render("●"), counts["medium"]))
+	}
+	if counts["low"] > 0 {
+		lines = append(lines, fmt.Sprintf("  %s Low: %d",
+			m.styles.SeveritySuggestion.Render("●"), counts["low"]))
 	}
 
 	lines = append(lines, "")
@@ -900,12 +916,14 @@ func (m *ReviewModel) renderConfirmPost() string {
 }
 
 func (m *ReviewModel) getSeverityIcon(severity string) string {
-	switch severity {
+	switch normalizedReviewSeverity(severity) {
 	case "critical":
 		return m.styles.SeverityCritical.Render("●")
-	case "warning":
+	case "high":
+		return m.styles.SeverityCritical.Render("●")
+	case "medium":
 		return m.styles.SeverityWarning.Render("●")
-	case "suggestion":
+	case "low":
 		return m.styles.SeveritySuggestion.Render("●")
 	default:
 		return m.styles.StatusMuted.Render("○")
@@ -913,20 +931,35 @@ func (m *ReviewModel) getSeverityIcon(severity string) string {
 }
 
 func (m *ReviewModel) getCommentCounts() map[string]int {
-	counts := map[string]int{"total": 0, "critical": 0, "warning": 0, "suggestion": 0}
+	counts := map[string]int{"total": 0, "critical": 0, "high": 0, "medium": 0, "low": 0}
 
 	for _, c := range m.comments {
 		counts["total"]++
-		switch c.Severity {
+		switch normalizedReviewSeverity(c.Severity) {
 		case "critical":
 			counts["critical"]++
-		case "warning":
-			counts["warning"]++
-		case "suggestion":
-			counts["suggestion"]++
+		case "high":
+			counts["high"]++
+		case "medium":
+			counts["medium"]++
+		case "low":
+			counts["low"]++
 		}
 	}
 	return counts
+}
+
+func normalizedReviewSeverity(severity string) string {
+	switch severity {
+	case "warning", "medium":
+		return "medium"
+	case "suggestion", "low":
+		return "low"
+	case "critical", "high":
+		return severity
+	default:
+		return severity
+	}
 }
 
 // SetOnPost sets the callback for posting comments.

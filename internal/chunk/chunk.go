@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -193,6 +194,7 @@ func ChunkFile(ctx context.Context, content string, changes string, config *type
 	}
 	// Apply minimum chunk size
 	initialChunks := mergeSmallChunks(chunks, config.MinChunkSize)
+	initialChunks = ensureChangedRangesCovered(initialChunks, content, changes, config, filename)
 
 	// Now handle oversized chunks directly instead of using enforceMaxTokens
 	var finalChunks []types.ReviewChunk
@@ -342,6 +344,193 @@ func ExtractRelevantChanges(changes string, startline, endline int) string {
 	}
 
 	return strings.Join(relevantLines, "\n")
+}
+
+type lineRange struct {
+	Start int
+	End   int
+}
+
+func ensureChangedRangesCovered(chunks []types.ReviewChunk, content string, changes string, config *types.ChunkConfig, filePath string) []types.ReviewChunk {
+	changedRanges := parseDiffNewFileRanges(changes)
+	if len(changedRanges) == 0 {
+		return chunks
+	}
+
+	coverages := make([]lineRange, 0, len(chunks))
+	for _, chunk := range chunks {
+		if chunk.StartLine <= 0 || chunk.EndLine < chunk.StartLine {
+			continue
+		}
+		coverages = append(coverages, lineRange{Start: chunk.StartLine, End: chunk.EndLine})
+	}
+
+	uncovered := subtractCoveredRanges(changedRanges, coverages)
+	if len(uncovered) == 0 {
+		return chunks
+	}
+
+	lines := strings.Split(content, "\n")
+	for _, r := range uncovered {
+		startLine := maxInt(1, r.Start)
+		endLine := minInt(len(lines), r.End)
+		if endLine < startLine {
+			continue
+		}
+		chunkContent := strings.Join(lines[startLine-1:endLine], "\n")
+		chunk := createCompleteChunk(
+			chunkContent,
+			startLine,
+			endLine,
+			content,
+			config,
+			filePath,
+			0,
+			changes,
+		)
+		chunk.Description = fmt.Sprintf("Changed lines %d-%d in %s", startLine, endLine, filepath.Base(filePath))
+		chunks = append(chunks, chunk)
+	}
+
+	sort.SliceStable(chunks, func(i, j int) bool {
+		if chunks[i].StartLine == chunks[j].StartLine {
+			return chunks[i].EndLine < chunks[j].EndLine
+		}
+		return chunks[i].StartLine < chunks[j].StartLine
+	})
+	for i := range chunks {
+		chunks[i].TotalChunks = len(chunks)
+	}
+
+	return chunks
+}
+
+func parseDiffNewFileRanges(changes string) []lineRange {
+	if strings.TrimSpace(changes) == "" {
+		return nil
+	}
+
+	hunkHeaderRegex := regexp.MustCompile(`^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@`)
+	ranges := make([]lineRange, 0)
+	for _, line := range strings.Split(changes, "\n") {
+		matches := hunkHeaderRegex.FindStringSubmatch(line)
+		if matches == nil {
+			continue
+		}
+
+		start, err := strconv.Atoi(matches[1])
+		if err != nil {
+			continue
+		}
+		count := 1
+		if matches[2] != "" {
+			count, err = strconv.Atoi(matches[2])
+			if err != nil {
+				continue
+			}
+		}
+		if count <= 0 {
+			continue
+		}
+		ranges = append(ranges, lineRange{
+			Start: start,
+			End:   start + count - 1,
+		})
+	}
+
+	if len(ranges) == 0 {
+		return nil
+	}
+
+	sort.Slice(ranges, func(i, j int) bool {
+		if ranges[i].Start == ranges[j].Start {
+			return ranges[i].End < ranges[j].End
+		}
+		return ranges[i].Start < ranges[j].Start
+	})
+
+	merged := make([]lineRange, 0, len(ranges))
+	for _, r := range ranges {
+		if len(merged) == 0 || r.Start > merged[len(merged)-1].End+1 {
+			merged = append(merged, r)
+			continue
+		}
+		if r.End > merged[len(merged)-1].End {
+			merged[len(merged)-1].End = r.End
+		}
+	}
+
+	return merged
+}
+
+func subtractCoveredRanges(changedRanges []lineRange, coverages []lineRange) []lineRange {
+	if len(changedRanges) == 0 {
+		return nil
+	}
+	if len(coverages) == 0 {
+		return append([]lineRange(nil), changedRanges...)
+	}
+
+	sort.Slice(coverages, func(i, j int) bool {
+		if coverages[i].Start == coverages[j].Start {
+			return coverages[i].End < coverages[j].End
+		}
+		return coverages[i].Start < coverages[j].Start
+	})
+
+	var uncovered []lineRange
+	for _, changed := range changedRanges {
+		segments := []lineRange{changed}
+		for _, coverage := range coverages {
+			segments = subtractRangeSegments(segments, coverage)
+			if len(segments) == 0 {
+				break
+			}
+		}
+		uncovered = append(uncovered, segments...)
+	}
+	return uncovered
+}
+
+func subtractRangeSegments(segments []lineRange, coverage lineRange) []lineRange {
+	if len(segments) == 0 {
+		return nil
+	}
+
+	result := make([]lineRange, 0, len(segments))
+	for _, segment := range segments {
+		if coverage.End < segment.Start || coverage.Start > segment.End {
+			result = append(result, segment)
+			continue
+		}
+		if coverage.Start > segment.Start {
+			result = append(result, lineRange{
+				Start: segment.Start,
+				End:   coverage.Start - 1,
+			})
+		}
+		if coverage.End < segment.End {
+			result = append(result, lineRange{
+				Start: coverage.End + 1,
+				End:   segment.End,
+			})
+		}
+	}
+	return result
+}
+
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 // chunkByFunction splits code at function boundaries using AST parsing.

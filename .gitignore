@@ -26,3 +26,9 @@ coverage.html
 memory/
 agent_memory/
 .maestro/
+
+# Local review corpus / GEPA artifacts
+benchmark_results/
+benchmarks/review_go_suite.json
+benchmarks/review_go_smoke.json
+council-out/

@@ -42,6 +42,7 @@ type EnhancedCodeReviewProcessor struct {
 	consensusModule   *modules.MultiChainComparison
 	metrics           types.MetricsCollector
 	logger            *logging.Logger
+	instruction       string
 }
 
 // hashSignature creates a unique hash for a signature based on its structure.
@@ -143,8 +144,8 @@ func getOrCreateModules(signature core.Signature) *ModuleCacheEntry {
 }
 
 // NewEnhancedCodeReviewProcessor creates an optimized processor using cached DSPy modules.
-func NewEnhancedCodeReviewProcessor(metrics types.MetricsCollector, logger *logging.Logger) *EnhancedCodeReviewProcessor {
-	signature := createCodeReviewSignature()
+func NewEnhancedCodeReviewProcessor(metrics types.MetricsCollector, logger *logging.Logger, instructionOverlay string) *EnhancedCodeReviewProcessor {
+	signature := createCodeReviewSignature(instructionOverlay)
 	cachedModules := getOrCreateModules(signature)
 
 	refinementConfig := modules.RefineConfig{
@@ -161,16 +162,18 @@ func NewEnhancedCodeReviewProcessor(metrics types.MetricsCollector, logger *logg
 		consensusModule:   cachedModules.ConsensusModule,
 		metrics:           metrics,
 		logger:            logger,
+		instruction:       signature.Instruction,
 	}
 }
 
 // createCodeReviewSignature creates the signature for code review.
 // Includes core fields only (no package_name/imports for A/B testing).
-func createCodeReviewSignature() core.Signature {
+func createCodeReviewSignature(instructionOverlay string) core.Signature {
 	return core.NewSignature(
 		[]core.InputField{
 			// Core required fields
 			{Field: core.Field{Name: "file_content", Description: "The source code to review"}},
+			{Field: core.Field{Name: "chunk_context", Description: "Instructions for interpreting partial chunk boundaries and excerpt-relative line numbers"}},
 			{Field: core.Field{Name: "changes", Description: "The specific changes made to the code"}},
 			{Field: core.Field{Name: "guidelines", Description: "Coding guidelines and standards"}},
 			{Field: core.Field{Name: "repo_context", Description: "Repository context and patterns"}},
@@ -184,7 +187,17 @@ func createCodeReviewSignature() core.Signature {
 			{Field: core.NewField("overall_assessment")},
 			{Field: core.NewField("confidence_score")},
 		},
-	).WithInstruction(codeReviewInstruction)
+	).WithInstruction(materializeCodeReviewInstruction(instructionOverlay))
+}
+
+const defaultChunkReviewContext = "The provided file_content is usually a partial excerpt of a larger file. " +
+	"The excerpt may start or end in the middle of a function, block, comment, or statement because of chunking and overlap. " +
+	"Use leading_context and trailing_context to understand the surrounding structure. " +
+	"Do not report syntax, brace-balance, or incomplete-statement issues unless the changed lines and surrounding context clearly show a real defect. " +
+	"When you report an issue, use line numbers relative to file_content."
+
+func ChunkReviewContext() string {
+	return defaultChunkReviewContext
 }
 
 // codeReviewInstruction contains the detailed instructions for the code review LLM.
@@ -194,6 +207,7 @@ You are an expert code reviewer. Your goal is to provide HIGH-VALUE, ACTIONABLE 
 CONTEXT AVAILABLE:
 - file_path: Path of the file being reviewed
 - file_content: The source code chunk to review
+- chunk_context: How to interpret chunk boundaries and line numbers for this excerpt
 - changes: The specific diff/changes made to the code
 - guidelines: Coding guidelines and standards to apply
 - leading_context: Code lines before this chunk for context
@@ -206,8 +220,29 @@ OUTPUT REQUIREMENTS:
 - overall_assessment: Summarize actual findings (not theoretical concerns)
 - confidence_score: 0.9+ for concrete issues, <0.7 for speculative concerns
 
+REVIEW RULES:
+- Treat file_content as an excerpt, not a guaranteed full file.
+- Use chunk_context, leading_context, and trailing_context to reason about excerpt boundaries.
+- Do not report missing braces, incomplete statements, or syntax errors caused only by the excerpt starting or ending mid-block.
+- Only report structural or syntax issues when the changed lines and surrounding context clearly make the code invalid.
+- Do NOT report style or naming issues unless they introduce ambiguity, hide bugs, or violate a stated project guideline.
+- Do NOT mark style findings as "critical" or "high" severity. Style issues are "low" at most.
+- Reserve "critical" and "high" severities for concrete correctness, security, crash, availability, or data-loss problems supported by the changed code.
+- Treat guidelines as secondary evidence, not as a checklist to maximize findings.
+- Do NOT report preference-only suggestions such as compile-time interface assertions, error-string wording, enum/type-alias refactors, broad encapsulation advice, or large API/design rewrites unless the changed code introduces a concrete bug, compatibility risk, or maintenance hazard.
+- Do NOT suggest broad refactors or architectural cleanups when a specific, localized issue is not present in the changed code.
+- Use line numbers relative to file_content.
+
 IMPORTANT: Better to return NO issues than generic, unhelpful comments. Quality over quantity.
 `
+
+func materializeCodeReviewInstruction(instructionOverlay string) string {
+	instructionOverlay = strings.TrimSpace(instructionOverlay)
+	if instructionOverlay == "" {
+		return codeReviewInstruction
+	}
+	return strings.TrimSpace(codeReviewInstruction) + "\n\nREVIEW SKILL PACK:\n" + instructionOverlay
+}
 
 // codeReviewQualityReward evaluates the quality of a code review result.
 func codeReviewQualityReward(inputs map[string]interface{}, outputs map[string]interface{}) float64 {
@@ -320,11 +355,12 @@ func extractReviewMetadata(metadata map[string]interface{}) (*ReviewMetadata, er
 // prepareReviewInputs prepares inputs for the review processor.
 func (p *EnhancedCodeReviewProcessor) prepareReviewInputs(metadata *ReviewMetadata, taskContext map[string]interface{}) map[string]interface{} {
 	inputs := map[string]interface{}{
-		"file_content": metadata.FileContent,
-		"changes":      metadata.Changes,
-		"guidelines":   metadata.Guidelines,
-		"repo_context": metadata.RepoContext,
-		"file_path":    metadata.FilePath,
+		"file_content":  metadata.FileContent,
+		"chunk_context": ChunkReviewContext(),
+		"changes":       metadata.Changes,
+		"guidelines":    metadata.Guidelines,
+		"repo_context":  metadata.RepoContext,
+		"file_path":     metadata.FilePath,
 	}
 
 	// Add any additional context from taskContext

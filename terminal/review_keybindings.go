@@ -22,8 +22,9 @@ const (
 	ReviewActionCycleFocus
 	ReviewActionFilterAll
 	ReviewActionFilterCritical
-	ReviewActionFilterWarning
-	ReviewActionFilterSuggestion
+	ReviewActionFilterHigh
+	ReviewActionFilterMedium
+	ReviewActionFilterLow
 	ReviewActionCycleFilter
 	ReviewActionSearch
 	ReviewActionPost
@@ -79,8 +80,9 @@ func getDefaultReviewBindings() []ReviewKeyBinding {
 
 		{Key: "0", Description: "Show all comments", Action: ReviewActionFilterAll, ShowInHelp: true},
 		{Key: "1", Description: "Filter critical", Action: ReviewActionFilterCritical, ShowInHelp: true},
-		{Key: "2", Description: "Filter warnings", Action: ReviewActionFilterWarning, ShowInHelp: true},
-		{Key: "3", Description: "Filter suggestions", Action: ReviewActionFilterSuggestion, ShowInHelp: true},
+		{Key: "2", Description: "Filter high severity", Action: ReviewActionFilterHigh, ShowInHelp: true},
+		{Key: "3", Description: "Filter medium severity", Action: ReviewActionFilterMedium, ShowInHelp: true},
+		{Key: "4", Description: "Filter low severity", Action: ReviewActionFilterLow, ShowInHelp: true},
 		{Key: "f", Description: "Cycle filter", Action: ReviewActionCycleFilter, ShowInHelp: true},
 		{Key: "/", Description: "Search comments", Action: ReviewActionSearch, ShowInHelp: true},
 
@@ -186,7 +188,7 @@ func (h *ReviewKeyHandler) GetHelpText() string {
 			ReviewActionGoToTop, ReviewActionGoToBottom, ReviewActionPageUp, ReviewActionPageDown,
 			ReviewActionCycleFocus:
 			sections["Navigation"] = append(sections["Navigation"], b)
-		case ReviewActionFilterAll, ReviewActionFilterCritical, ReviewActionFilterWarning, ReviewActionFilterSuggestion,
+		case ReviewActionFilterAll, ReviewActionFilterCritical, ReviewActionFilterHigh, ReviewActionFilterMedium, ReviewActionFilterLow,
 			ReviewActionCycleFilter, ReviewActionSearch:
 			sections["Filtering"] = append(sections["Filtering"], b)
 		case ReviewActionExpand, ReviewActionCollapse, ReviewActionToggleExpand, ReviewActionPost, ReviewActionSkip, ReviewActionResolve:
@@ -233,30 +235,31 @@ func (h *ReviewKeyHandler) RemoveBinding(key string) {
 // GetActionDescription returns the description for an action.
 func GetActionDescription(action ReviewActionType) string {
 	descriptions := map[ReviewActionType]string{
-		ReviewActionNavigateUp:       "Move cursor up",
-		ReviewActionNavigateDown:     "Move cursor down",
-		ReviewActionNavigateLeft:     "Collapse or move left",
-		ReviewActionNavigateRight:    "Expand or move right",
-		ReviewActionExpand:           "Expand selected item",
-		ReviewActionCollapse:         "Collapse or go back",
-		ReviewActionToggleExpand:     "Toggle file expansion",
-		ReviewActionCycleFocus:       "Cycle between panes",
-		ReviewActionFilterAll:        "Show all comments",
-		ReviewActionFilterCritical:   "Show only critical comments",
-		ReviewActionFilterWarning:    "Show only warnings",
-		ReviewActionFilterSuggestion: "Show only suggestions",
-		ReviewActionCycleFilter:      "Cycle through filters",
-		ReviewActionSearch:           "Search in comments",
-		ReviewActionPost:             "Post comments to GitHub",
-		ReviewActionSkip:             "Skip current comment",
-		ReviewActionResolve:          "Mark comment as resolved",
-		ReviewActionGoToTop:          "Go to first item",
-		ReviewActionGoToBottom:       "Go to last item",
-		ReviewActionPageUp:           "Scroll up one page",
-		ReviewActionPageDown:         "Scroll down one page",
-		ReviewActionShowHelp:         "Toggle help panel",
-		ReviewActionShowMetrics:      "Toggle metrics view",
-		ReviewActionQuit:             "Exit the review TUI",
+		ReviewActionNavigateUp:     "Move cursor up",
+		ReviewActionNavigateDown:   "Move cursor down",
+		ReviewActionNavigateLeft:   "Collapse or move left",
+		ReviewActionNavigateRight:  "Expand or move right",
+		ReviewActionExpand:         "Expand selected item",
+		ReviewActionCollapse:       "Collapse or go back",
+		ReviewActionToggleExpand:   "Toggle file expansion",
+		ReviewActionCycleFocus:     "Cycle between panes",
+		ReviewActionFilterAll:      "Show all comments",
+		ReviewActionFilterCritical: "Show only critical comments",
+		ReviewActionFilterHigh:     "Show only high-severity comments",
+		ReviewActionFilterMedium:   "Show only medium-severity comments",
+		ReviewActionFilterLow:      "Show only low-severity comments",
+		ReviewActionCycleFilter:    "Cycle through filters",
+		ReviewActionSearch:         "Search in comments",
+		ReviewActionPost:           "Post comments to GitHub",
+		ReviewActionSkip:           "Skip current comment",
+		ReviewActionResolve:        "Mark comment as resolved",
+		ReviewActionGoToTop:        "Go to first item",
+		ReviewActionGoToBottom:     "Go to last item",
+		ReviewActionPageUp:         "Scroll up one page",
+		ReviewActionPageDown:       "Scroll down one page",
+		ReviewActionShowHelp:       "Toggle help panel",
+		ReviewActionShowMetrics:    "Toggle metrics view",
+		ReviewActionQuit:           "Exit the review TUI",
 	}
 
 	if desc, ok := descriptions[action]; ok {

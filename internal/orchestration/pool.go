@@ -8,7 +8,9 @@ import (
 
 	"github.com/XiaoConstantine/dspy-go/pkg/agents"
 	"github.com/XiaoConstantine/dspy-go/pkg/agents/native"
+	"github.com/XiaoConstantine/dspy-go/pkg/agents/optimize"
 	"github.com/XiaoConstantine/dspy-go/pkg/agents/sessionevent"
+	"github.com/XiaoConstantine/dspy-go/pkg/agents/skills"
 	"github.com/XiaoConstantine/dspy-go/pkg/core"
 	"github.com/XiaoConstantine/dspy-go/pkg/logging"
 	"github.com/XiaoConstantine/maestro/internal/search"
@@ -17,25 +19,33 @@ import (
 )
 
 type AgentPool struct {
-	reviewAgent types.ReviewAgent
-	qaAgent     *QAAgent
-	memory      agents.Memory
-	githubTools types.GitHubInterface
-	config      *ServiceConfig
-	logger      *logging.Logger
-	qaSessionID string
-	qaStore     sessionevent.SessionEventStore
-	qaSessions  *maestrosubagent.SessionManager
+	reviewAgent      types.ReviewAgent
+	qaAgent          *QAAgent
+	memory           agents.Memory
+	githubTools      types.GitHubInterface
+	config           *ServiceConfig
+	logger           *logging.Logger
+	qaSessionID      string
+	qaStore          sessionevent.SessionEventStore
+	qaSessions       *maestrosubagent.SessionManager
+	qaArtifacts      optimize.AgentArtifacts
+	qaSkillStore     skills.Store
+	qaSkillDomain    string
+	qaSkillStorePath string
 
 	mu sync.RWMutex
 }
 
-func NewAgentPool(config *ServiceConfig, memory agents.Memory, githubTools types.GitHubInterface, logger *logging.Logger) *AgentPool {
+func NewAgentPool(config *ServiceConfig, memory agents.Memory, githubTools types.GitHubInterface, logger *logging.Logger, qaArtifacts optimize.AgentArtifacts, qaSkillStore skills.Store, qaSkillDomain, qaSkillStorePath string) *AgentPool {
 	return &AgentPool{
-		config:      config,
-		memory:      memory,
-		githubTools: githubTools,
-		logger:      logger,
+		config:           config,
+		memory:           memory,
+		githubTools:      githubTools,
+		logger:           logger,
+		qaArtifacts:      qaArtifacts,
+		qaSkillStore:     qaSkillStore,
+		qaSkillDomain:    strings.TrimSpace(qaSkillDomain),
+		qaSkillStorePath: strings.TrimSpace(qaSkillStorePath),
 	}
 }
 
@@ -47,7 +57,7 @@ func (p *AgentPool) GetQAAgent(ctx context.Context) (*QAAgent, error) {
 		return p.qaAgent, nil
 	}
 
-	p.qaAgent = NewQAAgent(p.memory, p.logger, p.qaSessions, p.qaStore, p.qaSessionID)
+	p.qaAgent = NewQAAgent(p.memory, p.logger, p.qaSessions, p.qaStore, p.qaSessionID, p.qaArtifacts, p.qaSkillStore, p.qaSkillDomain, p.qaSkillStorePath)
 	return p.qaAgent, nil
 }
 
@@ -91,24 +101,33 @@ func (p *AgentPool) Shutdown(ctx context.Context) {
 }
 
 type QAAgent struct {
-	memory         agents.Memory
-	logger         *logging.Logger
-	sessionManager *maestrosubagent.SessionManager
-	sessionStore   sessionevent.SessionEventStore
-	sessionID      string
-	repoPath       string
-	nativeAgent    *native.Agent
+	memory             agents.Memory
+	logger             *logging.Logger
+	sessionManager     *maestrosubagent.SessionManager
+	sessionStore       sessionevent.SessionEventStore
+	sessionID          string
+	repoPath           string
+	nativeAgent        *native.Agent
+	artifacts          optimize.AgentArtifacts
+	skillStore         skills.Store
+	skillDomain        string
+	skillStorePath     string
+	loadedSkillVersion int
 
-	mu sync.Mutex
+	mu sync.RWMutex
 }
 
-func NewQAAgent(memory agents.Memory, logger *logging.Logger, sessionManager *maestrosubagent.SessionManager, sessionStore sessionevent.SessionEventStore, sessionID string) *QAAgent {
+func NewQAAgent(memory agents.Memory, logger *logging.Logger, sessionManager *maestrosubagent.SessionManager, sessionStore sessionevent.SessionEventStore, sessionID string, artifacts optimize.AgentArtifacts, skillStore skills.Store, skillDomain, skillStorePath string) *QAAgent {
 	return &QAAgent{
 		memory:         memory,
 		logger:         logger,
 		sessionManager: sessionManager,
 		sessionStore:   sessionStore,
 		sessionID:      strings.TrimSpace(sessionID),
+		artifacts:      mergeQAArtifactsWithDefaults(artifacts),
+		skillStore:     skillStore,
+		skillDomain:    strings.TrimSpace(skillDomain),
+		skillStorePath: strings.TrimSpace(skillStorePath),
 	}
 }
 
@@ -119,6 +138,7 @@ func (a *QAAgent) ConfigureSession(sessionManager *maestrosubagent.SessionManage
 	sessionID = strings.TrimSpace(sessionID)
 	if a.sessionID != sessionID {
 		a.nativeAgent = nil
+		a.loadedSkillVersion = 0
 	}
 	a.sessionManager = sessionManager
 	a.sessionStore = sessionStore
@@ -130,7 +150,7 @@ func (a *QAAgent) Ask(ctx context.Context, question, repoPath, owner, repo strin
 	defer a.mu.Unlock()
 	a.logger.Debug(ctx, "QAAgent Ask start: session=%q repo=%q question=%q", a.sessionID, repoPath, question)
 
-	if err := a.ensureNativeAgentLocked(repoPath, owner, repo); err != nil {
+	if err := a.ensureNativeAgentLocked(ctx, repoPath, owner, repo); err != nil {
 		a.logger.Debug(ctx, "QAAgent ensureNativeAgentLocked error: %v", err)
 		return "", 0, nil, fmt.Errorf("failed to create native QA agent: %w", err)
 	}
@@ -155,6 +175,12 @@ func (a *QAAgent) Ask(ctx context.Context, question, repoPath, owner, repo strin
 		return a.askWithLegacyReAct(ctx, question, repoPath, owner, repo)
 	}
 	return "", 0, nil, err
+}
+
+func (a *QAAgent) SkillState() (string, int) {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.skillDomain, a.loadedSkillVersion
 }
 
 func (a *QAAgent) askWithNativeLocked(ctx context.Context, question, owner, repo string) (string, float64, []string, error) {
@@ -226,31 +252,40 @@ func shouldFallbackToLegacyQA(err error) bool {
 	return strings.Contains(text, "statuscode=400") && strings.Contains(text, "gemini-3")
 }
 
-func (a *QAAgent) ensureNativeAgentLocked(repoPath, owner, repo string) error {
+func (a *QAAgent) ensureNativeAgentLocked(ctx context.Context, repoPath, owner, repo string) error {
 	repoPath = strings.TrimSpace(repoPath)
 	if repoPath == "" {
 		return fmt.Errorf("repository path is required")
 	}
 
+	desiredSkillVersion, skillVersionErr := bestPersistedSkillVersion(ctx, a.skillStore, a.skillDomain)
+	if skillVersionErr != nil {
+		a.logger.Warn(ctx, "Failed to check QA persisted skill version for domain %q: %v", a.skillDomain, skillVersionErr)
+	}
+
 	if a.nativeAgent != nil && a.repoPath == repoPath {
-		return nil
+		if skillVersionErr != nil || desiredSkillVersion == a.loadedSkillVersion {
+			return nil
+		}
+		a.logger.Info(ctx, "Reloading QA native agent for updated persisted skill domain=%q old_version=%d new_version=%d", a.skillDomain, a.loadedSkillVersion, desiredSkillVersion)
 	}
 
 	llm := core.GetDefaultLLM()
-	nativeAgent, err := native.NewAgent(llm, native.Config{
-		MaxTurns:                      12,
-		MaxTokens:                     2048,
-		Temperature:                   0.1,
-		SystemPrompt:                  qaNativeSystemPrompt,
-		Memory:                        a.memory,
-		SessionID:                     a.sessionID,
-		SessionEventStore:             a.sessionStore,
-		SessionRecallLimit:            4,
-		SessionRecallMaxChars:         1800,
-		MaxConsecutiveNoCallResponses: 4,
-	})
+	nativeAgent, err := native.NewAgent(llm, buildNativeQAConfig(a.artifacts, a.memory, a.sessionID, a.sessionStore, a.skillStore, a.skillDomain))
 	if err != nil {
 		return err
+	}
+	if skillErr := nativeAgent.GetSkillLoadError(); skillErr != nil {
+		a.logger.Warn(ctx, "QA native agent skill load error for domain %q: %v", a.skillDomain, skillErr)
+	}
+	if loadedSkill := nativeAgent.GetLoadedSkill(); loadedSkill != nil {
+		a.loadedSkillVersion = loadedSkill.Version
+		a.logger.Info(ctx, "QA native agent loaded persisted skill overlay domain=%q version=%d name=%q store=%q over base prompt", a.skillDomain, loadedSkill.Version, loadedSkill.Name, a.skillStorePath)
+	} else {
+		a.loadedSkillVersion = 0
+		if a.skillStore != nil && a.skillDomain != "" {
+			a.logger.Debug(ctx, "QA native agent using base prompt only; no persisted skill found for domain=%q store=%q", a.skillDomain, a.skillStorePath)
+		}
 	}
 
 	for _, tool := range buildNativeQATools(repoPath, owner, repo, a.logger, a.sessionManager, a.sessionStore, a.sessionID) {
@@ -287,4 +322,18 @@ func extractAnswerAndSources(response *search.SearchResponse) (string, []string)
 	}
 
 	return answer, sources
+}
+
+func bestPersistedSkillVersion(ctx context.Context, store skills.Store, domain string) (int, error) {
+	if store == nil || strings.TrimSpace(domain) == "" {
+		return 0, nil
+	}
+	skill, err := store.Best(ctx, strings.TrimSpace(domain))
+	if err != nil {
+		return 0, err
+	}
+	if skill == nil {
+		return 0, nil
+	}
+	return skill.Version, nil
 }
