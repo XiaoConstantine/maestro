@@ -22,6 +22,8 @@ const (
 
 const DefaultReviewSkillDomain = reviewDefaultSkillDomain
 
+const ArtifactFewShotDemos optimize.ArtifactKey = "few_shot_demos"
+
 const defaultReviewOptimizationSeedSkillPack = `Focus on concrete Go code review findings in the changed code.
 
 Prioritize:
@@ -43,6 +45,7 @@ func defaultReviewArtifacts() optimize.AgentArtifacts {
 	return optimize.AgentArtifacts{
 		Text: map[optimize.ArtifactKey]string{
 			optimize.ArtifactSkillPack: "",
+			ArtifactFewShotDemos:       "",
 		},
 		Int:  map[string]int{},
 		Bool: map[string]bool{},
@@ -93,6 +96,13 @@ func resolveReviewArtifactsPath(path string) (string, error) {
 }
 
 func decodeReviewArtifacts(data []byte) (optimize.AgentArtifacts, error) {
+	var header struct {
+		Schema string `json:"schema"`
+	}
+	if err := json.Unmarshal(data, &header); err == nil && strings.TrimSpace(header.Schema) == "dspy-go.optimized-agent-program" {
+		return optimize.AgentArtifacts{}, fmt.Errorf("optimized agent program payload")
+	}
+
 	var direct optimize.AgentArtifacts
 	if err := json.Unmarshal(data, &direct); err == nil && !reviewArtifactsEmpty(direct) {
 		return direct, nil
@@ -104,6 +114,19 @@ func decodeReviewArtifacts(data []byte) (optimize.AgentArtifacts, error) {
 	}
 
 	return optimize.AgentArtifacts{}, fmt.Errorf("unsupported review artifact payload")
+}
+
+func decodeReviewArtifactsProgram(path string) (optimize.AgentArtifacts, error) {
+	program, err := optimize.ReadOptimizedAgentProgram(path)
+	if err != nil {
+		return optimize.AgentArtifacts{}, err
+	}
+
+	agent := NewReviewBenchmarkAgent(nil, nil, defaultReviewArtifacts(), 0)
+	if err := optimize.ApplyOptimizedAgentProgram(agent, program); err != nil {
+		return optimize.AgentArtifacts{}, err
+	}
+	return agent.GetArtifacts(), nil
 }
 
 func LoadConfiguredReviewArtifacts(path string) (optimize.AgentArtifacts, error) {
@@ -122,7 +145,10 @@ func LoadConfiguredReviewArtifacts(path string) (optimize.AgentArtifacts, error)
 
 	artifacts, err := decodeReviewArtifacts(data)
 	if err != nil {
-		return optimize.AgentArtifacts{}, fmt.Errorf("decode review artifacts %q: %w", resolvedPath, err)
+		artifacts, err = decodeReviewArtifactsProgram(resolvedPath)
+		if err != nil {
+			return optimize.AgentArtifacts{}, fmt.Errorf("decode review artifacts %q: %w", resolvedPath, err)
+		}
 	}
 	return mergeReviewArtifactsWithDefaults(artifacts), nil
 }

@@ -110,6 +110,34 @@ func TestValidateModelConfigDefaultsOpenAIBaseURL(t *testing.T) {
 	}
 }
 
+func TestValidateModelConfigSkipsAPIKeyForLocalOpenAI(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "")
+
+	cfg := &ModelConfig{
+		ModelProvider: "openai",
+		ModelName:     "Qwen3.5-9B-MLX-4bit",
+		BaseURL:       "http://127.0.0.1:8081",
+	}
+
+	if err := ValidateModelConfig(cfg); err != nil {
+		t.Fatalf("ValidateModelConfig() error = %v, want nil for local base URL", err)
+	}
+}
+
+func TestValidateModelConfigRequiresAPIKeyForRemoteOpenAI(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "")
+
+	cfg := &ModelConfig{
+		ModelProvider: "openai",
+		ModelName:     "gpt-5.4-mini",
+		BaseURL:       "https://api.openai.com",
+	}
+
+	if err := ValidateModelConfig(cfg); err == nil {
+		t.Fatalf("ValidateModelConfig() error = nil, want API key error for remote base URL")
+	}
+}
+
 func TestProviderConfigFromModelConfigUsesOpenAIEnvBaseURL(t *testing.T) {
 	t.Setenv("OPENAI_BASE_URL", "https://custom.openai.example")
 	t.Setenv("OPENAI_API_KEY", "test-openai-key")
@@ -131,5 +159,24 @@ func TestProviderConfigFromModelConfigUsesOpenAIEnvBaseURL(t *testing.T) {
 	}
 	if got.Endpoint == nil || got.Endpoint.BaseURL != "https://custom.openai.example" {
 		t.Fatalf("ProviderConfigFromModelConfig() Endpoint.BaseURL = %v, want %q", got.Endpoint, "https://custom.openai.example")
+	}
+}
+
+func TestProviderConfigFromModelConfigSetsLongerTimeoutForLocalOpenAI(t *testing.T) {
+	cfg := &ModelConfig{
+		ModelProvider: "openai",
+		ModelName:     "mlx-community/Qwen3.5-9B-OptiQ-4bit",
+		BaseURL:       "http://127.0.0.1:8081",
+	}
+	if err := ValidateModelConfig(cfg); err != nil {
+		t.Fatalf("ValidateModelConfig() error = %v", err)
+	}
+
+	got := ProviderConfigFromModelConfig(cfg)
+	if got.Endpoint == nil {
+		t.Fatalf("ProviderConfigFromModelConfig() Endpoint = nil, want timeout-enabled endpoint")
+	}
+	if got.Endpoint.TimeoutSec != defaultLocalLLMTimeoutSec {
+		t.Fatalf("ProviderConfigFromModelConfig() Endpoint.TimeoutSec = %d, want %d", got.Endpoint.TimeoutSec, defaultLocalLLMTimeoutSec)
 	}
 }

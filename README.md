@@ -1,215 +1,161 @@
 # Maestro - Advanced AI-Powered Code Review Assistant
 
-Maestro is an intelligent code review assistant built with DSPy-Go that provides comprehensive, file-level code analysis for GitHub pull requests. It combines advanced AST parsing, semantic analysis, and LLM-powered reasoning to deliver high-quality, actionable code review feedback.
-
+Maestro is an AI code review and repository analysis assistant built on top of `dspy-go`. It is no longer just a one-shot PR review CLI: the repo now includes a live review path, a repository ask path with RLM-backed long-context support, benchmark-driven optimization commands, and a staged self-evolution loop for reviewer improvement.
 
 ## 🏗️ Architecture Overview
 
-```
-┌─────────────────────────────────────────────────────────────────────────────────┐
-│                              USER INTERFACE                                     │
-│  ┌─────────────────┐  ┌─────────────────────────────┐  ┌─────────────────────┐  │
-│  │    CLI Mode     │  │   TUI v2 (Bubbletea)        │  │    GitHub API       │  │
-│  │                 │  │  ┌─────────────────────────┐│  │                     │  │
-│  │  • Spinner      │  │  │ Vim Keybindings        ││  │  • PR Changes       │  │
-│  │  • Progress     │  │  │ Command Palette        ││  │  • Review Comments  │  │
-│  │  • Prompts      │  │  │ File Tree / TODOs      ││  │  • OAuth2           │  │
-│  │                 │  │  │ Review Display         ││  │                     │  │
-│  └────────┬────────┘  │  └─────────────────────────┘│  └──────────┬──────────┘  │
-│           │           └──────────────┬──────────────┘             │             │
-└───────────┼──────────────────────────┼────────────────────────────┼─────────────┘
-            │                          │                            │
-            ▼                          ▼                            ▼
-┌─────────────────────────────────────────────────────────────────────────────────┐
-│                           MAESTRO SERVICE                                       │
-│               (Singleton - created once per session)                            │
-│                                                                                 │
-│  ┌─────────────────────────────────────────────────────────────────────────┐   │
-│  │                         AgentPool (Persistent)                          │   │
-│  │  ┌─────────────────────┐              ┌─────────────────────────────┐   │   │
-│  │  │   PRReviewAgent     │              │   UnifiedReActAgent (QA)    │   │   │
-│  │  │   (persistent)      │              │   (persistent, shared mem)  │   │   │
-│  │  └─────────────────────┘              └─────────────────────────────┘   │   │
-│  │                                                                          │   │
-│  │  ┌─────────────────────┐              ┌─────────────────────────────┐   │   │
-│  │  │   ClaudeProcessor   │              │   GeminiProcessor           │   │   │
-│  │  │   (Sonnet 4.5)      │              │   (Gemini 3 Pro Preview)    │   │   │
-│  │  └─────────────────────┘              └─────────────────────────────┘   │   │
-│  └─────────────────────────────────────────────────────────────────────────┘   │
-│                                     │                                           │
-│  ┌──────────────────────────────────┴───────────────────────────────────────┐  │
-│  │                      ProcessRequest Router                                │  │
-│  │   /review → ReviewAgent    /ask → QAAgent    /claude    /gemini          │  │
-│  └──────────────────────────────────────────────────────────────────────────┘  │
-└─────────────────────────────────────────────────────────────────────────────────┘
-                                      │
-          ┌───────────────────────────┼───────────────────────────┐
-          ▼                           ▼                           ▼
-┌─────────────────────┐    ┌──────────────────────┐    ┌─────────────────────┐
-│    REVIEW ENGINE    │    │   UNIFIED REACT      │    │   SEARCH ENGINE     │
-│                     │    │      AGENT           │    │                     │
-│ • Chunker           │    │ • Iterative Search   │    │ • Semantic Search   │
-│ • Workflow Chain    │    │ • Tool Selection     │    │ • Hybrid Matching   │
-│ • Parallel Review   │    │ • Context Management │    │ • Code Indexing     │
-│ • 120 Workers       │    │ • Quality Tracking   │    │                     │
-└─────────────────────┘    └──────────────────────┘    └─────────────────────┘
-          │                           │                           │
-          └───────────────────────────┼───────────────────────────┘
-                                      ▼
-┌─────────────────────────────────────────────────────────────────────────────────┐
-│                          INTELLIGENCE LAYER                                     │
-│  ┌────────────────────┐  ┌───────────────────┐  ┌────────────────────────────┐  │
-│  │   Sgrep Search     │  │     RAG Store     │  │   LLM Orchestration        │  │
-│  │                    │  │                   │  │       (DSPy-Go)            │  │
-│  │ • Semantic Search  │  │ • Guidelines      │  │                            │  │
-│  │ • Hybrid Search    │  │ • Code Patterns   │  │  • Anthropic / Gemini      │  │
-│  │ • Code Indexing    │  │ • Similarity      │  │  • Ollama / LLaMA.cpp      │  │
-│  └─────────┬──────────┘  └─────────┬─────────┘  └─────────────┬──────────────┘  │
-└────────────┼───────────────────────┼──────────────────────────┼─────────────────┘
-             │                       │                          │
-             ▼                       ▼                          ▼
-┌─────────────────────────────────────────────────────────────────────────────────┐
-│                             DATA LAYER                                          │
-│  ┌────────────────────────┐  ┌─────────────────────┐  ┌──────────────────────┐  │
-│  │   SQLite + sqlite-vec  │  │  Embedding Router   │  │   Shared Memory      │  │
-│  │                        │  │                     │  │   (Configurable)     │  │
-│  │  • Vector Storage      │  │  • Local (Sgrep)    │  │  • InMemory          │  │
-│  │  • Metadata Index      │  │  • Cloud Fallback   │  │  • SQLite (optional) │  │
-│  │  • Pattern Matching    │  │  • Smart Routing    │  │                      │  │
-│  └────────────────────────┘  └─────────────────────┘  └──────────────────────┘  │
-└─────────────────────────────────────────────────────────────────────────────────┘
+```text
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                               USER INTERFACE                                │
+│                                                                              │
+│  CLI / TUI                                                                  │
+│  • PR review                                                                │
+│  • /ask repository questions                                                │
+│  • optional review artifact + skill-store loading                           │
+└──────────────────────────────────────┬───────────────────────────────────────┘
+                                       │
+                                       ▼
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                              MAESTRO SERVICE                                │
+│                                                                              │
+│  Root CLI + TUI routing                                                     │
+│  • review path                                                              │
+│  • ask / overview path                                                      │
+│  • model and provider wiring                                                │
+│  • ACE + persisted skill integration                                        │
+└───────────────┬───────────────────────────────────────┬──────────────────────┘
+                │                                       │
+                ▼                                       ▼
+┌──────────────────────────────┐         ┌─────────────────────────────────────┐
+│         REVIEW ENGINE         │         │           ASK / OVERVIEW            │
+│                               │         │                                     │
+│  • PRReviewAgent              │         │  • repo ask orchestration           │
+│  • chunked review pipeline    │         │  • RLM-backed overview path         │
+│  • parallel review workers    │         │  • adaptive replay / sub-RLM caps   │
+│  • guideline lookup           │         │                                     │
+└───────────────┬───────────────┘         └──────────────────┬──────────────────┘
+                │                                            │
+                └──────────────────────┬─────────────────────┘
+                                       ▼
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                         PERSISTED RUNTIME STATE                              │
+│                                                                              │
+│  • review artifacts / optimized_program.json                                │
+│  • review skill store                                                       │
+│  • ACE learnings                                                            │
+│  • local Maestro state directories                                          │
+└──────────────────────────────────────────────────────────────────────────────┘
+
+
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                         OFFLINE LEARNING LANE                               │
+│                                                                              │
+│  optimize-review / optimize-qa                                              │
+│  • GEPA benchmark runs                                                      │
+│  • persisted optimized-program artifacts                                    │
+│                                                                              │
+│  evolve-review                                                              │
+│  • search suite -> GEPA search                                              │
+│  • full replay suite -> promotion check                                     │
+│  • protected suite -> generalization gate                                   │
+│  • publish current reviewer on success                                      │
+└──────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ## 🎯 Core Features
 
 ### **Advanced Context Analysis**
-- **AST-Based Parsing**: Deep Go code structure analysis including packages, imports, types, and functions
-- **File-Level Context**: Comprehensive understanding of code relationships and dependencies  
-- **Semantic Purpose Detection**: Automatic identification of code chunk functionality
-- **Enhanced Chunk Metadata**: Rich context with 15+ lines of surrounding code
+- **Chunked Review Pipeline**: Maestro reviews changed code in chunked passes with line-grounded findings.
+- **Guideline Integration**: review runs can use cached guidelines and repository-aware context.
+- **Artifact-Aware Runtime**: live review runs can load tuned review artifacts and persisted skill stores.
+- **Repository Ask Support**: Maestro can answer codebase questions in addition to reviewing PRs.
 
 ### **Intelligent Review Pipeline**
-- **Multi-Stage Processing**: Context preparation → Analysis → Validation → Aggregation
-- **File-Level Aggregation**: Groups related issues by file with intelligent deduplication
-- **Advanced Debugging**: Comprehensive logging and performance metrics
-- **Configurable Processing**: Environment variables for fine-tuning behavior
+- **Specialized PR Review Agent**: Maestro uses a dedicated Go review path rather than a generic chat wrapper.
+- **Parallel Review Execution**: chunk evaluation runs concurrently for throughput on larger PRs.
+- **Review Filtering and Verification**: the review path includes post-processing to suppress weak or off-target comments.
+- **Benchmark-Driven Optimization**: the review benchmark and evaluator can drive GEPA tuning offline.
 
 ### **GitHub Integration**
-- **Seamless PR Workflow**: Direct integration with GitHub pull request comments
-- **Bulk Processing**: Efficient handling of large PRs with parallel processing
-- **Real-time Feedback**: Live processing status and progress indicators
+- **Direct PR Review**: review GitHub pull requests from the CLI or TUI.
+- **Existing Comment Awareness**: Maestro processes prior PR comment context during review runs.
+- **Token Verification**: the root CLI verifies GitHub permissions before operating.
 
 ### **Terminal UI (TUI v2)**
-- **Modern Framework**: Built on Bubbletea v2 + Lipgloss v2 with real-time updates
-- **Vim-Style Navigation**: Full Vim keybindings with Normal, Insert, Visual, Command, and Search modes
-- **Multi-Mode Interface**: Input mode, Review mode, and Dashboard mode
-- **Fuzzy Command Palette**: Quick command access with autocomplete and history
-- **PR Review Display**: Inline comments grouped by file with severity-based color coding
-- **File Tree Explorer**: Navigate repository with expand/collapse and filtering
-- **Task Tracking**: Built-in TODO list for agent planning visibility
-- **Split-Pane Layout**: IDE-like interface with configurable panels
+- **Interactive Mode**: the root command still launches the modern interactive interface when no PR is provided.
+- **Slash-Command Workflow**: Maestro supports review and ask-style interaction patterns.
+- **Shared Runtime Wiring**: the same service layer backs both direct CLI review and interactive usage.
 
 ### **Semantic Code Search (Sgrep)**
-- **Semantic Understanding**: Search code by meaning, not just keywords
-- **Hybrid Search**: Combine semantic + keyword matching for precise results
-- **Embedding Provider**: Local embeddings via nomic-embed-text model (768 dimensions)
-- **Guideline Discovery**: Semantic search for code guidelines and patterns
-- **Agent Integration**: Available as a tool for ReAct agents during reasoning
+- **Search Tooling**: Maestro has an sgrep-backed search path and test coverage around its runtime environment wiring.
+- **Guideline / Context Lookup**: the review engine can incorporate indexed repository guidance.
+- **RLM Companion Role**: semantic lookup complements the long-context overview lane.
 
 ### **Unified Agent Architecture**
-- **MaestroService**: Singleton service created once per session for unified request handling
-- **Persistent Agents**: Agent pool maintains persistent agents across requests (no ad-hoc creation)
-- **Shared Memory**: Configurable memory backend (InMemory or SQLite) shared across agents
-- **Request Routing**: Single entry point (`ProcessRequest`) routes `/review`, `/ask`, `/claude`, and `/gemini` commands
-- **Multi-Model Subagents**: Claude (Sonnet 4.5) and Gemini (3 Pro Preview) available as subagents with file-based context sharing
+- **Single Root CLI**: [`main.go`](./main.go) is still the normal entry point.
+- **Live Review + Ask + Offline Tuning**: Maestro now spans serving and offline learning in one repo.
+- **Persisted Reviewer Consumption**: the live review path can load a reviewer produced by `optimize-review` or `evolve-review`.
 
 ### **Flexible Model Support**
-- **Multiple Backends**: Anthropic Claude, Google Gemini, Local models (Ollama, LLaMA.cpp)
-- **Unified Embedding**: Consistent vector representations for code and guidelines
-- **Performance Optimization**: Intelligent model selection and caching
+- **`dspy-go` Model Abstraction**: Maestro uses the same provider/model abstraction layer as `dspy-go`.
+- **Primary + Teacher Model Support**: optimization commands support separate student and teacher models.
+- **Deterministic Eval Support**: the evolution lane can force evaluation temperature to `0` for stability.
 
 ## 🛠️ Enhanced Technical Capabilities
 
 ### **Review Dimensions**
-- **Code Defects**: Logic flaws, error handling issues, resource management
-- **Security Vulnerabilities**: Injection attacks, insecure data handling, authentication issues
-- **Maintainability**: Code organization, documentation, naming conventions, complexity
-- **Performance**: Algorithmic efficiency, data structures, resource utilization
+- **Correctness-first Review**: Maestro is currently tuned toward concrete, actionable Go findings.
+- **Behavior / API Regression Awareness**: the current review seed explicitly includes API contract and behavior regressions.
+- **Negative-case Suppression**: the benchmark/evaluator penalizes low-value or noisy comments.
 
 ### **Advanced Features**
-- **Vector-Based Similarity**: SQLite with sqlite-vec for efficient code pattern matching
-- **Deduplication Engine**: Levenshtein distance-based issue consolidation
-- **Context Extraction**: Go AST parsing with semantic analysis
-- **Background Indexing**: Non-blocking repository analysis
-- **Parallel Processing**: Concurrent chunk analysis for performance
+- **Persisted Optimized Programs**: review and QA optimization now use the `dspy-go.optimized-agent-program` envelope.
+- **Forward-Compatible Restore**: obsolete target IDs in saved optimized programs are skipped on restore.
+- **Staged Self-Evolution**: `evolve-review` separates cheaper GEPA search from full replay validation.
+- **Promotion Gates**: main replay regression tolerance and protected-suite regression tolerance are both supported.
+- **Retention + Circuit Breaker**: the evolution runner can prune historical runs and stop after repeated failures.
 
 ## 📦 Getting Started
 
 ### **Prerequisites**
-- Go 1.24.2 or higher
-- SQLite with sqlite-vec extension
-- GitHub API access token
-- Supported LLM backend (Claude, Gemini, or local model)
-- For local models: llama.cpp installed (can be automated with `make setup`)
+- Go 1.24+
+- GitHub token with PR access
+- a supported model backend configured through `dspy-go`
 
 ### **Installation**
 
 ```bash
-# Clone the repository
 git clone https://github.com/XiaoConstantine/maestro.git
 cd maestro
-
-# Install dependencies
 go mod download
-
-# Build the binary
-go build -o maestro
-
-# Set up GitHub token
-export MAESTRO_GITHUB_TOKEN=your_github_token
+go build ./...
 ```
 
 ### **Local Model Setup (Optional)**
 
-For using local LLM models with llama.cpp:
-
-```bash
-# One-time setup: Install llama.cpp and download models
-# Creates ~/.maestro/models and downloads:
-# - nomic-embed-text-v1.5.Q8_0.gguf (embedding model)
-# - Qwen3-1.7B-Q8_0.gguf (inference model)
-make setup
-
-# Start both llama servers in separate tmux sessions
-# Embedding server runs on port 8080
-# LLM server runs on port 8081
-make local
-
-# View server logs
-tmux attach -t embedding  # Embedding server logs
-tmux attach -t llm        # LLM server logs
-```
+Maestro still supports local or custom model endpoints through the shared `dspy-go` provider layer. For example, local OpenAI-compatible endpoints can be used through `--model`, `--provider`, and `--base-url`.
 
 ### **Quick Start**
 
 ```bash
-# Launch TUI (default when no PR specified)
-./maestro
+# Launch interactive mode
+go run .
 
-# Or explicitly with interactive flag
-./maestro -i
+# Review a PR directly
+go run . \
+  --owner XiaoConstantine \
+  --repo dspy-go \
+  --pr 291 \
+  --model google:gemini-2.5-flash
 
-# Direct CLI usage for a specific PR
-./maestro --owner=username --repo=repository --pr=123
-
-# In TUI mode, use slash commands:
-maestro> /review 123          # Review PR #123
-maestro> /ask how does auth work?  # Ask about the codebase
-
-# With enhanced debugging
-export MAESTRO_LOG_LEVEL=debug
-export MAESTRO_RAG_DEBUG_ENABLED=true
-./maestro --owner=username --repo=repository --pr=123 --verbose
+# Review with a tuned reviewer
+go run . \
+  --owner XiaoConstantine \
+  --repo dspy-go \
+  --pr 291 \
+  --model google:gemini-2.5-flash \
+  --review-artifacts ~/.maestro/evolution/review/rsc/current/optimized_program.json \
+  --review-skill-store ~/.maestro/evolution/review/rsc/skills.json
 ```
 
 ## ⚙️ Configuration
@@ -218,157 +164,128 @@ export MAESTRO_RAG_DEBUG_ENABLED=true
 
 #### **Core Configuration**
 ```bash
-MAESTRO_GITHUB_TOKEN=your_token          # GitHub API access
-MAESTRO_LOG_LEVEL=debug                  # Logging level (debug, info, warn, error)
-ANTHROPIC_API_KEY=your_key               # For /claude subagent (Claude Sonnet 4.5)
-GOOGLE_API_KEY=your_key                  # For /gemini subagent (Gemini 3 Pro Preview)
+MAESTRO_GITHUB_TOKEN=your_token
+ANTHROPIC_API_KEY=your_key
+GOOGLE_API_KEY=your_key
+MAESTRO_REVIEW_ARTIFACTS=/path/to/optimized_program.json
+MAESTRO_REVIEW_SKILL_STORE=/path/to/skills.json
+MAESTRO_REVIEW_SKILL_DOMAIN=maestro:review:go
+MAESTRO_RLM_OVERVIEW_SKILL_STORE=/path/to/rlm_skills.json
 ```
 
-#### **Enhanced Processing (Phase 4.1)**
+#### **Enhanced Processing**
 ```bash
-# File-level aggregation
-MAESTRO_FILE_AGGREGATION_ENABLED=true    # Enable file-level result aggregation
-MAESTRO_DEDUPLICATION_THRESHOLD=0.8      # Issue similarity threshold (0.0-1.0)
-
-# AST Context extraction  
-MAESTRO_CONTEXT_EXTRACTION_ENABLED=true  # Enable AST-based context extraction
-MAESTRO_CHUNK_CONTEXT_LINES=15          # Lines of context around chunks
-MAESTRO_ENABLE_SEMANTIC_CONTEXT=true     # Enable semantic purpose detection
-MAESTRO_ENABLE_DEPENDENCY_ANALYSIS=true  # Enable dependency tracking
-
-# Advanced debugging
-MAESTRO_RAG_DEBUG_ENABLED=true           # RAG retrieval debugging
-MAESTRO_LLM_RESPONSE_DEBUG=true          # LLM response debugging  
-MAESTRO_SIMILARITY_LOGGING=true          # Similarity score logging
+MAESTRO_LOG_LEVEL=debug
+MAESTRO_RAG_DEBUG_ENABLED=true
+MAESTRO_REVIEW_ARTIFACTS=/path/to/review_optimized_program.json
 ```
 
 #### **Sgrep / Local Embeddings**
-```bash
-MAESTRO_LOCAL_EMBEDDING_ENABLED=true     # Enable local embeddings
-MAESTRO_LOCAL_EMBEDDING_PROVIDER=sgrep   # Provider: sgrep, ollama, llamacpp
-MAESTRO_LOCAL_EMBEDDING_MODEL=nomic-embed-text  # Embedding model (768 dims for sgrep)
-```
+Maestro still supports local search/indexing flows, and the repo includes sgrep-related tests and review engine integration. Exact provider wiring depends on your local environment and `dspy-go` model configuration.
 
 #### **Feature Toggles**
-```bash
-MAESTRO_ENHANCED_REASONING=true          # Enhanced reasoning capabilities
-MAESTRO_COMMENT_REFINEMENT=true          # Comment refinement processing
-MAESTRO_CONSENSUS_VALIDATION=true        # Consensus validation
-```
+The repo still contains ACE and RLM-related runtime wiring, but the most important operational knobs now live in the review/evolution commands themselves rather than only in environment flags.
 
 ### **Command Line Options**
-- `--github-token`: GitHub personal access token
-- `--owner`: Repository owner
-- `--repo`: Repository name
-- `--pr`: Pull request number to review
-- `--model`: LLM backend selection
-- `--index-workers`: Concurrent indexing workers
-- `--review-workers`: Concurrent review workers
-- `--verbose`: Enable detailed logging
-- `-i, --interactive`: Launch TUI (also default when no PR specified)
+- Root CLI:
+  - `--owner`
+  - `--repo`
+  - `--pr`
+  - `--model`
+  - `--github-token`
+  - `--review-artifacts`
+  - `--review-skill-store`
+  - `--review-skill-domain`
 
-### **TUI Commands**
-- `/help`: Show available commands
-- `/review <pr>`: Review a pull request
-- `/ask <question>`: Ask questions about the repository (uses ReAct agent)
-- `/claude <prompt>`: Send prompt to Claude Sonnet 4.5 subagent
-- `/gemini <prompt>`: Send prompt to Gemini 3 Pro Preview subagent
-- `/clear`: Clear conversation history
-- `/exit`, `/quit`: Exit the TUI
+- `cmd/optimize-review`:
+  - `--suite`
+  - `--artifact`
+  - `--teacher-model`
+  - `--population`
+  - `--generations`
+  - `--validation-frequency`
+  - `--max-metric-calls`
+  - `--max-runtime`
 
-### **TUI Keybindings**
-
-#### **Normal Mode**
-| Key | Action |
-|-----|--------|
-| `h/j/k/l` or arrows | Navigate |
-| `i` | Enter Insert mode |
-| `v` | Enter Visual mode |
-| `:` | Enter Command mode |
-| `/` | Enter Search mode |
-| `g` / `G` | Jump to top / bottom |
-| `ctrl+u` / `ctrl+d` | Page up / down |
-| `tab` | Cycle focus between panes |
-| `ctrl+b` | Toggle file tree |
-| `ctrl+t` | Toggle TODO panel |
-| `enter` | Select / expand item |
-| `space` | Expand/collapse in file tree |
-| `x` | Mark TODO complete |
-| `q` / `ctrl+c` | Quit |
-
-#### **Review Mode**
-| Key | Action |
-|-----|--------|
-| `j/k` | Navigate comments |
-| `space` | Expand/collapse file groups |
-| `enter` / `l` | Toggle detail view |
-| `h` | Close detail view |
-| `tab` | Switch to input |
-| `esc` | Clear review results |
+- `cmd/evolve-review`:
+  - `--state-dir`
+  - `--suite`
+  - `--search-suite`
+  - `--protected-suite`
+  - `--regression-tolerance`
+  - `--protected-regression-tolerance`
+  - `--max-runtime`
 
 ### **Model Selection**
 
 ```bash
-# Use local LLaMA.cpp
-./maestro --model="llamacpp:" --pr=123
+# Gemini
+go run . --model google:gemini-2.5-flash --owner XiaoConstantine --repo dspy-go --pr 291
 
-# Use Ollama with specific model
-./maestro --model="ollama:codellama" --pr=123
+# OpenAI-compatible local endpoint
+go run . --model openai:Qwen3.5-9B-OptiQ-4bit --base-url http://127.0.0.1:8081 --owner XiaoConstantine --repo dspy-go --pr 291
 
-# Use Anthropic Claude
-./maestro --model="anthropic:claude-3-sonnet" --api-key=your_key --pr=123
-
-# Use Google Gemini
-./maestro --model="google:gemini-pro" --api-key=your_key --pr=123
+# Optimize review with a separate teacher model
+go run ./cmd/optimize-review \
+  --suite ~/.maestro/review/corpora/rsc-golang-org/review_go_suite.json \
+  --model google:gemini-2.5-flash \
+  --teacher-model google:gemini-2.5-pro
 ```
 
 ## 📊 Performance & Metrics
 
 ### **Current Scale**
-- **Codebase**: 27,000+ lines across 17 internal packages
-- **Dependencies**: DSPy-Go v0.66.0, SQLite-vec, GitHub API v68
-- **Processing**: Handles 300+ chunks per PR with file-level aggregation
-- **Performance**: ~500ms average per chunk with parallel processing
+- **Live Review**: operational on real PRs through the root CLI.
+- **Offline Optimization**: review and QA optimization commands now persist optimized programs.
+- **Evolution Runner**: the staged `evolve-review` loop can now complete end to end and publish a reviewer.
 
 ### **Recent Improvements**
-- **Multi-Model Subagents**: `/claude` (Sonnet 4.5) and `/gemini` (Gemini 3 Pro Preview) commands with file-based context sharing
-- **Unified Architecture**: MaestroService singleton with persistent AgentPool
-- **TUI v2**: Modern Bubbletea v2 interface with Vim keybindings and multi-mode support
-- **Sgrep Integration**: Semantic code search for intelligent code understanding
-- **Shared Memory**: Configurable memory backend for cross-request context
-- **File Aggregation**: 371 chunks → 21 files (proper grouping)
-- **Context Enhancement**: 5 → 15+ lines of chunk context
-- **Debug Visibility**: Comprehensive RAG and processing metrics
-- **Lint Compliance**: Zero golangci-lint issues
+- **Optimized-program restore**: Maestro consumes the newer `dspy-go` optimized-program envelope.
+- **Structured RLM replay alignment**: the RLM overview lane is aligned with the newer adaptive replay / sub-RLM controls.
+- **Deterministic evaluation**: evolution runs can set evaluation temperature to `0`.
+- **Staged search**: GEPA breadth is no longer forced to collapse just to keep full replay affordable.
+- **Protected gating**: protected-suite replay is deferred and gated separately from the main lane.
 
 ## 🔬 Advanced Usage
 
 ### **Debug Mode**
 ```bash
-# Full debug mode with all logging enabled
-export MAESTRO_LOG_LEVEL=debug
-export MAESTRO_RAG_DEBUG_ENABLED=true
-export MAESTRO_LLM_RESPONSE_DEBUG=true
-export MAESTRO_SIMILARITY_LOGGING=true
-export MAESTRO_CONTEXT_EXTRACTION_ENABLED=true
-
-./maestro --owner=user --repo=project --pr=123 --verbose
+go run . \
+  --owner XiaoConstantine \
+  --repo dspy-go \
+  --pr 291 \
+  --model google:gemini-2.5-flash \
+  --verbose
 ```
 
 ### **Performance Tuning**
 ```bash
-# Optimize for speed
-export MAESTRO_CHUNK_CONTEXT_LINES=10
-export MAESTRO_DEDUPLICATION_THRESHOLD=0.9
+# One-off benchmark optimization
+go run ./cmd/optimize-review \
+  --suite ~/.maestro/review/corpora/rsc-golang-org/review_go_suite.json \
+  --population 4 \
+  --generations 2 \
+  --max-metric-calls 20
 
-# Optimize for accuracy  
-export MAESTRO_CHUNK_CONTEXT_LINES=20
-export MAESTRO_DEDUPLICATION_THRESHOLD=0.7
-export MAESTRO_ENABLE_DEPENDENCY_ANALYSIS=true
+# Staged self-evolution
+go run ./cmd/evolve-review \
+  --state-dir ~/.maestro/evolution/review/rsc \
+  --search-suite ~/.maestro/review/corpora/rsc-golang-org/review_go_train_70_30.json \
+  --suite ~/.maestro/review/corpora/rsc-golang-org/review_go_suite.json \
+  --protected-suite ~/.maestro/review/corpora/mdempsky-google-com/review_go_suite.json \
+  --eval-temperature 0 \
+  --regression-tolerance 0.015 \
+  --protected-regression-tolerance 0.04 \
+  --population 8 \
+  --generations 4
 ```
+
+### **Current Caveats**
+- The self-evolution control plane works.
+- Review-quality gains are still corpus-sensitive.
+- The first successful promotion proved the pipeline, not final reviewer quality.
+- Benchmark wins and live PR-review wins are related, but not interchangeable.
 
 ## 📄 License
 
 Maestro is released under the MIT License. See the [LICENSE](LICENSE) file for details.
-
----

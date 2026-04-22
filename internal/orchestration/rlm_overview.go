@@ -27,6 +27,9 @@ const (
 	rlmOverviewModuleMaxChars      = 8000
 	rlmOverviewPackageMaxChars     = 1800
 	rlmOverviewVerificationLimit   = 1
+	rlmOverviewAdaptiveThreshold   = 5
+	rlmOverviewMaxDirectSubRLM     = 2
+	rlmOverviewMaxTotalSubRLM      = 6
 	rlmOverviewVerifyEnvVar        = "MAESTRO_RLM_OVERVIEW_VERIFY"
 	askStrategyEnvVar              = "MAESTRO_FORCE_ASK_STRATEGY"
 )
@@ -240,11 +243,14 @@ func (s *MaestroService) handleRLMOverview(ctx context.Context, question, repoPa
 		modrlm.WithMaxIterations(rlmOverviewMaxIterations),
 		modrlm.WithMaxTokens(rlmOverviewMaxTokens),
 		modrlm.WithTimeout(rlmOverviewTimeout),
-		modrlm.WithHistoryCompression(2, 400),
+		modrlm.WithContextPolicyPreset(modrlm.ContextPolicyAdaptive),
+		modrlm.WithAdaptiveCheckpointThreshold(rlmOverviewAdaptiveThreshold),
 		modrlm.WithAdaptiveIteration(),
 		modrlm.WithSubRLMConfig(modrlm.SubRLMConfig{
 			MaxDepth:               2,
 			MaxIterationsPerSubRLM: 2,
+			MaxDirectSubRLMCalls:   rlmOverviewMaxDirectSubRLM,
+			MaxTotalSubRLMCalls:    rlmOverviewMaxTotalSubRLM,
 		}),
 		modrlm.WithOutputTruncationConfig(modrlm.OutputTruncationConfig{
 			Enabled:            true,

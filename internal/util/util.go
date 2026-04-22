@@ -9,6 +9,7 @@ import (
 	"encoding/xml"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -28,7 +29,10 @@ type ModelConfig struct {
 	BaseURL       string
 }
 
-const defaultOpenAIBaseURL = "https://us.api.openai.com"
+const (
+	defaultOpenAIBaseURL      = "https://us.api.openai.com"
+	defaultLocalLLMTimeoutSec = 300
+)
 
 func normalizeModelName(provider, name string) string {
 	provider = strings.TrimSpace(provider)
@@ -98,6 +102,19 @@ func registryProviderName(provider string) string {
 	return provider
 }
 
+func isLocalBaseURL(baseURL string) bool {
+	baseURL = strings.TrimSpace(baseURL)
+	if baseURL == "" {
+		return false
+	}
+	parsed, err := url.Parse(baseURL)
+	if err != nil {
+		return false
+	}
+	host := strings.ToLower(parsed.Hostname())
+	return host == "localhost" || host == "127.0.0.1" || host == "::1" || host == "0.0.0.0"
+}
+
 func resolveProviderBaseURL(cfg *ModelConfig) string {
 	if cfg == nil {
 		return ""
@@ -119,6 +136,23 @@ func resolveProviderBaseURL(cfg *ModelConfig) string {
 	}
 }
 
+func resolveProviderTimeoutSec(cfg *ModelConfig) int {
+	if cfg == nil {
+		return 0
+	}
+
+	if !isLocalBaseURL(resolveProviderBaseURL(cfg)) {
+		return 0
+	}
+
+	switch registryProviderName(cfg.ModelProvider) {
+	case "openai":
+		return defaultLocalLLMTimeoutSec
+	default:
+		return 0
+	}
+}
+
 // ValidateModelConfig validates the model configuration.
 func ValidateModelConfig(cfg *ModelConfig) error {
 	cfg.ModelProvider = strings.TrimSpace(cfg.ModelProvider)
@@ -127,11 +161,13 @@ func ValidateModelConfig(cfg *ModelConfig) error {
 
 	if cfg.ModelProvider == "anthropic" || cfg.ModelProvider == "google" || cfg.ModelProvider == "openai" {
 		key, err := CheckProviderAPIKey(cfg.ModelProvider, cfg.APIKey)
-		if err != nil {
+		if err != nil && !isLocalBaseURL(cfg.BaseURL) {
 			return err
 		}
 		// Update the config with the key from environment if one was found
-		cfg.APIKey = key
+		if key != "" {
+			cfg.APIKey = key
+		}
 	}
 	// Validate provider
 	switch cfg.ModelProvider {
@@ -144,7 +180,7 @@ func ValidateModelConfig(cfg *ModelConfig) error {
 	// Validate provider-specific configurations
 	switch cfg.ModelProvider {
 	case "anthropic", "google", "openai":
-		if cfg.APIKey == "" {
+		if cfg.APIKey == "" && !isLocalBaseURL(cfg.BaseURL) {
 			return fmt.Errorf("API key required for external providers like anthropic, google, openai")
 		}
 	case "ollama":
@@ -170,6 +206,9 @@ func ProviderConfigFromModelConfig(cfg *ModelConfig) core.ProviderConfig {
 	if baseURL := resolveProviderBaseURL(cfg); baseURL != "" {
 		providerCfg.BaseURL = baseURL
 		providerCfg.Endpoint = &core.EndpointConfig{BaseURL: baseURL}
+		if timeoutSec := resolveProviderTimeoutSec(cfg); timeoutSec > 0 {
+			providerCfg.Endpoint.TimeoutSec = timeoutSec
+		}
 	}
 
 	return providerCfg

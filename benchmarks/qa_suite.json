@@ -1,0 +1,176 @@
+{
+  "cases": [
+    {
+      "id": "maestro-overview",
+      "repo_path": "..",
+      "owner": "XiaoConstantine",
+      "repo": "maestro",
+      "question": "How is this repository organized at a high level?",
+      "expected_facts": ["internal/orchestration", "internal/review", "terminal"]
+    },
+    {
+      "id": "maestro-tui-service-adapter",
+      "repo_path": "..",
+      "owner": "XiaoConstantine",
+      "repo": "maestro",
+      "question": "Where is TUIServiceAdapter defined?",
+      "expected_facts": ["main.go", "TUIServiceAdapter"]
+    },
+    {
+      "id": "maestro-handle-ask",
+      "repo_path": "..",
+      "owner": "XiaoConstantine",
+      "repo": "maestro",
+      "question": "Which function handles /ask requests in the orchestration service?",
+      "expected_facts": ["internal/orchestration/service.go", "handleAsk"]
+    },
+    {
+      "id": "maestro-qa-benchmark-agent",
+      "repo_path": "..",
+      "owner": "XiaoConstantine",
+      "repo": "maestro",
+      "question": "Where is QABenchmarkAgent defined?",
+      "expected_facts": ["internal/orchestration/qa_benchmark.go", "QABenchmarkAgent"]
+    },
+    {
+      "id": "maestro-qa-skill-reload",
+      "repo_path": "..",
+      "owner": "XiaoConstantine",
+      "repo": "maestro",
+      "question": "How does Maestro hot-reload persisted QA skills?",
+      "expected_facts": ["internal/orchestration/pool.go", "ensureNativeAgentLocked", "bestPersistedSkillVersion"]
+    },
+    {
+      "id": "maestro-rlm-overview",
+      "repo_path": "..",
+      "owner": "XiaoConstantine",
+      "repo": "maestro",
+      "question": "Which file implements the RLM overview ask path?",
+      "expected_facts": ["internal/orchestration/rlm_overview.go", "handleRLMOverview"]
+    },
+    {
+      "id": "maestro-review-postprocess",
+      "repo_path": "..",
+      "owner": "XiaoConstantine",
+      "repo": "maestro",
+      "question": "Where are review finding merge and dedupe heuristics implemented?",
+      "expected_facts": ["internal/review/postprocess.go", "postProcessReviewComments"]
+    },
+    {
+      "id": "maestro-review-verifier",
+      "repo_path": "..",
+      "owner": "XiaoConstantine",
+      "repo": "maestro",
+      "question": "Which file implements the review verifier pass?",
+      "expected_facts": ["internal/review/verifier.go", "verifyReviewComments"]
+    },
+    {
+      "id": "maestro-session-store",
+      "repo_path": "..",
+      "owner": "XiaoConstantine",
+      "repo": "maestro",
+      "question": "Where is the SQLite session store for subagents implemented?",
+      "expected_facts": ["internal/subagent/sqlite_store.go", "NewSQLiteSessionStore"]
+    },
+    {
+      "id": "maestro-no-router-workflow",
+      "repo_path": "..",
+      "owner": "XiaoConstantine",
+      "repo": "maestro",
+      "question": "Which file defines RouterWorkflow in this repository?",
+      "expected_facts": [],
+      "forbidden_facts": ["pkg/agents/workflows/router.go", "dspy-go"]
+    },
+    {
+      "id": "maestro-no-gepa-optimizer",
+      "repo_path": "..",
+      "owner": "XiaoConstantine",
+      "repo": "maestro",
+      "question": "Where is NewGEPAAgentOptimizer defined in this repository?",
+      "expected_facts": [],
+      "forbidden_facts": ["pkg/agents/optimize/gepa_adapter.go", "dspy-go"]
+    },
+    {
+      "id": "dspy-overview",
+      "repo_path": "../../dspy-go",
+      "owner": "XiaoConstantine",
+      "repo": "dspy-go",
+      "question": "How is this repository organized at a high level?",
+      "expected_facts": ["pkg/agents", "pkg/modules", "pkg/llms"]
+    },
+    {
+      "id": "dspy-complete-with-trace",
+      "repo_path": "../../dspy-go",
+      "owner": "XiaoConstantine",
+      "repo": "dspy-go",
+      "question": "Where is CompleteWithTrace defined?",
+      "expected_facts": ["pkg/modules/rlm/rlm.go", "CompleteWithTrace"]
+    },
+    {
+      "id": "dspy-gepa-optimizer",
+      "repo_path": "../../dspy-go",
+      "owner": "XiaoConstantine",
+      "repo": "dspy-go",
+      "question": "Where is NewGEPAAgentOptimizer defined?",
+      "expected_facts": ["pkg/agents/optimize/gepa_adapter.go", "NewGEPAAgentOptimizer"]
+    },
+    {
+      "id": "dspy-native-config",
+      "repo_path": "../../dspy-go",
+      "owner": "XiaoConstantine",
+      "repo": "dspy-go",
+      "question": "Which file defines the native agent Config struct?",
+      "expected_facts": ["pkg/agents/native/agent.go", "type Config"]
+    },
+    {
+      "id": "dspy-skill-store",
+      "repo_path": "../../dspy-go",
+      "owner": "XiaoConstantine",
+      "repo": "dspy-go",
+      "question": "Which package provides versioned skill storage?",
+      "expected_facts": ["pkg/agents/skills/store.go", "FileStore", "MemoryStore"]
+    },
+    {
+      "id": "dspy-skill-injector",
+      "repo_path": "../../dspy-go",
+      "owner": "XiaoConstantine",
+      "repo": "dspy-go",
+      "question": "Where is InjectBest implemented for persisted skills?",
+      "expected_facts": ["pkg/agents/skills/injector.go", "InjectBest"]
+    },
+    {
+      "id": "dspy-native-skill-load",
+      "repo_path": "../../dspy-go",
+      "owner": "XiaoConstantine",
+      "repo": "dspy-go",
+      "question": "How does native.Agent load persisted skills?",
+      "expected_facts": ["pkg/agents/native/agent.go", "SkillStore", "SkillDomain"]
+    },
+    {
+      "id": "dspy-router-workflow",
+      "repo_path": "../../dspy-go",
+      "owner": "XiaoConstantine",
+      "repo": "dspy-go",
+      "question": "Which file defines RouterWorkflow?",
+      "expected_facts": ["pkg/agents/workflows/router.go", "RouterWorkflow"]
+    },
+    {
+      "id": "dspy-no-tui-service-adapter",
+      "repo_path": "../../dspy-go",
+      "owner": "XiaoConstantine",
+      "repo": "dspy-go",
+      "question": "Where is TUIServiceAdapter defined in this repository?",
+      "expected_facts": [],
+      "forbidden_facts": ["main.go", "maestro"]
+    },
+    {
+      "id": "dspy-no-review-postprocess",
+      "repo_path": "../../dspy-go",
+      "owner": "XiaoConstantine",
+      "repo": "dspy-go",
+      "question": "Which file implements postProcessReviewComments in this repository?",
+      "expected_facts": [],
+      "forbidden_facts": ["internal/review/postprocess.go", "maestro"]
+    }
+  ]
+}
