@@ -670,9 +670,7 @@ func formatFileMatches(matches []string) string {
 
 	limit := min(len(matches), 20)
 	lines := make([]string, 0, limit+1)
-	for _, match := range matches[:limit] {
-		lines = append(lines, match)
-	}
+	lines = append(lines, matches[:limit]...)
 	if len(matches) > limit {
 		lines = append(lines, fmt.Sprintf("... and %d more", len(matches)-limit))
 	}

@@ -811,7 +811,7 @@ func buildSizeBasedPseudoDescription(filePath string, startLine, endLine int, co
 	var b strings.Builder
 	b.WriteString("Go code from ")
 	b.WriteString(baseName)
-	b.WriteString(fmt.Sprintf(" (lines %d-%d)", startLine, endLine))
+	_, _ = fmt.Fprintf(&b, " (lines %d-%d)", startLine, endLine)
 
 	if len(hints) > 0 {
 		b.WriteString(". Contains: ")

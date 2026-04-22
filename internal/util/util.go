@@ -194,13 +194,13 @@ func ValidateModelConfig(cfg *ModelConfig) error {
 
 // ProviderConfigFromModelConfig converts a Maestro model config into a dspy-go provider config.
 func ProviderConfigFromModelConfig(cfg *ModelConfig) core.ProviderConfig {
+	if cfg == nil {
+		return core.ProviderConfig{}
+	}
+
 	providerCfg := core.ProviderConfig{
 		Name:   registryProviderName(cfg.ModelProvider),
 		APIKey: cfg.APIKey,
-	}
-
-	if cfg == nil {
-		return providerCfg
 	}
 
 	if baseURL := resolveProviderBaseURL(cfg); baseURL != "" {

@@ -2,6 +2,7 @@ package subagent
 
 import (
 	"context"
+	"maps"
 	"path/filepath"
 	"reflect"
 	"testing"
@@ -12,15 +13,14 @@ import (
 )
 
 type stubTaskProcessor struct {
-	response   string
-	seenTask   agents.Task
-	seenCtx    map[string]interface{}
-	seenDirRef *string
+	response string
+	seenTask agents.Task
+	seenCtx  map[string]interface{}
 }
 
 func (p *stubTaskProcessor) Process(ctx context.Context, task agents.Task, taskContext map[string]interface{}) (interface{}, error) {
 	p.seenTask = task
-	p.seenCtx = core.ShallowCopyMap(taskContext)
+	p.seenCtx = maps.Clone(taskContext)
 	return map[string]interface{}{
 		"response":  p.response,
 		"completed": true,

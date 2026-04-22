@@ -71,12 +71,12 @@ func SelectTopTeacherDemos(traces []ReviewTeacherTrace, limit int) string {
 	var sections []string
 	for i, trace := range selected {
 		var sb strings.Builder
-		sb.WriteString(fmt.Sprintf("Example %d\n", i+1))
+		_, _ = fmt.Fprintf(&sb, "Example %d\n", i+1)
 		if trace.FilePath != "" {
-			sb.WriteString(fmt.Sprintf("File: %s\n", trace.FilePath))
+			_, _ = fmt.Fprintf(&sb, "File: %s\n", trace.FilePath)
 		}
 		if trace.Line > 0 {
-			sb.WriteString(fmt.Sprintf("Line: %d\n", trace.Line))
+			_, _ = fmt.Fprintf(&sb, "Line: %d\n", trace.Line)
 		}
 		if diff := strings.TrimSpace(trace.InputDiff); diff != "" {
 			sb.WriteString("Patch:\n")
@@ -90,7 +90,7 @@ func SelectTopTeacherDemos(traces []ReviewTeacherTrace, limit int) string {
 				continue
 			}
 			if comment.LineNumber > 0 {
-				sb.WriteString(fmt.Sprintf("- line %d: %s\n", comment.LineNumber, content))
+				_, _ = fmt.Fprintf(&sb, "- line %d: %s\n", comment.LineNumber, content)
 			} else {
 				sb.WriteString("- ")
 				sb.WriteString(content)

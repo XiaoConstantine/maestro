@@ -102,10 +102,10 @@ func (p *ResponseProcessor) processStandalone(ctx context.Context, task agents.T
 	if threadContext, exists := context["thread_context"].([]types.PRReviewComment); exists && len(threadContext) > 0 {
 		var conversationHistory strings.Builder
 		for _, comment := range threadContext {
-			conversationHistory.WriteString(fmt.Sprintf("Author: %s\n", comment.Author))
-			conversationHistory.WriteString(fmt.Sprintf("Message: %s\n", comment.Content))
+			_, _ = fmt.Fprintf(&conversationHistory, "Author: %s\n", comment.Author)
+			_, _ = fmt.Fprintf(&conversationHistory, "Message: %s\n", comment.Content)
 			if comment.Suggestion != "" {
-				conversationHistory.WriteString(fmt.Sprintf("Suggestion: %s\n", comment.Suggestion))
+				_, _ = fmt.Fprintf(&conversationHistory, "Suggestion: %s\n", comment.Suggestion)
 			}
 			conversationHistory.WriteString("---\n")
 		}

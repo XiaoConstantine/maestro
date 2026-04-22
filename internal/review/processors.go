@@ -140,10 +140,10 @@ func (p *CommentResponseProcessor) processStandalone(ctx context.Context, task a
 	if threadContext, exists := context["thread_context"].([]PRReviewComment); exists && len(threadContext) > 0 {
 		var conversationHistory strings.Builder
 		for _, comment := range threadContext {
-			conversationHistory.WriteString(fmt.Sprintf("Author: %s\n", comment.Author))
-			conversationHistory.WriteString(fmt.Sprintf("Message: %s\n", comment.Content))
+			_, _ = fmt.Fprintf(&conversationHistory, "Author: %s\n", comment.Author)
+			_, _ = fmt.Fprintf(&conversationHistory, "Message: %s\n", comment.Content)
 			if comment.Suggestion != "" {
-				conversationHistory.WriteString(fmt.Sprintf("Suggestion: %s\n", comment.Suggestion))
+				_, _ = fmt.Fprintf(&conversationHistory, "Suggestion: %s\n", comment.Suggestion)
 			}
 			conversationHistory.WriteString("---\n")
 		}
@@ -293,8 +293,6 @@ func calculateValidationScore(handoff *ReviewHandoff) float64 {
 	return math.Round(averageScore*100) / 100
 }
 
-
-
 func isValidComment(comment PRReviewComment) bool {
 	if comment.LineNumber <= 0 ||
 		comment.Suggestion == "" ||
@@ -431,7 +429,7 @@ func formatActionItemsList(items []string) string {
 	var sb strings.Builder
 	sb.WriteString("Suggested actions:\n")
 	for _, item := range items {
-		sb.WriteString(fmt.Sprintf("- %s\n", item))
+		_, _ = fmt.Fprintf(&sb, "- %s\n", item)
 	}
 	return sb.String()
 }

@@ -355,7 +355,7 @@ func RunEvolveReview(ctx context.Context, cfg EvolveReviewConfig) (*EvolveReview
 
 	searchSuitePaths := searchSuitePathsForConfig(cfg)
 	searchCaseCap := searchCaseCapForConfig(cfg)
-	searchSuites, trainingExamples, validationExamples, err := loadBenchmarkSuitesIfPresent(searchSuitePaths, cfg.ValidationSplit, searchCaseCap)
+	_, trainingExamples, validationExamples, err := loadBenchmarkSuitesIfPresent(searchSuitePaths, cfg.ValidationSplit, searchCaseCap)
 	if err != nil {
 		return nil, err
 	}
@@ -364,7 +364,6 @@ func RunEvolveReview(ctx context.Context, cfg EvolveReviewConfig) (*EvolveReview
 		return nil, err
 	}
 	if inboxSearchSuite != nil {
-		searchSuites = append(searchSuites, *inboxSearchSuite)
 		trainingExamples = append(trainingExamples, inboxTraining...)
 		validationExamples = append(validationExamples, inboxValidation...)
 	}
@@ -558,12 +557,8 @@ func RunEvolveReview(ctx context.Context, cfg EvolveReviewConfig) (*EvolveReview
 		return result, nil
 	}
 
-	protectedBaseline := make(map[string]float64)
-	protectedBaselineReports := make(map[string][]EvolutionValidationCaseReport)
-	protectedReplay := make(map[string]float64)
-	protectedReplayReports := make(map[string][]EvolutionValidationCaseReport)
 	if len(protectedSuites) > 0 {
-		protectedBaseline, _, protectedBaselineReports, err = evaluateBenchmarkSuites(runCtx, evaluator, NewReviewBenchmarkAgent(cfg.StudentLLM, logger, seedArtifacts, cfg.MaxChunksPerCase), protectedSuites, cfg.EvalConcurrency)
+		protectedBaseline, _, protectedBaselineReports, err := evaluateBenchmarkSuites(runCtx, evaluator, NewReviewBenchmarkAgent(cfg.StudentLLM, logger, seedArtifacts, cfg.MaxChunksPerCase), protectedSuites, cfg.EvalConcurrency)
 		if err != nil {
 			report.Decision = classifyEvolutionFailure(runCtx, "failed_protected_baseline")
 			report.FailureReason = err.Error()
@@ -572,7 +567,7 @@ func RunEvolveReview(ctx context.Context, cfg EvolveReviewConfig) (*EvolveReview
 			}
 			return result, nil
 		}
-		protectedReplay, _, protectedReplayReports, err = evaluateBenchmarkSuites(runCtx, evaluator, NewReviewBenchmarkAgent(cfg.StudentLLM, logger, bestArtifacts, cfg.MaxChunksPerCase), protectedSuites, cfg.EvalConcurrency)
+		protectedReplay, _, protectedReplayReports, err := evaluateBenchmarkSuites(runCtx, evaluator, NewReviewBenchmarkAgent(cfg.StudentLLM, logger, bestArtifacts, cfg.MaxChunksPerCase), protectedSuites, cfg.EvalConcurrency)
 		if err != nil {
 			report.Decision = classifyEvolutionFailure(runCtx, "failed_protected_replay")
 			report.FailureReason = err.Error()

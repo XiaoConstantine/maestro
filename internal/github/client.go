@@ -801,7 +801,7 @@ func formatCommentBody(comment types.PRReviewComment) string {
 	var sb strings.Builder
 
 	// Add severity indicator
-	sb.WriteString(fmt.Sprintf("**%s**: ", strings.ToUpper(comment.Severity)))
+	_, _ = fmt.Fprintf(&sb, "**%s**: ", strings.ToUpper(comment.Severity))
 
 	// Add the main comment
 	sb.WriteString(comment.Content)
@@ -813,7 +813,7 @@ func formatCommentBody(comment types.PRReviewComment) string {
 	}
 
 	// Add category tag
-	sb.WriteString(fmt.Sprintf("\n\n_Category: %s_", comment.Category))
+	_, _ = fmt.Fprintf(&sb, "\n\n_Category: %s_", comment.Category)
 
 	return sb.String()
 }

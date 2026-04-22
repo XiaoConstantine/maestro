@@ -169,7 +169,7 @@ func FormatActionItems(items []string) string {
 	var sb strings.Builder
 	sb.WriteString("Suggested actions:\n")
 	for _, item := range items {
-		sb.WriteString(fmt.Sprintf("- %s\n", item))
+		_, _ = fmt.Fprintf(&sb, "- %s\n", item)
 	}
 	return sb.String()
 }

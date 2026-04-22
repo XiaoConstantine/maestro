@@ -312,10 +312,10 @@ func (p *RepoQAProcessor) processResults(ctx context.Context, signature core.Sig
 	seenFiles := make(map[string]bool) // Track seen files for deduplication
 
 	for _, content := range similar {
-		contextBuilder.WriteString(fmt.Sprintf("File: %s\n", content.Metadata["file_path"]))
-		contextBuilder.WriteString(fmt.Sprintf("Lines %s-%s:\n",
+		_, _ = fmt.Fprintf(&contextBuilder, "File: %s\n", content.Metadata["file_path"])
+		_, _ = fmt.Fprintf(&contextBuilder, "Lines %s-%s:\n",
 			content.Metadata["start_line"],
-			content.Metadata["end_line"]))
+			content.Metadata["end_line"])
 		contextBuilder.WriteString(content.Text)
 		contextBuilder.WriteString("\n---\n")
 

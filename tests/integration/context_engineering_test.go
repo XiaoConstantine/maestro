@@ -76,9 +76,9 @@ func TestContextEngineering_KVCacheTimestampGranularity(t *testing.T) {
 	skipIfNoLLMKey(t)
 
 	testCases := []struct {
-		granularity   string
-		shouldBeSame  bool
-		waitDuration  time.Duration
+		granularity  string
+		shouldBeSame bool
+		waitDuration time.Duration
 	}{
 		{"day", true, 100 * time.Millisecond},
 		{"hour", true, 100 * time.Millisecond},
@@ -373,7 +373,7 @@ func TestContextEngineering_ContextSharing(t *testing.T) {
 	var sharedContext strings.Builder
 	sharedContext.WriteString("The application uses cobra for CLI commands.\n")
 	for _, r := range response1.Results {
-		sharedContext.WriteString(fmt.Sprintf("- Found: %s\n", r.FilePath))
+		_, _ = fmt.Fprintf(&sharedContext, "- Found: %s\n", r.FilePath)
 	}
 
 	// Agent 2: Use shared context for related search
@@ -631,10 +631,10 @@ func TestContextEngineering_ToolContextAccumulation(t *testing.T) {
 
 	// Check that results span multiple aspects
 	aspects := map[string]bool{
-		"error":   false,
-		"handle":  false,
-		"return":  false,
-		"wrap":    false,
+		"error":  false,
+		"handle": false,
+		"return": false,
+		"wrap":   false,
 	}
 
 	for _, r := range response.Results {
@@ -689,7 +689,7 @@ func TestContextEngineering_FullIntegration(t *testing.T) {
 	var contextBuilder strings.Builder
 	contextBuilder.WriteString("Previous exploration found:\n")
 	for _, r := range response1.Results {
-		contextBuilder.WriteString(fmt.Sprintf("- %s\n", r.FilePath))
+		_, _ = fmt.Fprintf(&contextBuilder, "- %s\n", r.FilePath)
 	}
 
 	agent2, _ := agent.NewUnifiedReActAgent("full-test-2", searchTool, logger)
@@ -760,9 +760,9 @@ func TestContextEngineering_PerformanceMetrics(t *testing.T) {
 	for i := 0; i < 10; i++ {
 		mgr.AddTodo(ctx, fmt.Sprintf("Task %d", i), i)
 		mgr.BuildOptimizedContext(ctx, agentctx.ContextRequest{
-			CurrentTask:    fmt.Sprintf("Working on task %d", i),
+			CurrentTask:     fmt.Sprintf("Working on task %d", i),
 			PrioritizeCache: true,
-			IncludeTodos:   true,
+			IncludeTodos:    true,
 		})
 	}
 

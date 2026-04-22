@@ -124,7 +124,7 @@ func (p *GeminiProcessor) buildPrompt(prompt string, taskContext map[string]inte
 
 	// Add repo context
 	if repoPath, ok := taskContext["repo_path"].(string); ok {
-		sb.WriteString(fmt.Sprintf("Repository: %s\n", repoPath))
+		_, _ = fmt.Fprintf(&sb, "Repository: %s\n", repoPath)
 	}
 
 	sb.WriteString("\nRequest: ")

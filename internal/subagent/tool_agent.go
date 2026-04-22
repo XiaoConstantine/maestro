@@ -3,6 +3,7 @@ package subagent
 import (
 	"context"
 	"fmt"
+	"maps"
 	"os"
 	"strings"
 	"sync"
@@ -88,7 +89,7 @@ func newProcessorTool(cfg processorToolConfig) (core.Tool, error) {
 		StaticParentContext: dspysubagent.ParentContext{
 			SessionID:       strings.TrimSpace(cfg.parentSessionID),
 			ParentAgentType: "maestro",
-			Input:           core.ShallowCopyMap(cfg.staticInput),
+			Input:           maps.Clone(cfg.staticInput),
 		},
 		InputSchema: models.InputSchema{
 			Type: "object",
@@ -117,7 +118,7 @@ func newProcessorTool(cfg processorToolConfig) (core.Tool, error) {
 }
 
 func buildProcessorToolInput(args map[string]any, parent dspysubagent.ParentContext) (map[string]any, error) {
-	input := core.ShallowCopyMap(parent.Input)
+	input := maps.Clone(parent.Input)
 	if input == nil {
 		input = make(map[string]any)
 	}
@@ -129,7 +130,7 @@ func buildProcessorToolInput(args map[string]any, parent dspysubagent.ParentCont
 
 func (a *processorBackedAgent) Execute(ctx context.Context, input map[string]interface{}) (map[string]interface{}, error) {
 	startedAt := time.Now()
-	input = core.ShallowCopyMap(input)
+	input = maps.Clone(input)
 
 	prompt := firstInputString(input, "prompt", "task", "question")
 	if prompt == "" {
@@ -239,8 +240,8 @@ func (a *processorBackedAgent) storeTrace(startedAt time.Time, input, output map
 		AgentID:        fmt.Sprintf("%s-subagent", a.processorType),
 		AgentType:      a.processorType,
 		Task:           firstInputString(input, "prompt", "task", "question"),
-		Input:          core.ShallowCopyMap(input),
-		Output:         core.ShallowCopyMap(output),
+		Input:          maps.Clone(input),
+		Output:         maps.Clone(output),
 		StartedAt:      startedAt,
 		CompletedAt:    time.Now(),
 		ProcessingTime: time.Since(startedAt),
@@ -266,7 +267,7 @@ func normalizeProcessorOutput(raw interface{}) (map[string]interface{}, error) {
 		return map[string]interface{}{}, nil
 	}
 	if typed, ok := raw.(map[string]interface{}); ok {
-		return core.ShallowCopyMap(typed), nil
+		return maps.Clone(typed), nil
 	}
 	return nil, fmt.Errorf("unexpected processor result type %T", raw)
 }

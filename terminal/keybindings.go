@@ -332,12 +332,12 @@ func (kh *KeyHandler) clearBuffers() {
 func (kh *KeyHandler) GetHelpText() string {
 	var help strings.Builder
 
-	help.WriteString(fmt.Sprintf("Mode: %s\n\n", kh.GetModeString()))
+	_, _ = fmt.Fprintf(&help, "Mode: %s\n\n", kh.GetModeString())
 	help.WriteString("Key Bindings:\n")
 
 	if bindings, ok := kh.bindings[kh.mode]; ok {
 		for _, binding := range bindings {
-			help.WriteString(fmt.Sprintf("  %-12s %s\n", binding.Key, binding.Description))
+			_, _ = fmt.Fprintf(&help, "  %-12s %s\n", binding.Key, binding.Description)
 		}
 	}
 

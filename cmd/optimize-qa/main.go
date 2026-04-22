@@ -388,21 +388,6 @@ func splitAgentExamples(examples []optimize.AgentExample, validationSplit float6
 	return training, validation, nil
 }
 
-func evaluateExamples(ctx context.Context, evaluator optimize.AgentEvaluator, agent optimize.OptimizableAgent, examples []optimize.AgentExample) (float64, error) {
-	if len(examples) == 0 {
-		return 0, fmt.Errorf("at least one validation example is required")
-	}
-	var total float64
-	for _, example := range examples {
-		result, err := evaluator.Evaluate(ctx, agent, example)
-		if err != nil {
-			return 0, fmt.Errorf("evaluate example %q: %w", example.ID, err)
-		}
-		total += result.Score
-	}
-	return total / float64(len(examples)), nil
-}
-
 func replaySavedQAProgram(ctx context.Context, llm core.LLM, logger *logging.Logger, artifactPath string, seedArtifacts optimize.AgentArtifacts, examples []optimize.AgentExample) (*optimize.HarnessRunResult, optimize.AgentArtifacts, error) {
 	if strings.TrimSpace(artifactPath) == "" {
 		return nil, optimize.AgentArtifacts{}, fmt.Errorf("artifact path is required to restore an optimized program")

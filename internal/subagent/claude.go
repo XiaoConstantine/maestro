@@ -95,11 +95,11 @@ func (p *ClaudeProcessor) buildPrompt(prompt string, taskContext map[string]inte
 
 	// Add task context
 	if repoPath, ok := taskContext["repo_path"].(string); ok {
-		sb.WriteString(fmt.Sprintf("Repository: %s\n", repoPath))
+		_, _ = fmt.Fprintf(&sb, "Repository: %s\n", repoPath)
 	}
 	if owner, ok := taskContext["owner"].(string); ok {
 		if repo, ok := taskContext["repo"].(string); ok {
-			sb.WriteString(fmt.Sprintf("GitHub: %s/%s\n", owner, repo))
+			_, _ = fmt.Fprintf(&sb, "GitHub: %s/%s\n", owner, repo)
 		}
 	}
 
@@ -107,7 +107,7 @@ func (p *ClaudeProcessor) buildPrompt(prompt string, taskContext map[string]inte
 	if files, ok := taskContext["files"].([]string); ok && len(files) > 0 {
 		sb.WriteString("\n## Relevant Files\n")
 		for _, f := range files {
-			sb.WriteString(fmt.Sprintf("- %s\n", f))
+			_, _ = fmt.Fprintf(&sb, "- %s\n", f)
 		}
 	}
 

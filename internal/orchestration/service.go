@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"sync"
@@ -389,7 +390,7 @@ func (s *MaestroService) executeSubagentTool(ctx context.Context, tool core.Tool
 		ParentAgentID:   "maestro-service",
 		ParentAgentType: "maestro-service",
 		SessionID:       s.currentSession,
-		Input:           core.ShallowCopyMap(taskContext),
+		Input:           maps.Clone(taskContext),
 	}
 	result, err := tool.Execute(dspysubagent.WithParentContext(ctx, parent), taskContext)
 	if err != nil {
