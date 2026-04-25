@@ -1,4 +1,8 @@
 `qa_suite.json` is a Maestro-owned benchmark corpus for `/ask` QA GEPA runs.
+`rlm_overview_suite.json` is the frozen Stage 0 corpus for optimizing the
+RLM overview route. It uses the same path resolution rules, but each case also
+stores a gold overview answer, expected source paths, tags, and an optional
+`protected` marker for zero-regression gates.
 
 Path resolution rules:
 - `repo_path` values are resolved relative to the suite file location.
@@ -21,6 +25,13 @@ Benchmark case guidance:
 - keep expected facts concrete and substring-friendly, such as file paths, package paths, or symbol names
 - use forbidden facts to penalize cross-repo confusion and hallucinated paths
 - include both positive lookups and negative/boundary cases
+
+RLM overview benchmark guidance:
+- optimize against deterministic fact/source/terseness scoring first; do not let GEPA chase freeform style only
+- treat the committed Stage 0 suite as a manually distilled bootstrap from repository manifests, not as a teacher-generated session-log corpus
+- keep gold answers concise and repo-grounded so future LLM-judge runs have stable reference answers
+- mark a small qualitative subset as `protected`; artifact replay must not regress those cases
+- expected sources may be returned as explicit source metadata or appear in the answer text
 
 Review benchmark guidance:
 - keep generated review corpora, raw Gerrit caches, and GEPA checkpoints local under `~/.maestro/review/`; do not commit them to the repository
