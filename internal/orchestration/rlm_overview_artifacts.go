@@ -27,7 +27,8 @@ const (
 )
 
 type rlmOverviewRuntimeArtifactsAgent struct {
-	agent *agentrlm.Agent
+	agent     *agentrlm.Agent
+	agentType string
 }
 
 var _ optimize.OptimizableAgent = (*rlmOverviewRuntimeArtifactsAgent)(nil)
@@ -225,7 +226,7 @@ func (a *rlmOverviewRuntimeArtifactsAgent) Clone() (optimize.OptimizableAgent, e
 	if !ok {
 		return nil, fmt.Errorf("RLM overview runtime artifact clone produced %T", cloned)
 	}
-	return &rlmOverviewRuntimeArtifactsAgent{agent: rlmAgent}, nil
+	return &rlmOverviewRuntimeArtifactsAgent{agent: rlmAgent, agentType: a.agentType}, nil
 }
 
 func (a *rlmOverviewRuntimeArtifactsAgent) UpdateArtifacts(update func(optimize.AgentArtifacts) (optimize.AgentArtifacts, error)) error {
@@ -236,6 +237,9 @@ func (a *rlmOverviewRuntimeArtifactsAgent) UpdateArtifacts(update func(optimize.
 }
 
 func (a *rlmOverviewRuntimeArtifactsAgent) OptimizationAgentType() string {
+	if a != nil && strings.TrimSpace(a.agentType) != "" {
+		return a.agentType
+	}
 	return RLMOverviewBenchmarkAgentSignature
 }
 

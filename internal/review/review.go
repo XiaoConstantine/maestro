@@ -35,8 +35,8 @@ import (
 
 // PRReviewAgent handles code review using dspy-go.
 type PRReviewAgent struct {
-	reviewProcessor  *reasoning.EnhancedCodeReviewProcessor // High-performance parallel processor
-	declarativeChain *workflow.DeclarativeReviewChain       // Declarative workflow for complex reviews
+	reviewProcessor  reviewChunkProcessor             // High-performance chunk processor
+	declarativeChain *workflow.DeclarativeReviewChain // Declarative workflow for complex reviews
 	memory           agents.Memory
 	guidelineSearch  *guideline.Searcher      // Sgrep-based guideline search
 	activeThreads    map[int64]*ThreadTracker // Track active discussion threads
@@ -74,6 +74,10 @@ type reviewPipelineResult struct {
 	Phase3Duration       time.Duration
 	Phase4Duration       time.Duration
 	Phase5Duration       time.Duration
+}
+
+type reviewChunkProcessor interface {
+	ProcessMultipleChunks(ctx context.Context, chunks []map[string]interface{}, taskContext map[string]interface{}) ([]*types.EnhancedReviewResult, error)
 }
 
 const reviewChunkContextRadius = 1
@@ -229,9 +233,15 @@ func NewPRReviewAgent(ctx context.Context, githubTool GitHubInterface, dbPath st
 	stopper := NewStopper()
 	indexStatus := types.NewIndexingStatus()
 
-	// Create high-performance parallel review processor
-	reviewProcessor := reasoning.NewEnhancedCodeReviewProcessor(metricsCollector, logger, reviewInstructionOverlay)
-	logger.Debug(ctx, "✅ Created parallel review processor with %d workers", 120)
+	reviewProcessor, reviewProcessorMode, err := newRuntimeReviewChunkProcessor(ctx, metricsCollector, logger, reviewInstructionOverlay)
+	if err != nil {
+		return nil, fmt.Errorf("initialize review chunk processor: %w", err)
+	}
+	if reviewProcessorMode == "parallel" {
+		logger.Debug(ctx, "✅ Created parallel review processor with %d workers", 120)
+	} else {
+		logger.Debug(ctx, "✅ Created %s review processor", reviewProcessorMode)
+	}
 	if bestSkill != nil {
 		logger.Info(ctx, "Loaded persisted review skill domain=%q version=%d name=%q store=%q", reviewSkillDomain, bestSkill.Version, bestSkill.Name, reviewSkillStorePath)
 	} else if strings.TrimSpace(reviewInstructionOverlay) != "" {

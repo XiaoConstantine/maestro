@@ -63,19 +63,20 @@ const (
 )
 
 type ServiceConfig struct {
-	MemoryType                MemoryType
-	MemoryPath                string
-	QAArtifactsPath           string
-	QASkillStorePath          string
-	QASkillDomain             string
-	RLMOverviewSkillStorePath string
-	RLMOverviewSkillDomain    string
-	RLMOverviewArtifactsPath  string
-	Owner                     string
-	Repo                      string
-	GitHubToken               string
-	IndexWorkers              int
-	ReviewWorkers             int
+	MemoryType                  MemoryType
+	MemoryPath                  string
+	QAArtifactsPath             string
+	QASkillStorePath            string
+	QASkillDomain               string
+	RLMOverviewSkillStorePath   string
+	RLMOverviewSkillDomain      string
+	RLMOverviewArtifactsPath    string
+	RLMTargetedAskArtifactsPath string
+	Owner                       string
+	Repo                        string
+	GitHubToken                 string
+	IndexWorkers                int
+	ReviewWorkers               int
 }
 
 type Request struct {
@@ -329,6 +330,13 @@ func (s *MaestroService) handleAsk(ctx context.Context, request Request) (*Respo
 			return response, nil
 		}
 		s.logger.Warn(ctx, "Forced RLM overview path failed, falling back to native QA: %v", err)
+	case "targeted", "rlm-targeted", "rlm_targeted":
+		s.logger.Debug(ctx, "Forcing RLM targeted ask strategy for question: %q", request.Question)
+		response, err := s.handleRLMTargetedAsk(ctx, request.Question, repoPath)
+		if err == nil {
+			return response, nil
+		}
+		s.logger.Warn(ctx, "Forced RLM targeted ask path failed, falling back to native QA: %v", err)
 	default:
 		if shouldUseRLMOverviewQuery(request.Question) {
 			response, err := s.handleRLMOverview(ctx, request.Question, repoPath)

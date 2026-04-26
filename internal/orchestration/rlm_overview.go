@@ -137,7 +137,7 @@ func shouldUseRLMOverviewQuery(question string) bool {
 func forcedAskStrategy() string {
 	value := strings.TrimSpace(strings.ToLower(os.Getenv(askStrategyEnvVar)))
 	switch value {
-	case "native", "rlm":
+	case "native", "rlm", "targeted", "rlm-targeted", "rlm_targeted":
 		return value
 	default:
 		return ""
