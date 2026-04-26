@@ -20,7 +20,7 @@ const (
 	rlmOverviewManifestMaxChars    = 120000
 	rlmOverviewMaxTokens           = 50000
 	rlmOverviewMaxIterations       = 5
-	rlmOverviewTimeout             = 60 * time.Second
+	rlmOverviewTimeout             = 120 * time.Second
 	rlmOverviewVerificationTimeout = 20 * time.Second
 	rlmOverviewTraceDirName        = "rlm_traces"
 	rlmOverviewRootReadmeMaxChars  = 12000

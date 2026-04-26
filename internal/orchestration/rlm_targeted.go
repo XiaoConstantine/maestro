@@ -32,7 +32,7 @@ const (
 	rlmTargetedAskMaxSourceFiles                  = 8
 	rlmTargetedAskMaxIterations                   = 5
 	rlmTargetedAskMaxTokens                       = 42000
-	rlmTargetedAskTimeout                         = 60 * time.Second
+	rlmTargetedAskTimeout                         = 120 * time.Second
 )
 
 var targetedAskTokenPattern = regexp.MustCompile(`[A-Za-z_][A-Za-z0-9_./-]{2,}`)
