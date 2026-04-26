@@ -83,6 +83,7 @@ func (s *MaestroService) handleRLMTargetedAsk(ctx context.Context, question, rep
 	if err != nil {
 		return nil, fmt.Errorf("rlm targeted ask failed: %w", err)
 	}
+	s.recordRLMTraceUsage(ctx, rlmTargetedAskArtifactRoute, trace)
 
 	rawOutput, parsed, parseErr := parseRLMTargetedAskOutputWithFallback(result.Response, subClient.LastResponse())
 	if parseErr != nil && s != nil && s.logger != nil {

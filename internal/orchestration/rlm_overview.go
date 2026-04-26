@@ -281,6 +281,7 @@ func (s *MaestroService) handleRLMOverview(ctx context.Context, question, repoPa
 	if err != nil {
 		return nil, fmt.Errorf("rlm overview failed: %w", err)
 	}
+	s.recordRLMTraceUsage(ctx, rlmOverviewArtifactRoute, trace)
 
 	rawOutput, parsed, parseErr := parseRLMOverviewOutputWithFallback(result.Response, subClient.LastResponse())
 	if parseErr != nil {

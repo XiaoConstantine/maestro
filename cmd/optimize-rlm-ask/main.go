@@ -17,6 +17,7 @@ import (
 	"github.com/XiaoConstantine/dspy-go/pkg/core"
 	"github.com/XiaoConstantine/dspy-go/pkg/llms"
 	"github.com/XiaoConstantine/dspy-go/pkg/logging"
+	maestrobudget "github.com/XiaoConstantine/maestro/internal/budget"
 	maestrooptimize "github.com/XiaoConstantine/maestro/internal/optimize"
 	"github.com/XiaoConstantine/maestro/internal/orchestration"
 	"github.com/XiaoConstantine/maestro/internal/util"
@@ -36,13 +37,16 @@ type optimizationCheckpoint struct {
 	ProtectedGate          *orchestration.RLMOverviewProtectedGateReport `json:"protected_gate,omitempty"`
 	ProtectedReport        *orchestration.RLMOverviewBenchmarkRunReport  `json:"protected_report,omitempty"`
 	TokenUsage             map[string]int64                              `json:"token_usage,omitempty"`
+	BudgetStatus           *maestrobudget.BudgetStatus                   `json:"budget_status,omitempty"`
 	ArtifactMetadata       map[string]interface{}                        `json:"artifact_metadata,omitempty"`
 	BestArtifacts          optimize.AgentArtifacts                       `json:"best_artifacts,omitempty"`
 }
 
 type tokenAccountingEvaluator struct {
-	base   optimize.AgentEvaluator
-	ledger *tokenLedger
+	base    optimize.AgentEvaluator
+	ledger  *tokenLedger
+	budget  *maestrobudget.BudgetManager
+	agentID string
 }
 
 type tokenLedger struct {
@@ -337,9 +341,12 @@ func runOptimization(ctx context.Context, req runOptimizationRequest) error {
 	}
 
 	ledger := newTokenLedger()
+	budgetManager := maestrobudget.NewBudgetManager(maestrobudget.DefaultConfig())
 	evaluator := &tokenAccountingEvaluator{
-		base:   orchestration.NewRLMOverviewBenchmarkEvaluator(orchestration.DefaultRLMOverviewEvaluatorConfig()),
-		ledger: ledger,
+		base:    orchestration.NewRLMOverviewBenchmarkEvaluator(orchestration.DefaultRLMOverviewEvaluatorConfig()),
+		ledger:  ledger,
+		budget:  budgetManager,
+		agentID: "ask.rlm_overview",
 	}
 
 	workflow, err := optimize.RunGEPAWorkflow(ctx, req.agent, optimize.GEPAWorkflowRequest{
@@ -398,8 +405,14 @@ func runOptimization(ctx context.Context, req runOptimizationRequest) error {
 	if err != nil {
 		return err
 	}
+	if protectedReport != nil {
+		delta := maestrobudget.UsageDeltaFromTokenMap(protectedReport.TokenUsage, nil)
+		if !delta.Empty() {
+			_ = budgetManager.RecordUsageDelta("ask.rlm_overview.protected_gate", delta)
+		}
+	}
 
-	checkpoint := buildOptimizationCheckpoint(req, workflow, protectedReport, protectedGate, ledger.snapshot(), metadata)
+	checkpoint := buildOptimizationCheckpoint(req, workflow, protectedReport, protectedGate, ledger.snapshot(), budgetManager.Status(), metadata)
 	if protectedGate != nil && !protectedGate.Passed {
 		if err := writeJSON(req.outputPath, checkpoint); err != nil {
 			return err
@@ -475,7 +488,7 @@ func runProtectedGate(ctx context.Context, req runOptimizationRequest, program *
 	return report, report.ProtectedGate, nil
 }
 
-func buildOptimizationCheckpoint(req runOptimizationRequest, workflow *optimize.GEPAWorkflowResult, protectedReport *orchestration.RLMOverviewBenchmarkRunReport, protectedGate *orchestration.RLMOverviewProtectedGateReport, tokenUsage map[string]int64, artifactMetadata map[string]interface{}) optimizationCheckpoint {
+func buildOptimizationCheckpoint(req runOptimizationRequest, workflow *optimize.GEPAWorkflowResult, protectedReport *orchestration.RLMOverviewBenchmarkRunReport, protectedGate *orchestration.RLMOverviewProtectedGateReport, tokenUsage map[string]int64, budgetStatus maestrobudget.BudgetStatus, artifactMetadata map[string]interface{}) optimizationCheckpoint {
 	if protectedReport != nil {
 		tokenUsage = combineTokenUsage(tokenUsage, protectedReport.TokenUsage)
 	}
@@ -487,6 +500,7 @@ func buildOptimizationCheckpoint(req runOptimizationRequest, workflow *optimize.
 		ProtectedGate:    protectedGate,
 		ProtectedReport:  protectedReport,
 		TokenUsage:       tokenUsage,
+		BudgetStatus:     &budgetStatus,
 		ArtifactMetadata: artifactMetadata,
 	}
 	if workflow.Optimization != nil {
@@ -580,6 +594,15 @@ func (e *tokenAccountingEvaluator) Evaluate(ctx context.Context, agent optimize.
 	result, err := e.base.Evaluate(ctx, agent, ex)
 	if result != nil && result.SideInfo != nil && e.ledger != nil {
 		e.ledger.record(result.SideInfo.Tokens)
+	}
+	if result != nil && result.SideInfo != nil && e.budget != nil {
+		delta := maestrobudget.UsageDeltaFromTokenMap(result.SideInfo.Tokens, result.SideInfo.Diagnostics)
+		if delta.CostUSD == 0 {
+			delta.CostUSD = result.SideInfo.Cost
+		}
+		if !delta.Empty() {
+			_ = e.budget.RecordUsageDelta(e.agentID, delta)
+		}
 	}
 	return result, err
 }

@@ -11,6 +11,7 @@ import (
 	"github.com/XiaoConstantine/dspy-go/pkg/agents/optimize"
 	"github.com/XiaoConstantine/dspy-go/pkg/core"
 	"github.com/XiaoConstantine/dspy-go/pkg/logging"
+	maestrobudget "github.com/XiaoConstantine/maestro/internal/budget"
 	internalgithub "github.com/XiaoConstantine/maestro/internal/github"
 )
 
@@ -23,15 +24,20 @@ type ReviewRLMBenchmarkAgent struct {
 	overlay          string
 	maxChunksPerCase int
 	verify           bool
+	budgetManager    *maestrobudget.BudgetManager
 }
 
 var _ optimize.OptimizableAgent = (*ReviewRLMBenchmarkAgent)(nil)
 
-func NewReviewRLMBenchmarkAgent(llm core.LLM, logger *logging.Logger, artifacts optimize.AgentArtifacts, overlay string, maxChunksPerCase int) (*ReviewRLMBenchmarkAgent, error) {
+func NewReviewRLMBenchmarkAgent(llm core.LLM, logger *logging.Logger, artifacts optimize.AgentArtifacts, overlay string, maxChunksPerCase int, budgetManagers ...*maestrobudget.BudgetManager) (*ReviewRLMBenchmarkAgent, error) {
 	if llm == nil {
 		return nil, fmt.Errorf("review RLM benchmark LLM is nil")
 	}
-	processor := newReviewRLMProcessor(llm, overlay, logger)
+	var budgetManager *maestrobudget.BudgetManager
+	if len(budgetManagers) > 0 {
+		budgetManager = budgetManagers[0]
+	}
+	processor := newReviewRLMProcessor(llm, overlay, logger, budgetManager)
 	if !reviewRLMArtifactsEmpty(artifacts) {
 		if err := processor.SetArtifacts(artifacts); err != nil {
 			return nil, err
@@ -44,6 +50,7 @@ func NewReviewRLMBenchmarkAgent(llm core.LLM, logger *logging.Logger, artifacts 
 		overlay:          overlay,
 		maxChunksPerCase: maxChunksPerCase,
 		verify:           reviewRLMBenchmarkVerificationEnabled(),
+		budgetManager:    budgetManager,
 	}, nil
 }
 
@@ -173,6 +180,7 @@ func (a *ReviewRLMBenchmarkAgent) Clone() (optimize.OptimizableAgent, error) {
 		overlay:          a.overlay,
 		maxChunksPerCase: a.maxChunksPerCase,
 		verify:           a.verify,
+		budgetManager:    a.budgetManager,
 	}, nil
 }
 

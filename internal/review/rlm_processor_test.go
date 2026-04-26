@@ -9,6 +9,7 @@ import (
 	"github.com/XiaoConstantine/dspy-go/pkg/agents/optimize"
 	agentrlm "github.com/XiaoConstantine/dspy-go/pkg/agents/rlm"
 	"github.com/XiaoConstantine/dspy-go/pkg/core"
+	maestrobudget "github.com/XiaoConstantine/maestro/internal/budget"
 )
 
 func TestParseReviewRLMIssuesObjectPayload(t *testing.T) {
@@ -62,6 +63,18 @@ func TestReviewRLMProcessorMarksChunkErrorsUnknown(t *testing.T) {
 	}
 	if results[0].OverallQuality != "unknown" || results[0].ReasoningChain != "rlm_chunk_error" {
 		t.Fatalf("failure marker = %q/%q, want unknown/rlm_chunk_error", results[0].OverallQuality, results[0].ReasoningChain)
+	}
+}
+
+func TestPRReviewAgentSetBudgetManagerPropagatesToRLMProcessor(t *testing.T) {
+	processor := &reviewRLMProcessor{}
+	agent := &PRReviewAgent{reviewProcessor: processor}
+	manager := maestrobudget.NewBudgetManager(maestrobudget.DefaultConfig())
+
+	agent.SetBudgetManager(manager)
+
+	if processor.budgetManager != manager {
+		t.Fatal("budget manager was not propagated to review RLM processor")
 	}
 }
 

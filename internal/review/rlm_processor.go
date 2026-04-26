@@ -15,6 +15,7 @@ import (
 	"github.com/XiaoConstantine/dspy-go/pkg/core"
 	"github.com/XiaoConstantine/dspy-go/pkg/logging"
 	modrlm "github.com/XiaoConstantine/dspy-go/pkg/modules/rlm"
+	maestrobudget "github.com/XiaoConstantine/maestro/internal/budget"
 	"github.com/XiaoConstantine/maestro/internal/reasoning"
 	"github.com/XiaoConstantine/maestro/internal/types"
 )
@@ -38,14 +39,15 @@ const (
 )
 
 type reviewRLMProcessor struct {
-	agent   *agentrlm.Agent
-	overlay string
-	logger  *logging.Logger
+	agent         *agentrlm.Agent
+	overlay       string
+	logger        *logging.Logger
+	budgetManager *maestrobudget.BudgetManager
 }
 
 var _ reviewChunkProcessor = (*reviewRLMProcessor)(nil)
 
-func newRuntimeReviewChunkProcessor(ctx context.Context, metrics types.MetricsCollector, logger *logging.Logger, instructionOverlay string) (reviewChunkProcessor, string, error) {
+func newRuntimeReviewChunkProcessor(ctx context.Context, metrics types.MetricsCollector, logger *logging.Logger, instructionOverlay string, budgetManager *maestrobudget.BudgetManager) (reviewChunkProcessor, string, error) {
 	artifactPath := strings.TrimSpace(os.Getenv(reviewRLMArtifactsEnvVar))
 	enabled := strings.EqualFold(strings.TrimSpace(os.Getenv(reviewRLMEnabledEnvVar)), "true")
 	if artifactPath == "" && !enabled {
@@ -64,7 +66,7 @@ func newRuntimeReviewChunkProcessor(ctx context.Context, metrics types.MetricsCo
 	if llm == nil {
 		return nil, "", fmt.Errorf("review RLM processor requested but default LLM is not configured")
 	}
-	processor := newReviewRLMProcessor(llm, instructionOverlay, logger)
+	processor := newReviewRLMProcessor(llm, instructionOverlay, logger, budgetManager)
 	if program != nil {
 		if err := applyReviewRLMOptimizedProgram(processor, program); err != nil {
 			return nil, "", err
@@ -78,7 +80,7 @@ func newRuntimeReviewChunkProcessor(ctx context.Context, metrics types.MetricsCo
 	return processor, "rlm", nil
 }
 
-func newReviewRLMProcessor(llm core.LLM, instructionOverlay string, logger *logging.Logger) *reviewRLMProcessor {
+func newReviewRLMProcessor(llm core.LLM, instructionOverlay string, logger *logging.Logger, budgetManager *maestrobudget.BudgetManager) *reviewRLMProcessor {
 	module := modrlm.New(
 		llm,
 		modrlm.NewLLMSubClient(llm),
@@ -94,9 +96,10 @@ func newReviewRLMProcessor(llm core.LLM, instructionOverlay string, logger *logg
 		}),
 	)
 	return &reviewRLMProcessor{
-		agent:   agentrlm.NewAgent(reviewRLMAgentSignature, module),
-		overlay: strings.TrimSpace(instructionOverlay),
-		logger:  logger,
+		agent:         agentrlm.NewAgent(reviewRLMAgentSignature, module),
+		overlay:       strings.TrimSpace(instructionOverlay),
+		logger:        logger,
+		budgetManager: budgetManager,
 	}
 }
 
@@ -140,6 +143,7 @@ func (p *reviewRLMProcessor) processChunk(ctx context.Context, chunk map[string]
 	if err != nil {
 		return nil, err
 	}
+	p.recordBudgetUsage(ctx)
 	rawAnswer := strings.TrimSpace(stringFromReviewValue(output["answer"]))
 	issues, err := parseReviewRLMIssues(rawAnswer, filePath)
 	if err != nil {
@@ -152,6 +156,41 @@ func (p *reviewRLMProcessor) processChunk(ctx context.Context, chunk map[string]
 		Confidence:     calculateConfidence(issues),
 		FilePath:       filePath,
 	}, nil
+}
+
+func (p *reviewRLMProcessor) recordBudgetUsage(ctx context.Context) {
+	if p == nil || p.agent == nil {
+		return
+	}
+	trace := p.agent.LastExecutionTrace()
+	delta := maestrobudget.UsageDeltaFromExecutionTrace(trace)
+	if delta.Empty() {
+		return
+	}
+	manager := p.budgetManager
+	if manager == nil {
+		manager = maestrobudget.DefaultManager()
+	}
+	if err := manager.RecordUsageDelta(reviewRLMArtifactRoute, delta); err != nil && p.logger != nil {
+		p.logger.Warn(ctx, "Failed to record review RLM budget usage: %v", err)
+	}
+}
+
+func (p *reviewRLMProcessor) SetBudgetManager(manager *maestrobudget.BudgetManager) {
+	if p != nil {
+		p.budgetManager = manager
+	}
+}
+
+func (a *PRReviewAgent) SetBudgetManager(manager *maestrobudget.BudgetManager) {
+	if a == nil {
+		return
+	}
+	if budgetAware, ok := a.reviewProcessor.(interface {
+		SetBudgetManager(*maestrobudget.BudgetManager)
+	}); ok {
+		budgetAware.SetBudgetManager(manager)
+	}
 }
 
 func buildReviewRLMContext(chunk map[string]interface{}, taskContext map[string]interface{}) string {
@@ -594,7 +633,7 @@ func (p *reviewRLMProcessor) Clone() (optimize.OptimizableAgent, error) {
 	if !ok {
 		return nil, fmt.Errorf("review RLM clone produced %T", cloned)
 	}
-	return &reviewRLMProcessor{agent: rlmAgent, overlay: p.overlay, logger: p.logger}, nil
+	return &reviewRLMProcessor{agent: rlmAgent, overlay: p.overlay, logger: p.logger, budgetManager: p.budgetManager}, nil
 }
 
 func (p *reviewRLMProcessor) Execute(ctx context.Context, input map[string]interface{}) (map[string]interface{}, error) {

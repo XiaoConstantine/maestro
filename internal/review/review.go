@@ -233,7 +233,7 @@ func NewPRReviewAgent(ctx context.Context, githubTool GitHubInterface, dbPath st
 	stopper := NewStopper()
 	indexStatus := types.NewIndexingStatus()
 
-	reviewProcessor, reviewProcessorMode, err := newRuntimeReviewChunkProcessor(ctx, metricsCollector, logger, reviewInstructionOverlay)
+	reviewProcessor, reviewProcessorMode, err := newRuntimeReviewChunkProcessor(ctx, metricsCollector, logger, reviewInstructionOverlay, nil)
 	if err != nil {
 		return nil, fmt.Errorf("initialize review chunk processor: %w", err)
 	}

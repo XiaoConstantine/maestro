@@ -15,6 +15,7 @@ import (
 	"github.com/XiaoConstantine/dspy-go/pkg/core"
 	"github.com/XiaoConstantine/dspy-go/pkg/llms"
 	"github.com/XiaoConstantine/dspy-go/pkg/logging"
+	maestrobudget "github.com/XiaoConstantine/maestro/internal/budget"
 	maestrooptimize "github.com/XiaoConstantine/maestro/internal/optimize"
 	"github.com/XiaoConstantine/maestro/internal/review"
 	"github.com/XiaoConstantine/maestro/internal/util"
@@ -39,6 +40,7 @@ type reviewRLMOptimizationCheckpoint struct {
 	BaselinePath           string                               `json:"baseline_path,omitempty"`
 	WriteBaselinePath      string                               `json:"write_baseline_path,omitempty"`
 	ProtectedGate          *maestrooptimize.ProtectedGateReport `json:"protected_gate,omitempty"`
+	BudgetStatus           *maestrobudget.BudgetStatus          `json:"budget_status,omitempty"`
 	BestCandidateID        string                               `json:"best_candidate_id,omitempty"`
 	ArtifactMetadata       map[string]interface{}               `json:"artifact_metadata,omitempty"`
 	BestArtifacts          optimize.AgentArtifacts              `json:"best_artifacts,omitempty"`
@@ -207,8 +209,9 @@ func main() {
 		fatalf("%v", err)
 	}
 
+	budgetManager := maestrobudget.NewBudgetManager(maestrobudget.DefaultConfig())
 	evaluator := review.NewReviewBenchmarkEvaluator(review.DefaultReviewBenchmarkEvaluatorConfig())
-	seedAgent, err := review.NewReviewRLMBenchmarkAgent(llm, logger, optimize.AgentArtifacts{}, "", maxChunksPerCase)
+	seedAgent, err := review.NewReviewRLMBenchmarkAgent(llm, logger, optimize.AgentArtifacts{}, "", maxChunksPerCase, budgetManager)
 	if err != nil {
 		fatalf("create review RLM benchmark agent: %v", err)
 	}
@@ -247,6 +250,7 @@ func main() {
 			BaselineOnly:           true,
 			WriteBaselinePath:      resolvedWriteBaselinePath,
 			ProtectedGate:          selfGate,
+			BudgetStatus:           statusPointer(budgetManager.Status()),
 			ArtifactMetadata:       reviewRLMArtifactMetadata(string(modelID), suitePaths, len(trainingExamples), len(validationExamples), baselineRun.AverageScore),
 			BestArtifacts:          seedArtifacts,
 		}
@@ -407,6 +411,7 @@ func main() {
 		BaselinePath:           resolvedBaselinePath,
 		WriteBaselinePath:      resolvedWriteBaselinePath,
 		ProtectedGate:          protectedGate,
+		BudgetStatus:           statusPointer(budgetManager.Status()),
 		BestCandidateID:        bestCandidateID,
 		ArtifactMetadata:       metadata,
 		BestArtifacts:          bestArtifacts,
@@ -562,6 +567,10 @@ func writeJSON(path string, value interface{}) error {
 		return err
 	}
 	return os.WriteFile(resolvedPath, append(data, '\n'), 0o644)
+}
+
+func statusPointer(status maestrobudget.BudgetStatus) *maestrobudget.BudgetStatus {
+	return &status
 }
 
 func expandPath(path string) (string, error) {

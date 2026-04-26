@@ -17,6 +17,7 @@ import (
 	"github.com/XiaoConstantine/dspy-go/pkg/core"
 	"github.com/XiaoConstantine/dspy-go/pkg/logging"
 	maestroace "github.com/XiaoConstantine/maestro/internal/ace"
+	maestrobudget "github.com/XiaoConstantine/maestro/internal/budget"
 	"github.com/XiaoConstantine/maestro/internal/subagent"
 	"github.com/XiaoConstantine/maestro/internal/types"
 	"github.com/briandowns/spinner"
@@ -77,6 +78,8 @@ type ServiceConfig struct {
 	GitHubToken                 string
 	IndexWorkers                int
 	ReviewWorkers               int
+	BudgetConfig                maestrobudget.Config
+	BudgetManager               *maestrobudget.BudgetManager
 }
 
 type Request struct {
@@ -110,6 +113,7 @@ type MaestroService struct {
 	aceManager             *maestroace.MaestroACEManager
 	rlmOverviewSkillStore  skills.Store
 	rlmOverviewSkillDomain string
+	budgetManager          *maestrobudget.BudgetManager
 
 	mu          sync.RWMutex
 	initialized bool
@@ -127,6 +131,10 @@ func NewMaestroService(ctx context.Context, config *ServiceConfig, githubTools t
 	}
 
 	memory := agents.NewInMemoryStore()
+	budgetManager := config.BudgetManager
+	if budgetManager == nil {
+		budgetManager = maestrobudget.NewBudgetManager(config.BudgetConfig)
+	}
 
 	qaArtifacts, err := loadConfiguredQAArtifacts(config.QAArtifactsPath)
 	if err != nil {
@@ -256,6 +264,7 @@ func NewMaestroService(ctx context.Context, config *ServiceConfig, githubTools t
 		aceManager:             aceManager,
 		rlmOverviewSkillStore:  rlmOverviewSkillStore,
 		rlmOverviewSkillDomain: rlmOverviewSkillDomain,
+		budgetManager:          budgetManager,
 		initialized:            true,
 	}, nil
 }
@@ -263,16 +272,24 @@ func NewMaestroService(ctx context.Context, config *ServiceConfig, githubTools t
 func (s *MaestroService) ProcessRequest(ctx context.Context, request Request) (*Response, error) {
 	switch request.Type {
 	case RequestReview:
-		return s.handleReview(ctx, request)
+		return s.withBudgetMetadata(s.handleReview(ctx, request))
 	case RequestAsk:
-		return s.handleAsk(ctx, request)
+		return s.withBudgetMetadata(s.handleAsk(ctx, request))
 	case RequestClaude:
-		return s.handleClaude(ctx, request)
+		return s.withBudgetMetadata(s.handleClaude(ctx, request))
 	case RequestGemini:
-		return s.handleGemini(ctx, request)
+		return s.withBudgetMetadata(s.handleGemini(ctx, request))
 	default:
 		return nil, fmt.Errorf("unknown request type: %s", request.Type)
 	}
+}
+
+func (s *MaestroService) withBudgetMetadata(response *Response, err error) (*Response, error) {
+	if err != nil {
+		return nil, err
+	}
+	s.attachBudgetMetadata(response)
+	return response, nil
 }
 
 func (s *MaestroService) handleReview(ctx context.Context, request Request) (*Response, error) {
@@ -435,6 +452,44 @@ func (s *MaestroService) buildTaskContext(ctx context.Context) map[string]interf
 	return taskContext
 }
 
+func (s *MaestroService) GetBudgetManager() *maestrobudget.BudgetManager {
+	if s == nil {
+		return nil
+	}
+	return s.budgetManager
+}
+
+func (s *MaestroService) BudgetStatus() *maestrobudget.BudgetStatus {
+	if s == nil || s.budgetManager == nil {
+		return nil
+	}
+	status := s.budgetManager.Status()
+	return &status
+}
+
+func (s *MaestroService) attachBudgetMetadata(response *Response) {
+	if response == nil || s == nil || s.budgetManager == nil {
+		return
+	}
+	status := s.budgetManager.Status()
+	if response.Metadata == nil {
+		response.Metadata = make(map[string]interface{})
+	}
+	response.Metadata["budget_total_spent"] = status.TotalSpentUSD
+	response.Metadata["budget_remaining"] = status.RemainingUSD
+	response.Metadata["budget_percent_used"] = status.PercentUsed
+	response.Metadata["budget_total_tokens"] = status.TotalTokens
+	response.Metadata["budget_weighted_total_tokens"] = status.WeightedTotalTokens
+	response.Metadata["budget_cache_read_input_tokens"] = status.CacheReadInputTokens
+	response.Metadata["budget_cache_token_weight_unavailable"] = status.CacheTokenWeightUnavailable
+	response.Metadata["budget_scope"] = "running_total"
+	response.Metadata["budget_running_total_spent"] = status.TotalSpentUSD
+	response.Metadata["budget_running_remaining"] = status.RemainingUSD
+	response.Metadata["budget_running_percent_used"] = status.PercentUsed
+	response.Metadata["budget_running_total_tokens"] = status.TotalTokens
+	response.Metadata["budget_running_weighted_total_tokens"] = status.WeightedTotalTokens
+}
+
 func (s *MaestroService) IsReady() bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -466,6 +521,11 @@ func (s *MaestroService) GetACEManager() *maestroace.MaestroACEManager {
 }
 
 func (s *MaestroService) SetReviewAgent(agent types.ReviewAgent) {
+	if budgetAware, ok := agent.(interface {
+		SetBudgetManager(*maestrobudget.BudgetManager)
+	}); ok {
+		budgetAware.SetBudgetManager(s.budgetManager)
+	}
 	s.pool.SetReviewAgent(agent)
 }
 
