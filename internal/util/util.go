@@ -232,6 +232,7 @@ func CheckProviderAPIKey(provider, apiKey string) (string, error) {
 	case "anthropic":
 		// Check both older and newer Anthropic environment variable patterns
 		envKey = FirstNonEmpty(
+			os.Getenv("ANTHROPIC_OAUTH_TOKEN"),
 			os.Getenv("ANTHROPIC_API_KEY"),
 			os.Getenv("CLAUDE_API_KEY"),
 		)
@@ -256,7 +257,7 @@ func CheckProviderAPIKey(provider, apiKey string) (string, error) {
 		var envVars []string
 		switch provider {
 		case "anthropic":
-			envVars = []string{"ANTHROPIC_API_KEY", "CLAUDE_API_KEY"}
+			envVars = []string{"ANTHROPIC_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "CLAUDE_API_KEY"}
 		case "google":
 			envVars = []string{"GOOGLE_API_KEY", "GOOGLE_GEMINI_KEY", "GEMINI_API_KEY"}
 		case "openai":

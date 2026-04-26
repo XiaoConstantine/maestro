@@ -92,6 +92,20 @@ func TestCheckProviderAPIKeyOpenAI(t *testing.T) {
 	}
 }
 
+func TestCheckProviderAPIKeyAnthropicUsesOAuthToken(t *testing.T) {
+	t.Setenv("ANTHROPIC_OAUTH_TOKEN", "sk-ant-oat-test")
+	t.Setenv("ANTHROPIC_API_KEY", "anthropic-api-key")
+	t.Setenv("CLAUDE_API_KEY", "claude-api-key")
+
+	got, err := CheckProviderAPIKey("anthropic", "")
+	if err != nil {
+		t.Fatalf("CheckProviderAPIKey() error = %v", err)
+	}
+	if got != "sk-ant-oat-test" {
+		t.Fatalf("CheckProviderAPIKey() = %q, want OAuth token", got)
+	}
+}
+
 func TestValidateModelConfigDefaultsOpenAIBaseURL(t *testing.T) {
 	t.Setenv("OPENAI_API_KEY", "test-openai-key")
 	t.Setenv("OPENAI_BASE_URL", "")
