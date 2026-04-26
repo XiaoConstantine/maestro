@@ -1,4 +1,4 @@
-package optimizeutil
+package optimize
 
 import (
 	"encoding/json"
@@ -8,12 +8,12 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/XiaoConstantine/dspy-go/pkg/agents/optimize"
+	dspyoptimize "github.com/XiaoConstantine/dspy-go/pkg/agents/optimize"
 )
 
 // SplitAgentExamples creates a deterministic, repo-stratified validation split.
 // Each group keeps at least one training example when possible.
-func SplitAgentExamples(examples []optimize.AgentExample, validationSplit float64, minExamples int) ([]optimize.AgentExample, []optimize.AgentExample, error) {
+func SplitAgentExamples(examples []dspyoptimize.AgentExample, validationSplit float64, minExamples int) ([]dspyoptimize.AgentExample, []dspyoptimize.AgentExample, error) {
 	if len(examples) == 0 {
 		return nil, nil, fmt.Errorf("at least one benchmark example is required")
 	}
@@ -43,9 +43,30 @@ func ValidateUnitThreshold(name string, value float64) error {
 	return nil
 }
 
+func ValidateReplayBaselineOnly(replayOnly, baselineOnly bool) error {
+	if replayOnly && baselineOnly {
+		return fmt.Errorf("--replay-only and --baseline-only are mutually exclusive")
+	}
+	return nil
+}
+
+func ValidateBaselineOnlyWritePath(baselineOnly bool, writeBaselinePath string) error {
+	if baselineOnly && strings.TrimSpace(writeBaselinePath) == "" {
+		return fmt.Errorf("--baseline-only requires --write-baseline")
+	}
+	return nil
+}
+
+func ValidateProtectedGateRequirement(replayOnly, baselineOnly, hasBaseline, skipProtectedGate bool, writeBaselinePath string) error {
+	if replayOnly || baselineOnly || hasBaseline || skipProtectedGate || strings.TrimSpace(writeBaselinePath) != "" {
+		return nil
+	}
+	return fmt.Errorf("--baseline is required for GEPA artifact acceptance; pass --skip-protected-gate only for local experiments")
+}
+
 type indexedAgentExample struct {
 	index   int
-	example optimize.AgentExample
+	example dspyoptimize.AgentExample
 }
 
 type agentExampleSplitGroup struct {
@@ -56,7 +77,7 @@ type agentExampleSplitGroup struct {
 	remainder       float64
 }
 
-func stratifiedAgentExampleSplit(examples []optimize.AgentExample, validationCount int) ([]optimize.AgentExample, []optimize.AgentExample, error) {
+func stratifiedAgentExampleSplit(examples []dspyoptimize.AgentExample, validationCount int) ([]dspyoptimize.AgentExample, []dspyoptimize.AgentExample, error) {
 	groups := splitAgentExampleGroups(examples, validationCount)
 	capacity := 0
 	for i := range groups {
@@ -124,8 +145,8 @@ func stratifiedAgentExampleSplit(examples []optimize.AgentExample, validationCou
 		}
 	}
 
-	training := make([]optimize.AgentExample, 0, len(examples)-len(validationIndices))
-	validation := make([]optimize.AgentExample, 0, len(validationIndices))
+	training := make([]dspyoptimize.AgentExample, 0, len(examples)-len(validationIndices))
+	validation := make([]dspyoptimize.AgentExample, 0, len(validationIndices))
 	for i, example := range examples {
 		if _, ok := validationIndices[i]; ok {
 			validation = append(validation, example)
@@ -139,7 +160,7 @@ func stratifiedAgentExampleSplit(examples []optimize.AgentExample, validationCou
 	return training, validation, nil
 }
 
-func splitAgentExampleGroups(examples []optimize.AgentExample, validationCount int) []agentExampleSplitGroup {
+func splitAgentExampleGroups(examples []dspyoptimize.AgentExample, validationCount int) []agentExampleSplitGroup {
 	groupIndex := make(map[string]int)
 	groups := make([]agentExampleSplitGroup, 0)
 	for i, example := range examples {
@@ -165,7 +186,7 @@ func splitAgentExampleGroups(examples []optimize.AgentExample, validationCount i
 	return groups
 }
 
-func splitAgentExampleGroupKey(example optimize.AgentExample) string {
+func splitAgentExampleGroupKey(example dspyoptimize.AgentExample) string {
 	owner := stringFromInterface(example.Inputs["owner"])
 	repo := stringFromInterface(example.Inputs["repo"])
 	if repo != "" {

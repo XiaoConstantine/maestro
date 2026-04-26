@@ -23,21 +23,25 @@ import (
 type suiteListFlag []string
 
 type reviewRLMOptimizationCheckpoint struct {
-	WrittenAt              time.Time               `json:"written_at"`
-	SuitePaths             []string                `json:"suite_paths"`
-	ModelID                string                  `json:"model_id"`
-	ArtifactPath           string                  `json:"artifact_path,omitempty"`
-	TrainingExampleCount   int                     `json:"training_example_count"`
-	ValidationExampleCount int                     `json:"validation_example_count"`
-	BaselineValidation     float64                 `json:"baseline_validation_score"`
-	BestValidation         float64                 `json:"best_validation_score"`
-	ValidationDelta        float64                 `json:"validation_delta"`
-	Outcome                string                  `json:"outcome"`
-	ReplayOnly             bool                    `json:"replay_only,omitempty"`
-	ArtifactWritten        bool                    `json:"artifact_written"`
-	BestCandidateID        string                  `json:"best_candidate_id,omitempty"`
-	ArtifactMetadata       map[string]interface{}  `json:"artifact_metadata,omitempty"`
-	BestArtifacts          optimize.AgentArtifacts `json:"best_artifacts,omitempty"`
+	WrittenAt              time.Time                            `json:"written_at"`
+	SuitePaths             []string                             `json:"suite_paths"`
+	ModelID                string                               `json:"model_id"`
+	ArtifactPath           string                               `json:"artifact_path,omitempty"`
+	TrainingExampleCount   int                                  `json:"training_example_count"`
+	ValidationExampleCount int                                  `json:"validation_example_count"`
+	BaselineValidation     float64                              `json:"baseline_validation_score"`
+	BestValidation         float64                              `json:"best_validation_score"`
+	ValidationDelta        float64                              `json:"validation_delta"`
+	Outcome                string                               `json:"outcome"`
+	ReplayOnly             bool                                 `json:"replay_only,omitempty"`
+	BaselineOnly           bool                                 `json:"baseline_only,omitempty"`
+	ArtifactWritten        bool                                 `json:"artifact_written"`
+	BaselinePath           string                               `json:"baseline_path,omitempty"`
+	WriteBaselinePath      string                               `json:"write_baseline_path,omitempty"`
+	ProtectedGate          *maestrooptimize.ProtectedGateReport `json:"protected_gate,omitempty"`
+	BestCandidateID        string                               `json:"best_candidate_id,omitempty"`
+	ArtifactMetadata       map[string]interface{}               `json:"artifact_metadata,omitempty"`
+	BestArtifacts          optimize.AgentArtifacts              `json:"best_artifacts,omitempty"`
 }
 
 const (
@@ -68,6 +72,8 @@ func main() {
 		suitePaths         suiteListFlag
 		outputPath         string
 		artifactPath       string
+		baselinePath       string
+		writeBaselinePath  string
 		apiKey             string
 		modelSpec          string
 		modelProvider      string
@@ -75,7 +81,9 @@ func main() {
 		modelCfg           string
 		baseURL            string
 		replayOnly         bool
+		baselineOnly       bool
 		allowNoImprovement bool
+		skipProtectedGate  bool
 		verbose            bool
 		populationSize     int
 		generations        int
@@ -87,6 +95,7 @@ func main() {
 		maxMetricCalls     int
 		scoreThreshold     float64
 		passThreshold      float64
+		protectedTolerance float64
 		maxRuntime         time.Duration
 		validationSplit    float64
 		maxCasesPerRun     int
@@ -98,6 +107,8 @@ func main() {
 	flag.Var(&suitePaths, "suite", "Path to a review benchmark suite JSON; repeat or comma-separate to evaluate multiple suites; default expects the generated Gerrit corpus under ~/.maestro")
 	flag.StringVar(&outputPath, "output", defaultReviewRLMCheckpointPath, "Path to write the review RLM optimization checkpoint JSON")
 	flag.StringVar(&artifactPath, "artifact", "", "Path to write/read the optimized review RLM program JSON; defaults to ~/.maestro/rlm_artifacts/review_optimized_program.json")
+	flag.StringVar(&baselinePath, "baseline", "", "Optional versioned protected baseline JSON for strict per-case regression gates")
+	flag.StringVar(&writeBaselinePath, "write-baseline", "", "Optional path to write a protected baseline JSON from the baseline run")
 	flag.StringVar(&apiKey, "api-key", "", "API key for external model providers")
 	flag.StringVar(&modelSpec, "model", "", `Full model specification (e.g. "anthropic:claude-sonnet-4-6" or "openai:gpt-5.4-mini")`)
 	flag.StringVar(&modelProvider, "provider", "anthropic", "Model provider (anthropic, google, openai, ollama, llamacpp)")
@@ -105,7 +116,9 @@ func main() {
 	flag.StringVar(&modelCfg, "model-config", "", "Additional model configuration")
 	flag.StringVar(&baseURL, "base-url", "", "Optional base URL override for local providers")
 	flag.BoolVar(&replayOnly, "replay-only", false, "Replay a previously saved optimized review RLM program instead of running GEPA")
+	flag.BoolVar(&baselineOnly, "baseline-only", false, "Run the unoptimized review RLM agent once, write --write-baseline, and exit without GEPA")
 	flag.BoolVar(&allowNoImprovement, "allow-no-improvement", false, "Write a GEPA artifact even when validation does not improve over baseline")
+	flag.BoolVar(&skipProtectedGate, "skip-protected-gate", false, "Allow writing optimized artifacts without a supplied protected baseline")
 	flag.BoolVar(&verbose, "verbose", false, "Enable verbose logging")
 	flag.IntVar(&populationSize, "population", 4, "GEPA population size; default is smoke-test grade, use 12+ for production runs")
 	flag.IntVar(&generations, "generations", 2, "GEPA generation count; default is smoke-test grade, use 8+ for production runs")
@@ -117,6 +130,7 @@ func main() {
 	flag.IntVar(&maxMetricCalls, "max-metric-calls", 0, "Optional cap on GEPA metric evaluations; 0 disables the cap")
 	flag.Float64Var(&scoreThreshold, "score-threshold", 0, "Optional early-stop threshold for validation score; 0 disables it")
 	flag.Float64Var(&passThreshold, "pass-threshold", 0.75, "Minimum validation score GEPA should treat as a passing candidate")
+	flag.Float64Var(&protectedTolerance, "protected-regression-tolerance", 0, "Allowed protected-case score regression before failing the run")
 	flag.DurationVar(&maxRuntime, "max-runtime", 0, "Optional wall-clock limit for GEPA optimization; 0 disables it")
 	flag.Float64Var(&validationSplit, "validation-split", 0.25, "Validation split for each review benchmark suite")
 	flag.IntVar(&maxCasesPerRun, "max-cases-per-run", 0, "Optional cap on the number of benchmark cases loaded from each suite")
@@ -130,6 +144,9 @@ func main() {
 		suitePaths = suiteListFlag{defaultReviewRLMSuitePath}
 	}
 	if err := maestrooptimize.ValidateUnitThreshold("pass-threshold", passThreshold); err != nil {
+		fatalf("%v", err)
+	}
+	if err := maestrooptimize.ValidateReplayBaselineOnly(replayOnly, baselineOnly); err != nil {
 		fatalf("%v", err)
 	}
 
@@ -152,6 +169,20 @@ func main() {
 	if err != nil {
 		fatalf("resolve artifact path: %v", err)
 	}
+	resolvedBaselinePath := ""
+	if strings.TrimSpace(baselinePath) != "" {
+		resolvedBaselinePath, err = expandPath(baselinePath)
+		if err != nil {
+			fatalf("resolve baseline path: %v", err)
+		}
+	}
+	resolvedWriteBaselinePath := ""
+	if strings.TrimSpace(writeBaselinePath) != "" {
+		resolvedWriteBaselinePath, err = expandPath(writeBaselinePath)
+		if err != nil {
+			fatalf("resolve write-baseline path: %v", err)
+		}
+	}
 	suites, trainingExamples, validationExamples, err := review.LoadBenchmarkSuites(suitePaths, validationSplit, maxCasesPerRun)
 	if err != nil {
 		if usingDefaultSuite {
@@ -162,6 +193,19 @@ func main() {
 	if len(validationExamples) == 0 {
 		fatalf("at least one validation example is required")
 	}
+	var baseline *maestrooptimize.ProtectedBaseline
+	if resolvedBaselinePath != "" {
+		baseline, err = maestrooptimize.LoadProtectedBaseline(resolvedBaselinePath, review.ReviewRLMAgentSignature())
+		if err != nil {
+			fatalf("load protected baseline: %v", err)
+		}
+	}
+	if err := maestrooptimize.ValidateBaselineOnlyWritePath(baselineOnly, resolvedWriteBaselinePath); err != nil {
+		fatalf("%v", err)
+	}
+	if err := maestrooptimize.ValidateProtectedGateRequirement(replayOnly, baselineOnly, baseline != nil, skipProtectedGate, resolvedWriteBaselinePath); err != nil {
+		fatalf("%v", err)
+	}
 
 	evaluator := review.NewReviewBenchmarkEvaluator(review.DefaultReviewBenchmarkEvaluatorConfig())
 	seedAgent, err := review.NewReviewRLMBenchmarkAgent(llm, logger, optimize.AgentArtifacts{}, "", maxChunksPerCase)
@@ -170,6 +214,54 @@ func main() {
 	}
 	seedArtifacts := seedAgent.GetArtifacts()
 
+	if baselineOnly {
+		baselineRun, err := runHarnessEvaluation(ctx, evaluator, seedAgent, validationExamples, passThreshold)
+		if err != nil {
+			fatalf("evaluate baseline: %v", err)
+		}
+		baselineResults := maestrooptimize.ProtectedCaseResultsFromHarness(validationExamples, baselineRun)
+		nextBaseline, err := maestrooptimize.NewProtectedBaseline(
+			review.ReviewRLMAgentSignature(),
+			baselineResults,
+		)
+		if err != nil {
+			fatalf("build protected baseline: %v", err)
+		}
+		if err := maestrooptimize.WriteProtectedBaseline(resolvedWriteBaselinePath, nextBaseline, review.ReviewRLMAgentSignature()); err != nil {
+			fatalf("write protected baseline: %v", err)
+		}
+		selfGate, err := maestrooptimize.VerifyProtectedBaselineFile(resolvedWriteBaselinePath, review.ReviewRLMAgentSignature(), baselineResults)
+		if err != nil {
+			fatalf("verify protected baseline: %v", err)
+		}
+		checkpoint := reviewRLMOptimizationCheckpoint{
+			WrittenAt:              time.Now().UTC(),
+			SuitePaths:             append([]string(nil), suitePaths...),
+			ModelID:                string(modelID),
+			ArtifactPath:           resolvedArtifactPath,
+			TrainingExampleCount:   len(trainingExamples),
+			ValidationExampleCount: len(validationExamples),
+			BaselineValidation:     baselineRun.AverageScore,
+			BestValidation:         baselineRun.AverageScore,
+			Outcome:                "baseline",
+			BaselineOnly:           true,
+			WriteBaselinePath:      resolvedWriteBaselinePath,
+			ProtectedGate:          selfGate,
+			ArtifactMetadata:       reviewRLMArtifactMetadata(string(modelID), suitePaths, len(trainingExamples), len(validationExamples), baselineRun.AverageScore),
+			BestArtifacts:          seedArtifacts,
+		}
+		if err := writeJSON(outputPath, checkpoint); err != nil {
+			fatalf("write checkpoint: %v", err)
+		}
+		fmt.Printf("Review RLM baseline complete\n")
+		fmt.Printf("Model:               %s\n", modelID)
+		fmt.Printf("Validation examples: %d\n", len(validationExamples))
+		fmt.Printf("Baseline validation: %.4f\n", baselineRun.AverageScore)
+		fmt.Printf("Baseline:            %s\n", resolvedWriteBaselinePath)
+		fmt.Printf("Checkpoint:          %s\n", outputPath)
+		return
+	}
+
 	bestArtifacts := seedArtifacts.Clone()
 	baselineScore := 0.0
 	bestValidation := 0.0
@@ -177,6 +269,7 @@ func main() {
 	outcome := "replay"
 	bestCandidateID := ""
 	artifactWritten := false
+	var protectedGate *maestrooptimize.ProtectedGateReport
 	metadata := reviewRLMArtifactMetadata(string(modelID), suitePaths, len(trainingExamples), len(validationExamples), baselineScore)
 
 	if replayOnly {
@@ -195,9 +288,18 @@ func main() {
 			fatalf("apply optimized program: %v", err)
 		}
 		bestArtifacts = replayAgent.GetArtifacts()
-		bestValidation, err = evaluateExamples(ctx, evaluator, replayAgent, validationExamples)
+		replayRun, err := runHarnessEvaluation(ctx, evaluator, replayAgent, validationExamples, passThreshold)
 		if err != nil {
 			fatalf("evaluate replay: %v", err)
+		}
+		bestValidation = replayRun.AverageScore
+		if baseline != nil {
+			protectedGate = maestrooptimize.EvaluateProtectedGate(
+				maestrooptimize.ProtectedCaseResultsFromHarness(validationExamples, replayRun),
+				baseline,
+				review.ReviewRLMAgentSignature(),
+				protectedTolerance,
+			)
 		}
 	} else {
 		workflow, err := optimize.RunGEPAWorkflow(ctx, seedAgent, optimize.GEPAWorkflowRequest{
@@ -236,6 +338,7 @@ func main() {
 			fatalf("GEPA workflow returned incomplete optimization result")
 		}
 		baselineScore = workflowBaselineValidation(workflow)
+		// RunGEPAWorkflow computes BestValidationEvaluation from ValidationExamples; ReplayExamples is the same slice here, so outcome and protected gate use the same validation distribution.
 		bestValidation = workflowBestValidation(workflow)
 		validationDelta = bestValidation - baselineScore
 		outcome = validationOutcome(validationDelta)
@@ -254,7 +357,32 @@ func main() {
 		if err := review.AnnotateReviewRLMOptimizedProgram(workflow.OptimizedProgram, metadata); err != nil {
 			fatalf("annotate optimized program: %v", err)
 		}
-		if shouldWriteValidationArtifact(outcome, allowNoImprovement) {
+		if resolvedWriteBaselinePath != "" {
+			baselineResults := maestrooptimize.ProtectedCaseResultsFromHarness(validationExamples, workflow.BaselineRun)
+			nextBaseline, err := maestrooptimize.NewProtectedBaseline(
+				review.ReviewRLMAgentSignature(),
+				baselineResults,
+			)
+			if err != nil {
+				fatalf("build protected baseline: %v", err)
+			}
+			if err := maestrooptimize.WriteProtectedBaseline(resolvedWriteBaselinePath, nextBaseline, review.ReviewRLMAgentSignature()); err != nil {
+				fatalf("write protected baseline: %v", err)
+			}
+			if _, err := maestrooptimize.VerifyProtectedBaselineFile(resolvedWriteBaselinePath, review.ReviewRLMAgentSignature(), baselineResults); err != nil {
+				fatalf("verify protected baseline: %v", err)
+			}
+		}
+		if baseline != nil {
+			protectedGate = maestrooptimize.EvaluateProtectedGate(
+				maestrooptimize.ProtectedCaseResultsFromHarness(validationExamples, workflow.ReplayRun),
+				baseline,
+				review.ReviewRLMAgentSignature(),
+				protectedTolerance,
+			)
+		}
+		canAcceptArtifact := baseline != nil || skipProtectedGate
+		if shouldWriteValidationArtifact(outcome, allowNoImprovement) && canAcceptArtifact && protectedGatePassed(protectedGate) {
 			if err := review.WriteReviewRLMOptimizedProgram(resolvedArtifactPath, workflow.OptimizedProgram); err != nil {
 				fatalf("write optimized program: %v", err)
 			}
@@ -274,7 +402,11 @@ func main() {
 		ValidationDelta:        validationDelta,
 		Outcome:                outcome,
 		ReplayOnly:             replayOnly,
+		BaselineOnly:           baselineOnly,
 		ArtifactWritten:        artifactWritten,
+		BaselinePath:           resolvedBaselinePath,
+		WriteBaselinePath:      resolvedWriteBaselinePath,
+		ProtectedGate:          protectedGate,
 		BestCandidateID:        bestCandidateID,
 		ArtifactMetadata:       metadata,
 		BestArtifacts:          bestArtifacts,
@@ -293,10 +425,13 @@ func main() {
 	fmt.Printf("Validation delta:    %.4f\n", validationDelta)
 	fmt.Printf("Outcome:             %s\n", outcome)
 	fmt.Printf("Replay only:         %t\n", replayOnly)
+	if protectedGate != nil {
+		fmt.Printf("Protected gate:      %t\n", protectedGate.Passed)
+	}
 	fmt.Printf("Artifact written:    %t\n", artifactWritten)
 	fmt.Printf("Artifact:            %s\n", resolvedArtifactPath)
 	fmt.Printf("Checkpoint:          %s\n", outputPath)
-	if outcome == "regressed" {
+	if outcome == "regressed" || protectedGateFailed(protectedGate) {
 		os.Exit(2)
 	}
 }
@@ -333,23 +468,15 @@ func resolveModel(modelSpec, provider, modelName, modelCfg, apiKey, baseURL stri
 	return cfg, util.ConstructModelID(cfg), nil
 }
 
-func evaluateExamples(ctx context.Context, evaluator optimize.AgentEvaluator, agent optimize.OptimizableAgent, examples []optimize.AgentExample) (float64, error) {
+func runHarnessEvaluation(ctx context.Context, evaluator optimize.AgentEvaluator, agent optimize.OptimizableAgent, examples []optimize.AgentExample, passThreshold float64) (*optimize.HarnessRunResult, error) {
 	if len(examples) == 0 {
-		return 0, fmt.Errorf("at least one validation example is required")
+		return nil, fmt.Errorf("at least one validation example is required")
 	}
-	total := 0.0
-	for _, example := range examples {
-		cloned, err := agent.Clone()
-		if err != nil {
-			return 0, err
-		}
-		result, err := evaluator.Evaluate(ctx, cloned, example)
-		if err != nil {
-			return 0, fmt.Errorf("evaluate example %q: %w", example.ID, err)
-		}
-		total += result.Score
+	harness := &optimize.Harness{
+		Evaluator:     evaluator,
+		PassThreshold: passThreshold,
 	}
-	return total / float64(len(examples)), nil
+	return harness.Run(ctx, agent, examples)
 }
 
 func workflowBaselineValidation(workflow *optimize.GEPAWorkflowResult) float64 {
@@ -384,6 +511,14 @@ func validationOutcome(delta float64) string {
 
 func shouldWriteValidationArtifact(outcome string, allowNoImprovement bool) bool {
 	return outcome == "improved" || (allowNoImprovement && outcome == "no_change")
+}
+
+func protectedGatePassed(gate *maestrooptimize.ProtectedGateReport) bool {
+	return gate == nil || gate.Passed
+}
+
+func protectedGateFailed(gate *maestrooptimize.ProtectedGateReport) bool {
+	return gate != nil && !gate.Passed
 }
 
 func rlmIntMutationPlans(maxIterations, maxTokens int) map[string]optimize.IntMutationConfig {

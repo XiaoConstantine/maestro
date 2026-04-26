@@ -43,6 +43,7 @@ type ReviewBenchmarkCase struct {
 	Label            ReviewBenchmarkLabel `json:"label"`
 	PatchExcerpt     string               `json:"patch_excerpt,omitempty"`
 	ExpectedKeywords []string             `json:"expected_keywords,omitempty"`
+	Protected        bool                 `json:"protected,omitempty"`
 }
 
 type ReviewBenchmarkSuite struct {
@@ -141,6 +142,7 @@ func ReviewBenchmarkExamples(cases []ReviewBenchmarkCase) []optimize.AgentExampl
 			},
 			Metadata: map[string]interface{}{
 				"review_case": benchmarkCase,
+				"protected":   benchmarkCase.Protected,
 			},
 		})
 	}

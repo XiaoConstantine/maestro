@@ -436,6 +436,10 @@ func AnnotateReviewRLMOptimizedProgram(program *optimize.OptimizedAgentProgram, 
 	return annotateReviewRLMOptimizedProgram(program, metadata)
 }
 
+func ReviewRLMAgentSignature() string {
+	return reviewRLMAgentSignature
+}
+
 func ValidateReviewRLMOptimizedProgram(program *optimize.OptimizedAgentProgram) error {
 	return validateReviewRLMOptimizedProgram(program)
 }

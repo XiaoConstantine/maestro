@@ -1,21 +1,21 @@
-package optimizeutil
+package optimize
 
 import (
 	"testing"
 
-	"github.com/XiaoConstantine/dspy-go/pkg/agents/optimize"
+	dspyoptimize "github.com/XiaoConstantine/dspy-go/pkg/agents/optimize"
 )
 
 func TestSplitAgentExamplesStratifiesByRepo(t *testing.T) {
-	examples := make([]optimize.AgentExample, 0, 16)
+	examples := make([]dspyoptimize.AgentExample, 0, 16)
 	for i := 0; i < 8; i++ {
-		examples = append(examples, optimize.AgentExample{
+		examples = append(examples, dspyoptimize.AgentExample{
 			ID:     "maestro-case-" + string(rune('a'+i)),
 			Inputs: map[string]interface{}{"owner": "XiaoConstantine", "repo": "maestro"},
 		})
 	}
 	for i := 0; i < 8; i++ {
-		examples = append(examples, optimize.AgentExample{
+		examples = append(examples, dspyoptimize.AgentExample{
 			ID:     "dspy-case-" + string(rune('a'+i)),
 			Inputs: map[string]interface{}{"owner": "XiaoConstantine", "repo": "dspy-go"},
 		})
@@ -48,9 +48,9 @@ func TestSplitAgentExamplesStratifiesByRepo(t *testing.T) {
 }
 
 func TestSplitAgentExamplesUsesOverviewMetadataFallback(t *testing.T) {
-	examples := make([]optimize.AgentExample, 0, 16)
+	examples := make([]dspyoptimize.AgentExample, 0, 16)
 	for i := 0; i < 8; i++ {
-		examples = append(examples, optimize.AgentExample{
+		examples = append(examples, dspyoptimize.AgentExample{
 			ID: "maestro-metadata-" + string(rune('a'+i)),
 			Metadata: map[string]interface{}{
 				"rlm_overview_case": map[string]interface{}{"owner": "XiaoConstantine", "repo": "maestro"},
@@ -58,7 +58,7 @@ func TestSplitAgentExamplesUsesOverviewMetadataFallback(t *testing.T) {
 		})
 	}
 	for i := 0; i < 8; i++ {
-		examples = append(examples, optimize.AgentExample{
+		examples = append(examples, dspyoptimize.AgentExample{
 			ID: "dspy-metadata-" + string(rune('a'+i)),
 			Metadata: map[string]interface{}{
 				"rlm_overview_case": struct {
@@ -84,9 +84,9 @@ func TestSplitAgentExamplesUsesOverviewMetadataFallback(t *testing.T) {
 }
 
 func TestSplitAgentExamplesRejectsTinySuites(t *testing.T) {
-	examples := make([]optimize.AgentExample, 0, 15)
+	examples := make([]dspyoptimize.AgentExample, 0, 15)
 	for i := 0; i < 15; i++ {
-		examples = append(examples, optimize.AgentExample{ID: "case-" + string(rune('a'+i))})
+		examples = append(examples, dspyoptimize.AgentExample{ID: "case-" + string(rune('a'+i))})
 	}
 
 	if _, _, err := SplitAgentExamples(examples, 0.25, 16); err == nil {
@@ -103,5 +103,50 @@ func TestValidateUnitThreshold(t *testing.T) {
 	}
 	if err := ValidateUnitThreshold("pass-threshold", 1.01); err == nil {
 		t.Fatalf("ValidateUnitThreshold(1.01) error = nil, want error")
+	}
+}
+
+func TestValidateReplayBaselineOnlyRejectsBoth(t *testing.T) {
+	if err := ValidateReplayBaselineOnly(true, true); err == nil {
+		t.Fatalf("ValidateReplayBaselineOnly(true, true) error = nil, want mutually exclusive error")
+	}
+	if err := ValidateReplayBaselineOnly(true, false); err != nil {
+		t.Fatalf("ValidateReplayBaselineOnly(true, false) error = %v", err)
+	}
+	if err := ValidateReplayBaselineOnly(false, true); err != nil {
+		t.Fatalf("ValidateReplayBaselineOnly(false, true) error = %v", err)
+	}
+}
+
+func TestValidateBaselineOnlyWritePathRequiresOutput(t *testing.T) {
+	if err := ValidateBaselineOnlyWritePath(true, ""); err == nil {
+		t.Fatalf("ValidateBaselineOnlyWritePath(true, empty) error = nil, want missing write-baseline error")
+	}
+	if err := ValidateBaselineOnlyWritePath(true, "baseline.json"); err != nil {
+		t.Fatalf("ValidateBaselineOnlyWritePath(true, path) error = %v", err)
+	}
+	if err := ValidateBaselineOnlyWritePath(false, ""); err != nil {
+		t.Fatalf("ValidateBaselineOnlyWritePath(false, empty) error = %v", err)
+	}
+}
+
+func TestValidateProtectedGateRequirementRequiresBaselineForOptimization(t *testing.T) {
+	if err := ValidateProtectedGateRequirement(false, false, false, false, ""); err == nil {
+		t.Fatalf("ValidateProtectedGateRequirement(no baseline) error = nil, want baseline requirement")
+	}
+	if err := ValidateProtectedGateRequirement(false, false, true, false, ""); err != nil {
+		t.Fatalf("ValidateProtectedGateRequirement(has baseline) error = %v", err)
+	}
+	if err := ValidateProtectedGateRequirement(false, false, false, true, ""); err != nil {
+		t.Fatalf("ValidateProtectedGateRequirement(skip gate) error = %v", err)
+	}
+	if err := ValidateProtectedGateRequirement(false, false, false, false, "next-baseline.json"); err != nil {
+		t.Fatalf("ValidateProtectedGateRequirement(write baseline) error = %v", err)
+	}
+	if err := ValidateProtectedGateRequirement(true, false, false, false, ""); err != nil {
+		t.Fatalf("ValidateProtectedGateRequirement(replay) error = %v", err)
+	}
+	if err := ValidateProtectedGateRequirement(false, true, false, false, ""); err != nil {
+		t.Fatalf("ValidateProtectedGateRequirement(baseline-only) error = %v", err)
 	}
 }
