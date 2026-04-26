@@ -1,0 +1,450 @@
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"flag"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+
+	"github.com/XiaoConstantine/dspy-go/pkg/agents/optimize"
+	agentrlm "github.com/XiaoConstantine/dspy-go/pkg/agents/rlm"
+	"github.com/XiaoConstantine/dspy-go/pkg/core"
+	"github.com/XiaoConstantine/dspy-go/pkg/llms"
+	"github.com/XiaoConstantine/dspy-go/pkg/logging"
+	maestrooptimize "github.com/XiaoConstantine/maestro/internal/optimize"
+	"github.com/XiaoConstantine/maestro/internal/review"
+	"github.com/XiaoConstantine/maestro/internal/util"
+)
+
+type suiteListFlag []string
+
+type reviewRLMOptimizationCheckpoint struct {
+	WrittenAt              time.Time               `json:"written_at"`
+	SuitePaths             []string                `json:"suite_paths"`
+	ModelID                string                  `json:"model_id"`
+	ArtifactPath           string                  `json:"artifact_path,omitempty"`
+	TrainingExampleCount   int                     `json:"training_example_count"`
+	ValidationExampleCount int                     `json:"validation_example_count"`
+	BaselineValidation     float64                 `json:"baseline_validation_score"`
+	BestValidation         float64                 `json:"best_validation_score"`
+	ValidationDelta        float64                 `json:"validation_delta"`
+	Outcome                string                  `json:"outcome"`
+	ReplayOnly             bool                    `json:"replay_only,omitempty"`
+	ArtifactWritten        bool                    `json:"artifact_written"`
+	BestCandidateID        string                  `json:"best_candidate_id,omitempty"`
+	ArtifactMetadata       map[string]interface{}  `json:"artifact_metadata,omitempty"`
+	BestArtifacts          optimize.AgentArtifacts `json:"best_artifacts,omitempty"`
+}
+
+const (
+	defaultReviewRLMSuitePath      = "~/.maestro/review/corpora/rsc-golang-org/review_go_suite.json"
+	defaultReviewRLMCheckpointPath = "~/.maestro/review/checkpoints/review_rlm_gepa_checkpoint.json"
+	validationRegressionEpsilon    = 1e-9
+)
+
+func (f *suiteListFlag) String() string {
+	if f == nil {
+		return ""
+	}
+	return strings.Join(*f, ",")
+}
+
+func (f *suiteListFlag) Set(value string) error {
+	for _, part := range strings.Split(value, ",") {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			*f = append(*f, part)
+		}
+	}
+	return nil
+}
+
+func main() {
+	var (
+		suitePaths         suiteListFlag
+		outputPath         string
+		artifactPath       string
+		apiKey             string
+		modelSpec          string
+		modelProvider      string
+		modelName          string
+		modelCfg           string
+		baseURL            string
+		replayOnly         bool
+		allowNoImprovement bool
+		verbose            bool
+		populationSize     int
+		generations        int
+		reflectionFreq     int
+		evalConcurrency    int
+		validationFreq     int
+		searchBatchSize    int
+		stagnationLimit    int
+		maxMetricCalls     int
+		scoreThreshold     float64
+		passThreshold      float64
+		maxRuntime         time.Duration
+		validationSplit    float64
+		maxCasesPerRun     int
+		maxChunksPerCase   int
+		maxIterations      int
+		maxTokens          int
+	)
+
+	flag.Var(&suitePaths, "suite", "Path to a review benchmark suite JSON; repeat or comma-separate to evaluate multiple suites; default expects the generated Gerrit corpus under ~/.maestro")
+	flag.StringVar(&outputPath, "output", defaultReviewRLMCheckpointPath, "Path to write the review RLM optimization checkpoint JSON")
+	flag.StringVar(&artifactPath, "artifact", "", "Path to write/read the optimized review RLM program JSON; defaults to ~/.maestro/rlm_artifacts/review_optimized_program.json")
+	flag.StringVar(&apiKey, "api-key", "", "API key for external model providers")
+	flag.StringVar(&modelSpec, "model", "", `Full model specification (e.g. "anthropic:claude-sonnet-4-6" or "openai:gpt-5.4-mini")`)
+	flag.StringVar(&modelProvider, "provider", "anthropic", "Model provider (anthropic, google, openai, ollama, llamacpp)")
+	flag.StringVar(&modelName, "model-name", "claude-sonnet-4-6", "Model name")
+	flag.StringVar(&modelCfg, "model-config", "", "Additional model configuration")
+	flag.StringVar(&baseURL, "base-url", "", "Optional base URL override for local providers")
+	flag.BoolVar(&replayOnly, "replay-only", false, "Replay a previously saved optimized review RLM program instead of running GEPA")
+	flag.BoolVar(&allowNoImprovement, "allow-no-improvement", false, "Write a GEPA artifact even when validation does not improve over baseline")
+	flag.BoolVar(&verbose, "verbose", false, "Enable verbose logging")
+	flag.IntVar(&populationSize, "population", 4, "GEPA population size; default is smoke-test grade, use 12+ for production runs")
+	flag.IntVar(&generations, "generations", 2, "GEPA generation count; default is smoke-test grade, use 8+ for production runs")
+	flag.IntVar(&reflectionFreq, "reflection-freq", 1, "GEPA reflection frequency")
+	flag.IntVar(&evalConcurrency, "eval-concurrency", 1, "Concurrent GEPA evaluations")
+	flag.IntVar(&validationFreq, "validation-frequency", 1, "Run validation every N GEPA generations")
+	flag.IntVar(&searchBatchSize, "search-batch-size", 4, "GEPA search batch size")
+	flag.IntVar(&stagnationLimit, "stagnation-limit", 40, "GEPA stagnation limit")
+	flag.IntVar(&maxMetricCalls, "max-metric-calls", 0, "Optional cap on GEPA metric evaluations; 0 disables the cap")
+	flag.Float64Var(&scoreThreshold, "score-threshold", 0, "Optional early-stop threshold for validation score; 0 disables it")
+	flag.Float64Var(&passThreshold, "pass-threshold", 0.75, "Minimum validation score GEPA should treat as a passing candidate")
+	flag.DurationVar(&maxRuntime, "max-runtime", 0, "Optional wall-clock limit for GEPA optimization; 0 disables it")
+	flag.Float64Var(&validationSplit, "validation-split", 0.25, "Validation split for each review benchmark suite")
+	flag.IntVar(&maxCasesPerRun, "max-cases-per-run", 0, "Optional cap on the number of benchmark cases loaded from each suite")
+	flag.IntVar(&maxChunksPerCase, "max-chunks-per-case", 0, "Optional cap on chunk prompts evaluated per benchmark case")
+	flag.IntVar(&maxIterations, "max-iterations", 4, "Upper bound for mutable RLM max iterations")
+	flag.IntVar(&maxTokens, "max-tokens", 32000, "Upper bound for mutable RLM max tokens")
+	flag.Parse()
+
+	usingDefaultSuite := len(suitePaths) == 0
+	if len(suitePaths) == 0 {
+		suitePaths = suiteListFlag{defaultReviewRLMSuitePath}
+	}
+	if err := maestrooptimize.ValidateUnitThreshold("pass-threshold", passThreshold); err != nil {
+		fatalf("%v", err)
+	}
+
+	ctx := context.Background()
+	logger := configureLogger(verbose)
+	logging.SetLogger(logger)
+	llms.EnsureFactory()
+
+	modelConfig, modelID, err := resolveModel(modelSpec, modelProvider, modelName, modelCfg, apiKey, baseURL)
+	if err != nil {
+		fatalf("resolve model configuration: %v", err)
+	}
+	llm, err := util.LoadLLMFromModelConfig(ctx, modelConfig, modelID)
+	if err != nil {
+		fatalf("configure LLM: %v", err)
+	}
+	core.GlobalConfig.DefaultLLM = llm
+
+	resolvedArtifactPath, err := review.ResolveReviewRLMOptimizedProgramPath(artifactPath)
+	if err != nil {
+		fatalf("resolve artifact path: %v", err)
+	}
+	suites, trainingExamples, validationExamples, err := review.LoadBenchmarkSuites(suitePaths, validationSplit, maxCasesPerRun)
+	if err != nil {
+		if usingDefaultSuite {
+			fatalf("load benchmark suites: %v\nDefault review RLM suite is generated data. Run cmd/generate-review-traces first or pass --suite to a review benchmark JSON.", err)
+		}
+		fatalf("load benchmark suites: %v", err)
+	}
+	if len(validationExamples) == 0 {
+		fatalf("at least one validation example is required")
+	}
+
+	evaluator := review.NewReviewBenchmarkEvaluator(review.DefaultReviewBenchmarkEvaluatorConfig())
+	seedAgent, err := review.NewReviewRLMBenchmarkAgent(llm, logger, optimize.AgentArtifacts{}, "", maxChunksPerCase)
+	if err != nil {
+		fatalf("create review RLM benchmark agent: %v", err)
+	}
+	seedArtifacts := seedAgent.GetArtifacts()
+
+	bestArtifacts := seedArtifacts.Clone()
+	baselineScore := 0.0
+	bestValidation := 0.0
+	validationDelta := 0.0
+	outcome := "replay"
+	bestCandidateID := ""
+	artifactWritten := false
+	metadata := reviewRLMArtifactMetadata(string(modelID), suitePaths, len(trainingExamples), len(validationExamples), baselineScore)
+
+	if replayOnly {
+		program, _, err := review.LoadReviewRLMOptimizedProgram(resolvedArtifactPath)
+		if err != nil {
+			fatalf("load optimized program: %v", err)
+		}
+		if program == nil {
+			fatalf("optimized review RLM artifact not found: %s", resolvedArtifactPath)
+		}
+		replayAgent, err := review.NewReviewRLMBenchmarkAgent(llm, logger, seedArtifacts, "", maxChunksPerCase)
+		if err != nil {
+			fatalf("create replay agent: %v", err)
+		}
+		if err := review.ApplyReviewRLMOptimizedProgram(replayAgent, program); err != nil {
+			fatalf("apply optimized program: %v", err)
+		}
+		bestArtifacts = replayAgent.GetArtifacts()
+		bestValidation, err = evaluateExamples(ctx, evaluator, replayAgent, validationExamples)
+		if err != nil {
+			fatalf("evaluate replay: %v", err)
+		}
+	} else {
+		workflow, err := optimize.RunGEPAWorkflow(ctx, seedAgent, optimize.GEPAWorkflowRequest{
+			Evaluator:          evaluator,
+			TrainingExamples:   trainingExamples,
+			ValidationExamples: validationExamples,
+			BaselineExamples:   validationExamples,
+			ReplayExamples:     validationExamples,
+			PassThreshold:      passThreshold,
+			ApplyBest:          false,
+			Config: optimize.GEPAAdapterConfig{
+				PopulationSize:      populationSize,
+				MaxGenerations:      generations,
+				ReflectionFreq:      reflectionFreq,
+				SearchBatchSize:     searchBatchSize,
+				StagnationLimit:     stagnationLimit,
+				ValidationSplit:     0,
+				ValidationFrequency: validationFreq,
+				EvalConcurrency:     evalConcurrency,
+				PassThreshold:       passThreshold,
+				PrimaryArtifact:     optimize.ArtifactRLMOuterPrompt,
+				ArtifactKeys: []optimize.ArtifactKey{
+					optimize.ArtifactRLMOuterPrompt,
+					optimize.ArtifactRLMIterationPrompt,
+				},
+				IntMutationPlans: rlmIntMutationPlans(maxIterations, maxTokens),
+				MaxMetricCalls:   maxMetricCalls,
+				ScoreThreshold:   scoreThreshold,
+				MaxRuntime:       maxRuntime,
+			},
+		})
+		if err != nil {
+			fatalf("optimize review RLM: %v", err)
+		}
+		if workflow == nil || workflow.Optimization == nil || workflow.OptimizedProgram == nil {
+			fatalf("GEPA workflow returned incomplete optimization result")
+		}
+		baselineScore = workflowBaselineValidation(workflow)
+		bestValidation = workflowBestValidation(workflow)
+		validationDelta = bestValidation - baselineScore
+		outcome = validationOutcome(validationDelta)
+		metadata = reviewRLMArtifactMetadata(string(modelID), suitePaths, len(trainingExamples), len(validationExamples), baselineScore)
+		bestArtifacts = workflow.Optimization.BestArtifacts.Clone()
+		if workflow.Optimization.BestCandidate != nil {
+			bestCandidateID = workflow.Optimization.BestCandidate.ID
+			metadata["best_candidate_id"] = bestCandidateID
+		}
+		if workflow.BaselineRun != nil {
+			metadata["baseline_validation_score"] = workflow.BaselineRun.AverageScore
+		}
+		if workflow.ReplayRun != nil {
+			metadata["replay_validation_score"] = workflow.ReplayRun.AverageScore
+		}
+		if err := review.AnnotateReviewRLMOptimizedProgram(workflow.OptimizedProgram, metadata); err != nil {
+			fatalf("annotate optimized program: %v", err)
+		}
+		if shouldWriteValidationArtifact(outcome, allowNoImprovement) {
+			if err := review.WriteReviewRLMOptimizedProgram(resolvedArtifactPath, workflow.OptimizedProgram); err != nil {
+				fatalf("write optimized program: %v", err)
+			}
+			artifactWritten = true
+		}
+	}
+
+	checkpoint := reviewRLMOptimizationCheckpoint{
+		WrittenAt:              time.Now().UTC(),
+		SuitePaths:             append([]string(nil), suitePaths...),
+		ModelID:                string(modelID),
+		ArtifactPath:           resolvedArtifactPath,
+		TrainingExampleCount:   len(trainingExamples),
+		ValidationExampleCount: len(validationExamples),
+		BaselineValidation:     baselineScore,
+		BestValidation:         bestValidation,
+		ValidationDelta:        validationDelta,
+		Outcome:                outcome,
+		ReplayOnly:             replayOnly,
+		ArtifactWritten:        artifactWritten,
+		BestCandidateID:        bestCandidateID,
+		ArtifactMetadata:       metadata,
+		BestArtifacts:          bestArtifacts,
+	}
+	if err := writeJSON(outputPath, checkpoint); err != nil {
+		fatalf("write checkpoint: %v", err)
+	}
+
+	fmt.Printf("Review RLM GEPA optimization complete\n")
+	fmt.Printf("Model:               %s\n", modelID)
+	fmt.Printf("Suites:              %d\n", len(suites))
+	fmt.Printf("Training examples:   %d\n", len(trainingExamples))
+	fmt.Printf("Validation examples: %d\n", len(validationExamples))
+	fmt.Printf("Baseline validation: %.4f\n", baselineScore)
+	fmt.Printf("Best validation:     %.4f\n", bestValidation)
+	fmt.Printf("Validation delta:    %.4f\n", validationDelta)
+	fmt.Printf("Outcome:             %s\n", outcome)
+	fmt.Printf("Replay only:         %t\n", replayOnly)
+	fmt.Printf("Artifact written:    %t\n", artifactWritten)
+	fmt.Printf("Artifact:            %s\n", resolvedArtifactPath)
+	fmt.Printf("Checkpoint:          %s\n", outputPath)
+	if outcome == "regressed" {
+		os.Exit(2)
+	}
+}
+
+func configureLogger(verbose bool) *logging.Logger {
+	logLevel := logging.INFO
+	if verbose {
+		logLevel = logging.DEBUG
+	}
+	return logging.NewLogger(logging.Config{
+		Severity: logLevel,
+		Outputs:  []logging.Output{logging.NewConsoleOutput(true, logging.WithColor(true))},
+	})
+}
+
+func resolveModel(modelSpec, provider, modelName, modelCfg, apiKey, baseURL string) (*util.ModelConfig, core.ModelID, error) {
+	if strings.TrimSpace(modelSpec) != "" {
+		if parsedProvider, parsedName, parsedCfg := util.ParseModelString(modelSpec); parsedProvider != "" {
+			provider = parsedProvider
+			modelName = parsedName
+			modelCfg = parsedCfg
+		}
+	}
+	cfg := &util.ModelConfig{
+		ModelProvider: provider,
+		ModelName:     modelName,
+		ModelConfig:   modelCfg,
+		APIKey:        apiKey,
+		BaseURL:       strings.TrimSpace(baseURL),
+	}
+	if err := util.ValidateModelConfig(cfg); err != nil {
+		return nil, "", err
+	}
+	return cfg, util.ConstructModelID(cfg), nil
+}
+
+func evaluateExamples(ctx context.Context, evaluator optimize.AgentEvaluator, agent optimize.OptimizableAgent, examples []optimize.AgentExample) (float64, error) {
+	if len(examples) == 0 {
+		return 0, fmt.Errorf("at least one validation example is required")
+	}
+	total := 0.0
+	for _, example := range examples {
+		cloned, err := agent.Clone()
+		if err != nil {
+			return 0, err
+		}
+		result, err := evaluator.Evaluate(ctx, cloned, example)
+		if err != nil {
+			return 0, fmt.Errorf("evaluate example %q: %w", example.ID, err)
+		}
+		total += result.Score
+	}
+	return total / float64(len(examples)), nil
+}
+
+func workflowBaselineValidation(workflow *optimize.GEPAWorkflowResult) float64 {
+	if workflow != nil && workflow.BaselineRun != nil {
+		return workflow.BaselineRun.AverageScore
+	}
+	return 0
+}
+
+func workflowBestValidation(workflow *optimize.GEPAWorkflowResult) float64 {
+	if workflow == nil {
+		return 0
+	}
+	if workflow.Optimization != nil && workflow.Optimization.BestValidationEvaluation != nil {
+		return workflow.Optimization.BestValidationEvaluation.AverageScore
+	}
+	if workflow.ReplayRun != nil {
+		return workflow.ReplayRun.AverageScore
+	}
+	return 0
+}
+
+func validationOutcome(delta float64) string {
+	if delta > validationRegressionEpsilon {
+		return "improved"
+	}
+	if delta < -validationRegressionEpsilon {
+		return "regressed"
+	}
+	return "no_change"
+}
+
+func shouldWriteValidationArtifact(outcome string, allowNoImprovement bool) bool {
+	return outcome == "improved" || (allowNoImprovement && outcome == "no_change")
+}
+
+func rlmIntMutationPlans(maxIterations, maxTokens int) map[string]optimize.IntMutationConfig {
+	plans := make(map[string]optimize.IntMutationConfig)
+	if maxIterations > 1 {
+		plans[agentrlm.ArtifactMaxIterations] = optimize.IntMutationConfig{Min: 1, Max: maxIterations, Step: 1}
+	}
+	if maxTokens > 0 {
+		step := maxTokens / 5
+		if step < 1000 {
+			step = 1000
+		}
+		plans[agentrlm.ArtifactMaxTokens] = optimize.IntMutationConfig{Min: step, Max: maxTokens, Step: step}
+	}
+	return plans
+}
+
+func reviewRLMArtifactMetadata(modelID string, suitePaths []string, trainingCount, validationCount int, baselineScore float64) map[string]interface{} {
+	return map[string]interface{}{
+		"created_at":                time.Now().UTC().Format(time.RFC3339),
+		"model_id":                  modelID,
+		"suite_paths":               strings.Join(suitePaths, ","),
+		"training_example_count":    trainingCount,
+		"validation_example_count":  validationCount,
+		"baseline_validation_score": baselineScore,
+		"optimized_program_schema":  "dspy-go.optimized-agent-program",
+		"optimized_program_version": 1,
+	}
+}
+
+func writeJSON(path string, value interface{}) error {
+	resolvedPath, err := expandPath(path)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(resolvedPath), 0o755); err != nil {
+		return fmt.Errorf("create checkpoint directory: %w", err)
+	}
+	data, err := json.MarshalIndent(value, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(resolvedPath, append(data, '\n'), 0o644)
+}
+
+func expandPath(path string) (string, error) {
+	path = strings.TrimSpace(os.ExpandEnv(path))
+	if path == "" {
+		return "", fmt.Errorf("path is required")
+	}
+	if strings.HasPrefix(path, "~/") {
+		homeDir, err := os.UserHomeDir()
+		if err != nil {
+			return "", fmt.Errorf("resolve home directory: %w", err)
+		}
+		path = filepath.Join(homeDir, strings.TrimPrefix(path, "~/"))
+	}
+	return filepath.Clean(path), nil
+}
+
+func fatalf(format string, args ...interface{}) {
+	fmt.Fprintf(os.Stderr, format+"\n", args...)
+	os.Exit(1)
+}

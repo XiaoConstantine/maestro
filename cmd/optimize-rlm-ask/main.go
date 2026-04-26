@@ -6,11 +6,8 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"hash/fnv"
-	"math"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -20,6 +17,7 @@ import (
 	"github.com/XiaoConstantine/dspy-go/pkg/core"
 	"github.com/XiaoConstantine/dspy-go/pkg/llms"
 	"github.com/XiaoConstantine/dspy-go/pkg/logging"
+	maestrooptimize "github.com/XiaoConstantine/maestro/internal/optimize"
 	"github.com/XiaoConstantine/maestro/internal/orchestration"
 	"github.com/XiaoConstantine/maestro/internal/util"
 )
@@ -129,6 +127,9 @@ func main() {
 	flag.Parse()
 
 	if err := validateRunMode(optimizeRun, replayOnly); err != nil {
+		fatalf("%v", err)
+	}
+	if err := maestrooptimize.ValidateUnitThreshold("pass-threshold", passThreshold); err != nil {
 		fatalf("%v", err)
 	}
 
@@ -561,39 +562,7 @@ func rlmOverviewIntMutationPlans(maxIterations, maxTokens int) map[string]optimi
 }
 
 func splitAgentExamples(examples []optimize.AgentExample, validationSplit float64) ([]optimize.AgentExample, []optimize.AgentExample, error) {
-	if len(examples) == 0 {
-		return nil, nil, fmt.Errorf("at least one benchmark example is required")
-	}
-	if len(examples) == 1 {
-		return nil, nil, fmt.Errorf("at least two benchmark examples are required to create a validation split")
-	}
-	if validationSplit <= 0 || validationSplit >= 1 {
-		return nil, nil, fmt.Errorf("validation split must be between 0 and 1")
-	}
-	if len(examples) < rlmOverviewMinimumGEPAExamples {
-		return nil, nil, fmt.Errorf("GEPA optimization requires at least %d benchmark examples; got %d", rlmOverviewMinimumGEPAExamples, len(examples))
-	}
-	validationCount := int(math.Ceil(float64(len(examples)) * validationSplit))
-	if validationCount <= 0 {
-		validationCount = 1
-	}
-	if validationCount >= len(examples) {
-		validationCount = len(examples) - 1
-	}
-	return stratifiedAgentExampleSplit(examples, validationCount)
-}
-
-type indexedAgentExample struct {
-	index   int
-	example optimize.AgentExample
-}
-
-type agentExampleSplitGroup struct {
-	key             string
-	examples        []indexedAgentExample
-	validationCount int
-	capacity        int
-	remainder       float64
+	return maestrooptimize.SplitAgentExamples(examples, validationSplit, rlmOverviewMinimumGEPAExamples)
 }
 
 func validateRunMode(optimizeRun, replayOnly bool) error {
@@ -601,155 +570,6 @@ func validateRunMode(optimizeRun, replayOnly bool) error {
 		return fmt.Errorf("--optimize and --replay-only are mutually exclusive")
 	}
 	return nil
-}
-
-func stratifiedAgentExampleSplit(examples []optimize.AgentExample, validationCount int) ([]optimize.AgentExample, []optimize.AgentExample, error) {
-	groups := splitAgentExampleGroups(examples, validationCount)
-	capacity := 0
-	for i := range groups {
-		capacity += groups[i].capacity
-	}
-	if capacity == 0 {
-		return nil, nil, fmt.Errorf("validation split requires at least one trainable example outside validation")
-	}
-	if validationCount > capacity {
-		validationCount = capacity
-	}
-	allocated := 0
-	for i := range groups {
-		exact := float64(len(groups[i].examples)) * float64(validationCount) / float64(len(examples))
-		count := int(math.Floor(exact))
-		if count > groups[i].capacity {
-			count = groups[i].capacity
-		}
-		groups[i].validationCount = count
-		groups[i].remainder = exact - float64(count)
-		allocated += count
-	}
-	for allocated < validationCount {
-		sort.SliceStable(groups, func(i, j int) bool {
-			if groups[i].validationCount >= groups[i].capacity {
-				return false
-			}
-			if groups[j].validationCount >= groups[j].capacity {
-				return true
-			}
-			if groups[i].remainder == groups[j].remainder {
-				return groups[i].key < groups[j].key
-			}
-			return groups[i].remainder > groups[j].remainder
-		})
-		advanced := false
-		for i := range groups {
-			if groups[i].validationCount >= groups[i].capacity {
-				continue
-			}
-			groups[i].validationCount++
-			allocated++
-			advanced = true
-			break
-		}
-		if !advanced {
-			break
-		}
-	}
-
-	validationIndices := make(map[int]struct{}, validationCount)
-	for _, group := range groups {
-		ordered := append([]indexedAgentExample(nil), group.examples...)
-		sort.SliceStable(ordered, func(i, j int) bool {
-			left := stableExampleHash(group.key, ordered[i].example.ID)
-			right := stableExampleHash(group.key, ordered[j].example.ID)
-			if left == right {
-				return ordered[i].example.ID < ordered[j].example.ID
-			}
-			return left < right
-		})
-		for i := 0; i < group.validationCount && i < len(ordered); i++ {
-			validationIndices[ordered[i].index] = struct{}{}
-		}
-	}
-
-	training := make([]optimize.AgentExample, 0, len(examples)-len(validationIndices))
-	validation := make([]optimize.AgentExample, 0, len(validationIndices))
-	for i, example := range examples {
-		if _, ok := validationIndices[i]; ok {
-			validation = append(validation, example)
-			continue
-		}
-		training = append(training, example)
-	}
-	if len(training) == 0 || len(validation) == 0 {
-		return nil, nil, fmt.Errorf("validation split produced training=%d validation=%d", len(training), len(validation))
-	}
-	return training, validation, nil
-}
-
-func splitAgentExampleGroups(examples []optimize.AgentExample, validationCount int) []agentExampleSplitGroup {
-	groupIndex := make(map[string]int)
-	groups := make([]agentExampleSplitGroup, 0)
-	for i, example := range examples {
-		key := splitAgentExampleGroupKey(example)
-		idx, ok := groupIndex[key]
-		if !ok {
-			idx = len(groups)
-			groupIndex[key] = idx
-			groups = append(groups, agentExampleSplitGroup{key: key})
-		}
-		groups[idx].examples = append(groups[idx].examples, indexedAgentExample{index: i, example: example})
-	}
-	for i := range groups {
-		groups[i].capacity = len(groups[i].examples) - 1
-		if groups[i].capacity < 0 {
-			groups[i].capacity = 0
-		}
-		if groups[i].capacity > validationCount {
-			groups[i].capacity = validationCount
-		}
-	}
-	sort.SliceStable(groups, func(i, j int) bool { return groups[i].key < groups[j].key })
-	return groups
-}
-
-func splitAgentExampleGroupKey(example optimize.AgentExample) string {
-	owner := stringFromInterface(example.Inputs["owner"])
-	repo := stringFromInterface(example.Inputs["repo"])
-	if repo != "" {
-		if owner != "" {
-			return owner + "/" + repo
-		}
-		return repo
-	}
-	if benchmarkCase, ok := example.Metadata["rlm_overview_case"].(orchestration.RLMOverviewBenchmarkCase); ok {
-		repo = strings.TrimSpace(benchmarkCase.Repo)
-		owner = strings.TrimSpace(benchmarkCase.Owner)
-		if repo != "" {
-			if owner != "" {
-				return owner + "/" + repo
-			}
-			return repo
-		}
-	}
-	return "all"
-}
-
-func stableExampleHash(parts ...string) uint64 {
-	h := fnv.New64a()
-	for _, part := range parts {
-		_, _ = h.Write([]byte(part))
-		_, _ = h.Write([]byte{0})
-	}
-	return h.Sum64()
-}
-
-func stringFromInterface(value interface{}) string {
-	if value == nil {
-		return ""
-	}
-	if text, ok := value.(string); ok {
-		return strings.TrimSpace(text)
-	}
-	return strings.TrimSpace(fmt.Sprint(value))
 }
 
 func newTokenLedger() *tokenLedger {
