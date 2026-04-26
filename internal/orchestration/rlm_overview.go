@@ -265,6 +265,7 @@ func (s *MaestroService) handleRLMOverview(ctx context.Context, question, repoPa
 
 	subClient := newCapturingSubLLMClient(modrlm.NewLLMSubClient(llm))
 	module := modrlm.New(llm, subClient, opts...)
+	artifactPath, artifactApplied := s.loadAndApplyRLMOverviewOptimizedProgram(ctx, module)
 	overviewSkill, skillErr := s.loadRLMOverviewSkill(ctx)
 	if skillErr != nil {
 		s.logger.Warn(ctx, "Failed to load RLM overview skill for domain %q: %v", s.rlmOverviewSkillDomain, skillErr)
@@ -301,6 +302,10 @@ func (s *MaestroService) handleRLMOverview(ctx context.Context, question, repoPa
 		"sources":            sources,
 		"strategy":           "rlm_overview",
 		"needs_verification": verificationTargets,
+	}
+	if artifactApplied {
+		metadata["rlm_artifact_path"] = artifactPath
+		metadata["rlm_artifact_applied"] = true
 	}
 	if strings.TrimSpace(s.rlmOverviewSkillDomain) != "" {
 		metadata["rlm_skill_domain"] = s.rlmOverviewSkillDomain

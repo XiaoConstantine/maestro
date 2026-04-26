@@ -70,6 +70,7 @@ type ServiceConfig struct {
 	QASkillDomain             string
 	RLMOverviewSkillStorePath string
 	RLMOverviewSkillDomain    string
+	RLMOverviewArtifactsPath  string
 	Owner                     string
 	Repo                      string
 	GitHubToken               string

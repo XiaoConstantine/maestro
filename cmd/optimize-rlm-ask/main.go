@@ -6,11 +6,17 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"hash/fnv"
+	"math"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/XiaoConstantine/dspy-go/pkg/agents/optimize"
+	agentrlm "github.com/XiaoConstantine/dspy-go/pkg/agents/rlm"
 	"github.com/XiaoConstantine/dspy-go/pkg/core"
 	"github.com/XiaoConstantine/dspy-go/pkg/llms"
 	"github.com/XiaoConstantine/dspy-go/pkg/logging"
@@ -18,10 +24,41 @@ import (
 	"github.com/XiaoConstantine/maestro/internal/util"
 )
 
+type optimizationCheckpoint struct {
+	WrittenAt              time.Time                                     `json:"written_at"`
+	SuitePath              string                                        `json:"suite_path"`
+	ModelID                string                                        `json:"model_id"`
+	ArtifactPath           string                                        `json:"artifact_path,omitempty"`
+	TrainingExampleCount   int                                           `json:"training_example_count"`
+	ValidationExampleCount int                                           `json:"validation_example_count"`
+	BaselineValidation     float64                                       `json:"baseline_validation_score"`
+	BestValidation         float64                                       `json:"best_validation_score"`
+	ReplayValidation       float64                                       `json:"replay_validation_score"`
+	BestCandidateID        string                                        `json:"best_candidate_id,omitempty"`
+	ProtectedGate          *orchestration.RLMOverviewProtectedGateReport `json:"protected_gate,omitempty"`
+	ProtectedReport        *orchestration.RLMOverviewBenchmarkRunReport  `json:"protected_report,omitempty"`
+	TokenUsage             map[string]int64                              `json:"token_usage,omitempty"`
+	ArtifactMetadata       map[string]interface{}                        `json:"artifact_metadata,omitempty"`
+	BestArtifacts          optimize.AgentArtifacts                       `json:"best_artifacts,omitempty"`
+}
+
+type tokenAccountingEvaluator struct {
+	base   optimize.AgentEvaluator
+	ledger *tokenLedger
+}
+
+type tokenLedger struct {
+	mu     sync.Mutex
+	totals map[string]int64
+}
+
+const rlmOverviewMinimumGEPAExamples = 16
+
 func main() {
 	var (
 		suitePath                    string
 		outputPath                   string
+		artifactPath                 string
 		baselinePath                 string
 		writeBaselinePath            string
 		apiKey                       string
@@ -36,13 +73,28 @@ func main() {
 		maxTokens                    int
 		passThreshold                float64
 		verbose                      bool
+		optimizeRun                  bool
+		replayOnly                   bool
+		skipProtectedGate            bool
 		caseTimeout                  time.Duration
 		agentTimeout                 time.Duration
+		maxRuntime                   time.Duration
 		protectedRegressionTolerance float64
+		populationSize               int
+		generations                  int
+		reflectionFreq               int
+		evalConcurrency              int
+		validationFreq               int
+		searchBatchSize              int
+		stagnationLimit              int
+		maxMetricCalls               int
+		scoreThreshold               float64
+		validationSplit              float64
 	)
 
 	flag.StringVar(&suitePath, "suite", "./benchmarks/rlm_overview_suite.json", "Path to the RLM overview benchmark suite JSON")
-	flag.StringVar(&outputPath, "output", "./benchmark_results/rlm_overview_benchmark.json", "Path to write the benchmark report JSON")
+	flag.StringVar(&outputPath, "output", "./benchmark_results/rlm_overview_benchmark.json", "Path to write the benchmark report or GEPA checkpoint JSON")
+	flag.StringVar(&artifactPath, "artifact", "", "Path to write/read the optimized RLM overview program JSON; defaults to ~/.maestro/rlm_artifacts/overview_optimized_program.json")
 	flag.StringVar(&baselinePath, "baseline", "", "Optional versioned baseline JSON for strict protected regression gates")
 	flag.StringVar(&writeBaselinePath, "write-baseline", "", "Optional path to write a versioned baseline JSON from this run")
 	flag.StringVar(&apiKey, "api-key", "", "API key for external model providers")
@@ -57,10 +109,28 @@ func main() {
 	flag.IntVar(&maxTokens, "max-tokens", 0, "Override RLM max tokens; 0 uses Maestro default")
 	flag.Float64Var(&passThreshold, "pass-threshold", orchestration.RLMOverviewBenchmarkDefaultPassThreshold, "Score threshold for informational pass/fail counts")
 	flag.BoolVar(&verbose, "verbose", false, "Enable verbose logging")
+	flag.BoolVar(&optimizeRun, "optimize", false, "Run GEPA optimization instead of benchmark-only replay; default GEPA knobs are smoke-test grade")
+	flag.BoolVar(&replayOnly, "replay-only", false, "Replay the optimized program from --artifact without running GEPA")
+	flag.BoolVar(&skipProtectedGate, "skip-protected-gate", false, "Allow writing optimized artifacts without a supplied protected baseline")
 	flag.DurationVar(&caseTimeout, "case-timeout", 0, "Optional timeout per benchmark case")
 	flag.DurationVar(&agentTimeout, "agent-timeout", 0, "Override RLM agent timeout; 0 uses Maestro default")
+	flag.DurationVar(&maxRuntime, "max-runtime", 0, "Optional wall-clock limit for GEPA optimization; 0 disables it")
 	flag.Float64Var(&protectedRegressionTolerance, "protected-regression-tolerance", 0, "Allowed protected-case score regression before failing the run")
+	flag.IntVar(&populationSize, "population", 4, "GEPA population size; default is smoke-test grade, use 12+ for production runs")
+	flag.IntVar(&generations, "generations", 2, "GEPA generation count; default is smoke-test grade, use 8+ for production runs")
+	flag.IntVar(&reflectionFreq, "reflection-freq", 1, "GEPA reflection frequency")
+	flag.IntVar(&evalConcurrency, "eval-concurrency", 1, "Concurrent GEPA evaluations")
+	flag.IntVar(&validationFreq, "validation-frequency", 1, "Run validation every N GEPA generations")
+	flag.IntVar(&searchBatchSize, "search-batch-size", 4, "GEPA search batch size")
+	flag.IntVar(&stagnationLimit, "stagnation-limit", 40, "GEPA stagnation limit")
+	flag.IntVar(&maxMetricCalls, "max-metric-calls", 0, "Optional cap on GEPA metric evaluations; 0 disables the cap")
+	flag.Float64Var(&scoreThreshold, "score-threshold", 0, "Optional early-stop threshold for validation score; 0 disables it")
+	flag.Float64Var(&validationSplit, "validation-split", 0.25, "Validation split for the benchmark suite when running GEPA")
 	flag.Parse()
+
+	if err := validateRunMode(optimizeRun, replayOnly); err != nil {
+		fatalf("%v", err)
+	}
 
 	if modelSpec != "" {
 		if provider, name, cfg := util.ParseModelString(modelSpec); provider != "" {
@@ -128,6 +198,48 @@ func main() {
 		}
 	}
 
+	if optimizeRun || replayOnly {
+		resolvedArtifactPath, err := orchestration.ResolveRLMOverviewOptimizedProgramPath(artifactPath)
+		if err != nil {
+			fatalf("resolve artifact path: %v", err)
+		}
+		if err := runOptimization(ctx, runOptimizationRequest{
+			modelID:                      modelID,
+			suitePath:                    suitePath,
+			outputPath:                   outputPath,
+			artifactPath:                 resolvedArtifactPath,
+			cases:                        cases,
+			agent:                        agent,
+			baseline:                     baseline,
+			workers:                      workers,
+			caseTimeout:                  caseTimeout,
+			maxAttempts:                  maxAttempts,
+			passThreshold:                passThreshold,
+			protectedRegressionTolerance: protectedRegressionTolerance,
+			skipProtectedGate:            skipProtectedGate,
+			replayOnly:                   replayOnly,
+			populationSize:               populationSize,
+			generations:                  generations,
+			reflectionFreq:               reflectionFreq,
+			evalConcurrency:              evalConcurrency,
+			validationFreq:               validationFreq,
+			searchBatchSize:              searchBatchSize,
+			stagnationLimit:              stagnationLimit,
+			maxMetricCalls:               maxMetricCalls,
+			scoreThreshold:               scoreThreshold,
+			maxRuntime:                   maxRuntime,
+			validationSplit:              validationSplit,
+			maxIterationsMutationCeiling: agentCfg.MaxIterations,
+			maxTokensMutationCeiling:     agentCfg.MaxTokens,
+		}); err != nil {
+			if errors.Is(err, errProtectedGateFailed) {
+				os.Exit(2)
+			}
+			fatalf("optimize RLM overview: %v", err)
+		}
+		return
+	}
+
 	report, err := orchestration.RunRLMOverviewBenchmark(ctx, agent, cases, orchestration.RLMOverviewBenchmarkRunConfig{
 		Workers:                      workers,
 		CaseTimeout:                  caseTimeout,
@@ -172,6 +284,514 @@ func printSummary(modelID core.ModelID, cases []orchestration.RLMOverviewBenchma
 		fmt.Printf("Protected gate:     %t\n", report.ProtectedGate.Passed)
 	}
 	fmt.Printf("Report:             %s\n", outputPath)
+}
+
+var errProtectedGateFailed = errors.New("protected gate failed")
+
+type runOptimizationRequest struct {
+	modelID                      core.ModelID
+	suitePath                    string
+	outputPath                   string
+	artifactPath                 string
+	cases                        []orchestration.RLMOverviewBenchmarkCase
+	agent                        *orchestration.RLMOverviewBenchmarkAgent
+	baseline                     *orchestration.RLMOverviewBenchmarkBaseline
+	workers                      int
+	caseTimeout                  time.Duration
+	maxAttempts                  int
+	passThreshold                float64
+	protectedRegressionTolerance float64
+	skipProtectedGate            bool
+	replayOnly                   bool
+	populationSize               int
+	generations                  int
+	reflectionFreq               int
+	evalConcurrency              int
+	validationFreq               int
+	searchBatchSize              int
+	stagnationLimit              int
+	maxMetricCalls               int
+	scoreThreshold               float64
+	maxRuntime                   time.Duration
+	validationSplit              float64
+	maxIterationsMutationCeiling int
+	maxTokensMutationCeiling     int
+}
+
+func runOptimization(ctx context.Context, req runOptimizationRequest) error {
+	if req.agent == nil {
+		return fmt.Errorf("RLM overview benchmark agent is nil")
+	}
+	if req.replayOnly {
+		return replayOptimizedProgram(ctx, req)
+	}
+	if req.baseline == nil && !req.skipProtectedGate {
+		return fmt.Errorf("--baseline is required for GEPA artifact acceptance; pass --skip-protected-gate only for local experiments")
+	}
+
+	examples := orchestration.RLMOverviewBenchmarkExamples(req.cases)
+	trainingExamples, validationExamples, err := splitAgentExamples(examples, req.validationSplit)
+	if err != nil {
+		return err
+	}
+
+	ledger := newTokenLedger()
+	evaluator := &tokenAccountingEvaluator{
+		base:   orchestration.NewRLMOverviewBenchmarkEvaluator(orchestration.DefaultRLMOverviewEvaluatorConfig()),
+		ledger: ledger,
+	}
+
+	workflow, err := optimize.RunGEPAWorkflow(ctx, req.agent, optimize.GEPAWorkflowRequest{
+		Evaluator:          evaluator,
+		TrainingExamples:   trainingExamples,
+		ValidationExamples: validationExamples,
+		BaselineExamples:   validationExamples,
+		ReplayExamples:     validationExamples,
+		PassThreshold:      req.passThreshold,
+		// Keep the base agent unmodified; protected-gate replay applies the
+		// exported program to a fresh clone before any artifact is accepted.
+		ApplyBest: false,
+		Config: optimize.GEPAAdapterConfig{
+			PopulationSize:      req.populationSize,
+			MaxGenerations:      req.generations,
+			ReflectionFreq:      req.reflectionFreq,
+			SearchBatchSize:     req.searchBatchSize,
+			StagnationLimit:     req.stagnationLimit,
+			ValidationSplit:     0,
+			ValidationFrequency: req.validationFreq,
+			EvalConcurrency:     req.evalConcurrency,
+			PassThreshold:       req.passThreshold,
+			PrimaryArtifact:     optimize.ArtifactRLMOuterPrompt,
+			ArtifactKeys: []optimize.ArtifactKey{
+				optimize.ArtifactRLMOuterPrompt,
+				optimize.ArtifactRLMIterationPrompt,
+			},
+			IntMutationPlans: rlmOverviewIntMutationPlans(req.maxIterationsMutationCeiling, req.maxTokensMutationCeiling),
+			MaxMetricCalls:   req.maxMetricCalls,
+			ScoreThreshold:   req.scoreThreshold,
+			MaxRuntime:       req.maxRuntime,
+		},
+	})
+	if err != nil {
+		return err
+	}
+	if workflow == nil || workflow.Optimization == nil || workflow.OptimizedProgram == nil {
+		return fmt.Errorf("GEPA workflow returned incomplete optimization result")
+	}
+
+	metadata := orchestration.NewRLMOverviewOptimizedProgramMetadata(string(req.modelID), req.suitePath, len(trainingExamples), len(validationExamples))
+	if workflow.BaselineRun != nil {
+		metadata["baseline_validation_score"] = workflow.BaselineRun.AverageScore
+	}
+	if workflow.ReplayRun != nil {
+		metadata["replay_validation_score"] = workflow.ReplayRun.AverageScore
+	}
+	if workflow.Optimization.BestCandidate != nil {
+		metadata["best_candidate_id"] = workflow.Optimization.BestCandidate.ID
+	}
+	if err := orchestration.AnnotateRLMOverviewOptimizedProgram(workflow.OptimizedProgram, metadata); err != nil {
+		return err
+	}
+
+	protectedReport, protectedGate, err := runProtectedGate(ctx, req, workflow.OptimizedProgram)
+	if err != nil {
+		return err
+	}
+
+	checkpoint := buildOptimizationCheckpoint(req, workflow, protectedReport, protectedGate, ledger.snapshot(), metadata)
+	if protectedGate != nil && !protectedGate.Passed {
+		if err := writeJSON(req.outputPath, checkpoint); err != nil {
+			return err
+		}
+		printOptimizationSummary(req, checkpoint, false)
+		return errProtectedGateFailed
+	}
+
+	if err := orchestration.WriteRLMOverviewOptimizedProgram(req.artifactPath, workflow.OptimizedProgram); err != nil {
+		return err
+	}
+	if err := writeJSON(req.outputPath, checkpoint); err != nil {
+		return err
+	}
+	printOptimizationSummary(req, checkpoint, true)
+	return nil
+}
+
+func replayOptimizedProgram(ctx context.Context, req runOptimizationRequest) error {
+	program, _, err := orchestration.LoadRLMOverviewOptimizedProgram(req.artifactPath)
+	if err != nil {
+		return err
+	}
+	if program == nil {
+		return fmt.Errorf("optimized RLM overview artifact not found: %s", req.artifactPath)
+	}
+	if err := orchestration.ApplyRLMOverviewOptimizedProgram(req.agent, program); err != nil {
+		return err
+	}
+	report, err := orchestration.RunRLMOverviewBenchmark(ctx, req.agent, req.cases, orchestration.RLMOverviewBenchmarkRunConfig{
+		Workers:                      req.workers,
+		CaseTimeout:                  req.caseTimeout,
+		MaxAttempts:                  req.maxAttempts,
+		PassThreshold:                req.passThreshold,
+		ProtectedRegressionTolerance: req.protectedRegressionTolerance,
+		Baseline:                     req.baseline,
+	})
+	if err != nil {
+		return err
+	}
+	if err := writeJSON(req.outputPath, report); err != nil {
+		return err
+	}
+	printSummary(req.modelID, req.cases, report, req.outputPath)
+	if report.ProtectedGate != nil && !report.ProtectedGate.Passed {
+		return errProtectedGateFailed
+	}
+	return nil
+}
+
+func runProtectedGate(ctx context.Context, req runOptimizationRequest, program *optimize.OptimizedAgentProgram) (*orchestration.RLMOverviewBenchmarkRunReport, *orchestration.RLMOverviewProtectedGateReport, error) {
+	if req.baseline == nil {
+		return nil, nil, nil
+	}
+	candidateAgent, err := req.agent.Clone()
+	if err != nil {
+		return nil, nil, fmt.Errorf("clone optimized RLM overview agent for protected gate: %w", err)
+	}
+	if err := orchestration.ApplyRLMOverviewOptimizedProgram(candidateAgent, program); err != nil {
+		return nil, nil, err
+	}
+	report, err := orchestration.RunRLMOverviewBenchmark(ctx, candidateAgent, req.cases, orchestration.RLMOverviewBenchmarkRunConfig{
+		Workers:                      req.workers,
+		CaseTimeout:                  req.caseTimeout,
+		MaxAttempts:                  req.maxAttempts,
+		PassThreshold:                req.passThreshold,
+		ProtectedRegressionTolerance: req.protectedRegressionTolerance,
+		Baseline:                     req.baseline,
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	return report, report.ProtectedGate, nil
+}
+
+func buildOptimizationCheckpoint(req runOptimizationRequest, workflow *optimize.GEPAWorkflowResult, protectedReport *orchestration.RLMOverviewBenchmarkRunReport, protectedGate *orchestration.RLMOverviewProtectedGateReport, tokenUsage map[string]int64, artifactMetadata map[string]interface{}) optimizationCheckpoint {
+	if protectedReport != nil {
+		tokenUsage = combineTokenUsage(tokenUsage, protectedReport.TokenUsage)
+	}
+	checkpoint := optimizationCheckpoint{
+		WrittenAt:        time.Now().UTC(),
+		SuitePath:        req.suitePath,
+		ModelID:          string(req.modelID),
+		ArtifactPath:     req.artifactPath,
+		ProtectedGate:    protectedGate,
+		ProtectedReport:  protectedReport,
+		TokenUsage:       tokenUsage,
+		ArtifactMetadata: artifactMetadata,
+	}
+	if workflow.Optimization != nil {
+		checkpoint.TrainingExampleCount = workflow.Optimization.TrainingExampleCount
+		checkpoint.ValidationExampleCount = workflow.Optimization.ValidationExampleCount
+		checkpoint.BestArtifacts = workflow.Optimization.BestArtifacts.Clone()
+		if workflow.Optimization.BestCandidate != nil {
+			checkpoint.BestCandidateID = workflow.Optimization.BestCandidate.ID
+		}
+	}
+	if workflow.BaselineRun != nil {
+		checkpoint.BaselineValidation = workflow.BaselineRun.AverageScore
+	}
+	if workflow.ReplayRun != nil {
+		checkpoint.ReplayValidation = workflow.ReplayRun.AverageScore
+		checkpoint.BestValidation = workflow.ReplayRun.AverageScore
+	}
+	// Prefer GEPA's explicit best validation evaluation over replay, and replay
+	// over the zero value when validation was not run.
+	if workflow.Optimization != nil && workflow.Optimization.BestValidationEvaluation != nil {
+		checkpoint.BestValidation = workflow.Optimization.BestValidationEvaluation.AverageScore
+	}
+	if checkpoint.BestValidation == 0 {
+		checkpoint.BestValidation = checkpoint.ReplayValidation
+	}
+	return checkpoint
+}
+
+func combineTokenUsage(a, b map[string]int64) map[string]int64 {
+	if len(a) == 0 && len(b) == 0 {
+		return nil
+	}
+	merged := make(map[string]int64, len(a)+len(b))
+	for key, value := range a {
+		merged[key] = value
+	}
+	for key, value := range b {
+		merged[key] += value
+	}
+	return merged
+}
+
+func printOptimizationSummary(req runOptimizationRequest, checkpoint optimizationCheckpoint, artifactWritten bool) {
+	fmt.Printf("RLM overview GEPA optimization complete\n")
+	fmt.Printf("Model:                 %s\n", req.modelID)
+	fmt.Printf("Training examples:     %d\n", checkpoint.TrainingExampleCount)
+	fmt.Printf("Validation examples:   %d\n", checkpoint.ValidationExampleCount)
+	fmt.Printf("Baseline validation:   %.4f\n", checkpoint.BaselineValidation)
+	fmt.Printf("Best validation:       %.4f\n", checkpoint.BestValidation)
+	if checkpoint.ProtectedGate != nil {
+		fmt.Printf("Protected gate:        %t\n", checkpoint.ProtectedGate.Passed)
+	}
+	fmt.Printf("Artifact written:      %t\n", artifactWritten)
+	if artifactWritten {
+		fmt.Printf("Artifact:              %s\n", req.artifactPath)
+	}
+	fmt.Printf("Checkpoint:            %s\n", req.outputPath)
+}
+
+func rlmOverviewIntMutationPlans(maxIterations, maxTokens int) map[string]optimize.IntMutationConfig {
+	plans := make(map[string]optimize.IntMutationConfig)
+	if maxIterations > 1 {
+		plans[agentrlm.ArtifactMaxIterations] = optimize.IntMutationConfig{Min: 1, Max: maxIterations, Step: 1}
+	}
+	if maxTokens > 0 {
+		step := maxTokens / 5
+		if step < 1000 {
+			step = 1000
+		}
+		plans[agentrlm.ArtifactMaxTokens] = optimize.IntMutationConfig{Min: step, Max: maxTokens, Step: step}
+	}
+	return plans
+}
+
+func splitAgentExamples(examples []optimize.AgentExample, validationSplit float64) ([]optimize.AgentExample, []optimize.AgentExample, error) {
+	if len(examples) == 0 {
+		return nil, nil, fmt.Errorf("at least one benchmark example is required")
+	}
+	if len(examples) == 1 {
+		return nil, nil, fmt.Errorf("at least two benchmark examples are required to create a validation split")
+	}
+	if validationSplit <= 0 || validationSplit >= 1 {
+		return nil, nil, fmt.Errorf("validation split must be between 0 and 1")
+	}
+	if len(examples) < rlmOverviewMinimumGEPAExamples {
+		return nil, nil, fmt.Errorf("GEPA optimization requires at least %d benchmark examples; got %d", rlmOverviewMinimumGEPAExamples, len(examples))
+	}
+	validationCount := int(math.Ceil(float64(len(examples)) * validationSplit))
+	if validationCount <= 0 {
+		validationCount = 1
+	}
+	if validationCount >= len(examples) {
+		validationCount = len(examples) - 1
+	}
+	return stratifiedAgentExampleSplit(examples, validationCount)
+}
+
+type indexedAgentExample struct {
+	index   int
+	example optimize.AgentExample
+}
+
+type agentExampleSplitGroup struct {
+	key             string
+	examples        []indexedAgentExample
+	validationCount int
+	capacity        int
+	remainder       float64
+}
+
+func validateRunMode(optimizeRun, replayOnly bool) error {
+	if optimizeRun && replayOnly {
+		return fmt.Errorf("--optimize and --replay-only are mutually exclusive")
+	}
+	return nil
+}
+
+func stratifiedAgentExampleSplit(examples []optimize.AgentExample, validationCount int) ([]optimize.AgentExample, []optimize.AgentExample, error) {
+	groups := splitAgentExampleGroups(examples, validationCount)
+	capacity := 0
+	for i := range groups {
+		capacity += groups[i].capacity
+	}
+	if capacity == 0 {
+		return nil, nil, fmt.Errorf("validation split requires at least one trainable example outside validation")
+	}
+	if validationCount > capacity {
+		validationCount = capacity
+	}
+	allocated := 0
+	for i := range groups {
+		exact := float64(len(groups[i].examples)) * float64(validationCount) / float64(len(examples))
+		count := int(math.Floor(exact))
+		if count > groups[i].capacity {
+			count = groups[i].capacity
+		}
+		groups[i].validationCount = count
+		groups[i].remainder = exact - float64(count)
+		allocated += count
+	}
+	for allocated < validationCount {
+		sort.SliceStable(groups, func(i, j int) bool {
+			if groups[i].validationCount >= groups[i].capacity {
+				return false
+			}
+			if groups[j].validationCount >= groups[j].capacity {
+				return true
+			}
+			if groups[i].remainder == groups[j].remainder {
+				return groups[i].key < groups[j].key
+			}
+			return groups[i].remainder > groups[j].remainder
+		})
+		advanced := false
+		for i := range groups {
+			if groups[i].validationCount >= groups[i].capacity {
+				continue
+			}
+			groups[i].validationCount++
+			allocated++
+			advanced = true
+			break
+		}
+		if !advanced {
+			break
+		}
+	}
+
+	validationIndices := make(map[int]struct{}, validationCount)
+	for _, group := range groups {
+		ordered := append([]indexedAgentExample(nil), group.examples...)
+		sort.SliceStable(ordered, func(i, j int) bool {
+			left := stableExampleHash(group.key, ordered[i].example.ID)
+			right := stableExampleHash(group.key, ordered[j].example.ID)
+			if left == right {
+				return ordered[i].example.ID < ordered[j].example.ID
+			}
+			return left < right
+		})
+		for i := 0; i < group.validationCount && i < len(ordered); i++ {
+			validationIndices[ordered[i].index] = struct{}{}
+		}
+	}
+
+	training := make([]optimize.AgentExample, 0, len(examples)-len(validationIndices))
+	validation := make([]optimize.AgentExample, 0, len(validationIndices))
+	for i, example := range examples {
+		if _, ok := validationIndices[i]; ok {
+			validation = append(validation, example)
+			continue
+		}
+		training = append(training, example)
+	}
+	if len(training) == 0 || len(validation) == 0 {
+		return nil, nil, fmt.Errorf("validation split produced training=%d validation=%d", len(training), len(validation))
+	}
+	return training, validation, nil
+}
+
+func splitAgentExampleGroups(examples []optimize.AgentExample, validationCount int) []agentExampleSplitGroup {
+	groupIndex := make(map[string]int)
+	groups := make([]agentExampleSplitGroup, 0)
+	for i, example := range examples {
+		key := splitAgentExampleGroupKey(example)
+		idx, ok := groupIndex[key]
+		if !ok {
+			idx = len(groups)
+			groupIndex[key] = idx
+			groups = append(groups, agentExampleSplitGroup{key: key})
+		}
+		groups[idx].examples = append(groups[idx].examples, indexedAgentExample{index: i, example: example})
+	}
+	for i := range groups {
+		groups[i].capacity = len(groups[i].examples) - 1
+		if groups[i].capacity < 0 {
+			groups[i].capacity = 0
+		}
+		if groups[i].capacity > validationCount {
+			groups[i].capacity = validationCount
+		}
+	}
+	sort.SliceStable(groups, func(i, j int) bool { return groups[i].key < groups[j].key })
+	return groups
+}
+
+func splitAgentExampleGroupKey(example optimize.AgentExample) string {
+	owner := stringFromInterface(example.Inputs["owner"])
+	repo := stringFromInterface(example.Inputs["repo"])
+	if repo != "" {
+		if owner != "" {
+			return owner + "/" + repo
+		}
+		return repo
+	}
+	if benchmarkCase, ok := example.Metadata["rlm_overview_case"].(orchestration.RLMOverviewBenchmarkCase); ok {
+		repo = strings.TrimSpace(benchmarkCase.Repo)
+		owner = strings.TrimSpace(benchmarkCase.Owner)
+		if repo != "" {
+			if owner != "" {
+				return owner + "/" + repo
+			}
+			return repo
+		}
+	}
+	return "all"
+}
+
+func stableExampleHash(parts ...string) uint64 {
+	h := fnv.New64a()
+	for _, part := range parts {
+		_, _ = h.Write([]byte(part))
+		_, _ = h.Write([]byte{0})
+	}
+	return h.Sum64()
+}
+
+func stringFromInterface(value interface{}) string {
+	if value == nil {
+		return ""
+	}
+	if text, ok := value.(string); ok {
+		return strings.TrimSpace(text)
+	}
+	return strings.TrimSpace(fmt.Sprint(value))
+}
+
+func newTokenLedger() *tokenLedger {
+	return &tokenLedger{totals: make(map[string]int64)}
+}
+
+func (e *tokenAccountingEvaluator) Evaluate(ctx context.Context, agent optimize.OptimizableAgent, ex optimize.AgentExample) (*optimize.EvalResult, error) {
+	result, err := e.base.Evaluate(ctx, agent, ex)
+	if result != nil && result.SideInfo != nil && e.ledger != nil {
+		e.ledger.record(result.SideInfo.Tokens)
+	}
+	return result, err
+}
+
+func (l *tokenLedger) record(tokens map[string]int64) {
+	if l == nil || len(tokens) == 0 {
+		return
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.totals == nil {
+		l.totals = make(map[string]int64)
+	}
+	for key, value := range tokens {
+		l.totals[key] += value
+	}
+}
+
+func (l *tokenLedger) snapshot() map[string]int64 {
+	if l == nil {
+		return nil
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if len(l.totals) == 0 {
+		return nil
+	}
+	out := make(map[string]int64, len(l.totals))
+	for key, value := range l.totals {
+		out[key] = value
+	}
+	return out
 }
 
 func configureLogger(verbose bool) *logging.Logger {
