@@ -111,3 +111,16 @@ Do not:
 3. Rerun `cmd/optimize-rlm-ask` baseline-only after that fix. The first success criterion is 0 evaluation errors and a writable baseline, not a higher average score.
 4. Only after a clean baseline, run a smoke GEPA pass.
 5. Separately verify targeted ask happy path and review RLM with real Maestro workflows.
+
+## OpenAI Follow-Up
+
+Follow-up run with `openai:gpt-5.4-mini` on the same overview path cleared the execution-error blocker that stopped Gemini:
+
+- Overview probe completed with `termination_cause=final_answer`, 2 iterations, 1,898 tokens, and budget attribution under `ask.rlm_overview`.
+- Full 32-case overview baseline completed with 0 evaluation errors and wrote `/tmp/maestro-overview-openai-gpt54mini-baseline.json`.
+- Baseline quality was still poor: average score 0.1805, 0 passed, 32 failed, 93,058 tokens.
+- Smoke GEPA completed with `--population 2 --generations 1`, wrote `/tmp/maestro-overview-openai-gpt54mini-artifact.json`, and passed the protected gate.
+- The smoke artifact was not a quality improvement: baseline validation 0.1719, best validation 0.1656, replay validation 0.1641.
+- Runtime probe with the smoke artifact applied successfully: `rlm_artifact_applied=true`, `termination_cause=final_answer`, 1 iteration, 961 tokens.
+
+Interpretation: `gpt-5.4-mini` is viable for exercising the RLM optimization and artifact-apply pipeline, but the current overview benchmark quality is too low for a meaningful optimization claim. Treat the generated `/tmp` artifact as a smoke-test artifact only.
