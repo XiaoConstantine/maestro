@@ -124,3 +124,20 @@ Follow-up run with `openai:gpt-5.4-mini` on the same overview path cleared the e
 - Runtime probe with the smoke artifact applied successfully: `rlm_artifact_applied=true`, `termination_cause=final_answer`, 1 iteration, 961 tokens.
 
 Interpretation: `gpt-5.4-mini` is viable for exercising the RLM optimization and artifact-apply pipeline, but the current overview benchmark quality is too low for a meaningful optimization claim. Treat the generated `/tmp` artifact as a smoke-test artifact only.
+
+## Post-Report Trace Investigation
+
+Additional trace inspection sharpened the failure diagnosis:
+
+- The Pro full-instruction `maestro-search-context` report shows several empty-action iterations before timeout. dspy-go extracts `outputs["action"]` directly in `pkg/modules/rlm/rlm.go`; when this is empty, RLM records a no-op history entry and continues. That turns parser/custom-prefix failures into silent budget burn.
+- The Flash full-instruction failure on the same case had a useful `Query` result in `result`, then repeatedly emitted fenced Go blocks inside the `Code` field. dspy-go strips leading language markers such as `go\n`, but not a full nested Markdown `go` fence inside the extracted `Code` field, so the REPL parses the fence as code and fails before `FINAL`.
+- There is no host-side short-circuit when the last `Query`/`QueryRaw` response already matches the requested JSON schema. If a later iteration times out or loops, the benchmark sees an execution error even though a usable JSON answer was present earlier in the trace.
+- Corrected one-case traces with absolute `repo_path` showed Gemini Flash can score 1.0 on `maestro-search-context`, while `gpt-5.4-mini` still finished with a broad answer and score 0.10. This makes the full-suite Gemini timeout non-deterministic, but the OpenAI quality issue reproducible.
+- The OpenAI low-score pattern is mostly a manifest/query quality issue: the manifest exposes top-level directories, README text, and a flat package list, but not enough package-level metadata for smaller models to reliably connect `internal/search`, `internal/context`, and `internal/chunk` to the question.
+
+Updated priority order:
+
+1. Fix or upstream dspy-go custom-prefix parsing/empty-action handling so malformed iteration outputs fail loudly or are retried instead of burning iterations.
+2. Add code-field normalization for nested markdown fences before REPL execution.
+3. Add a Maestro-side overview short-circuit: if the latest sub-LLM response parses as the requested overview JSON schema, return it instead of asking the RLM to reformat it through another REPL iteration.
+4. Improve `buildRLMOverviewManifest` with package-level file lists or package comments for directories without README/doc metadata.
