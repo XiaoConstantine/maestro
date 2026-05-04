@@ -46,6 +46,24 @@ func TestBuildRLMOverviewQueryWithOverlay(t *testing.T) {
 	}
 }
 
+func TestBuildRLMOverviewQueryRequiresEvidenceGathering(t *testing.T) {
+	query := buildRLMOverviewQuery("Where is the native agent implemented?")
+	for _, want := range []string{"context_info", "FindRelevant", "GetContext", "QueryWith", "print them or store them", "FOCUSED MANIFEST EVIDENCE"} {
+		if !strings.Contains(query, want) {
+			t.Fatalf("query missing evidence-gathering instruction %q:\n%s", want, query)
+		}
+	}
+}
+
+func TestBuildRLMOverviewQueryWithFocusedEvidence(t *testing.T) {
+	query := buildRLMOverviewQueryWithFocusedEvidence("Where is the native agent implemented?", "- pkg/agents/native/agent.go")
+	for _, want := range []string{"FOCUSED MANIFEST EVIDENCE:", "pkg/agents/native/agent.go", "already-inspected manifest evidence", "Prefer Action: final"} {
+		if !strings.Contains(query, want) {
+			t.Fatalf("query missing focused evidence instruction %q:\n%s", want, query)
+		}
+	}
+}
+
 func TestBuildRLMOverviewQueryWithEmptyOverlay_UsesBasePrompt(t *testing.T) {
 	question := "What are the main packages?"
 

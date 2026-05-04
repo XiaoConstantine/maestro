@@ -26,8 +26,11 @@ const (
 	rlmOverviewRootReadmeMaxChars  = 12000
 	rlmOverviewModuleMaxChars      = 8000
 	rlmOverviewPackageMaxChars     = 1800
+	rlmOverviewFileIndexMaxEntries = 80
+	rlmOverviewFileIndexMaxDepth   = 2
 	rlmOverviewVerificationLimit   = 1
 	rlmOverviewAdaptiveThreshold   = 5
+	rlmMaxFullContextQueryChars    = 50000
 	rlmOverviewMaxDirectSubRLM     = 2
 	rlmOverviewMaxTotalSubRLM      = 6
 	rlmOverviewVerifyEnvVar        = "MAESTRO_RLM_OVERVIEW_VERIFY"
@@ -39,6 +42,9 @@ var (
 	overviewFilePattern       = regexp.MustCompile(`(?i)\b[A-Za-z0-9_./-]+\.(?:go|md|txt|json|toml|yaml|yml)\b`)
 	overviewIdentifierPattern = regexp.MustCompile(`\b(?:[A-Z][a-z0-9]+[A-Z][A-Za-z0-9]*|[A-Z]{2,}[A-Za-z0-9_]*)\b`)
 	overviewTargetPattern     = regexp.MustCompile(`(?i)\b(?:package|file|module|function|method|class|struct|interface)\s+([A-Za-z0-9_./-]+)\b`)
+	overviewManifestRoots     = []string{"pkg", "internal", "cmd", "src", "terminal", "tests", "benchmarks", "examples"}
+	overviewIndexExtensions   = map[string]bool{".go": true, ".md": true, ".json": true, ".yaml": true, ".yml": true, ".toml": true, ".sh": true, ".txt": true}
+	overviewIndexSkipDirs     = map[string]bool{"node_modules": true, "vendor": true, "benchmark_results": true, "council-out": true, "memory": true, "tmp": true, "scratch": true, "rlm_logs": true}
 )
 
 type rlmOverviewManifest struct {
@@ -245,7 +251,9 @@ func (s *MaestroService) handleRLMOverview(ctx context.Context, question, repoPa
 		modrlm.WithTimeout(rlmOverviewTimeout),
 		modrlm.WithContextPolicyPreset(modrlm.ContextPolicyAdaptive),
 		modrlm.WithAdaptiveCheckpointThreshold(rlmOverviewAdaptiveThreshold),
-		modrlm.WithAdaptiveIteration(),
+		modrlm.WithMaxFullContextQueryChars(rlmMaxFullContextQueryChars),
+		modrlm.WithContextInfoPreviewChars(0),
+		modrlm.WithAdaptiveIterationConfig(rlmOverviewAdaptiveIterationConfig(rlmOverviewMaxIterations)),
 		modrlm.WithSubRLMConfig(modrlm.SubRLMConfig{
 			MaxDepth:               2,
 			MaxIterationsPerSubRLM: 2,
@@ -277,7 +285,8 @@ func (s *MaestroService) handleRLMOverview(ctx context.Context, question, repoPa
 		skillVersion = overviewSkill.Version
 	}
 
-	result, trace, err := module.CompleteWithTrace(ctx, manifest.Context, buildRLMOverviewQueryWithOverlay(question, skillOverlay))
+	focusedEvidence := buildRLMOverviewFocusedEvidence(repoPath, manifest, question, rlmOverviewFocusedEvidenceMaxChars)
+	result, trace, err := module.CompleteWithTrace(ctx, manifest.Context, buildRLMOverviewQueryWithFocusedEvidenceAndOverlay(question, focusedEvidence.Text, skillOverlay))
 	if err != nil {
 		return nil, fmt.Errorf("rlm overview failed: %w", err)
 	}
@@ -297,12 +306,16 @@ func (s *MaestroService) handleRLMOverview(ctx context.Context, question, repoPa
 	}
 
 	sources := append([]string(nil), manifest.Sources...)
+	sources = mergeStringLists(sources, focusedEvidence.Sources)
 	verificationTargets := sanitizeVerificationTargets(parsed.NeedsVerification)
 	metadata := map[string]any{
 		"confidence":         estimateRLMOverviewConfidence(answer, verificationTargets),
 		"sources":            sources,
 		"strategy":           "rlm_overview",
 		"needs_verification": verificationTargets,
+	}
+	if strings.TrimSpace(focusedEvidence.Text) != "" {
+		metadata["focused_evidence_chars"] = len(focusedEvidence.Text)
 	}
 	if artifactApplied {
 		metadata["rlm_artifact_path"] = artifactPath
@@ -463,12 +476,14 @@ func buildRLMOverviewManifest(repoPath string, maxChars int) (rlmOverviewManifes
 		break
 	}
 
-	for _, root := range []string{"pkg", "internal", "cmd", "src"} {
+	for _, root := range overviewManifestRoots {
 		rootDir := filepath.Join(repoPath, root)
 		info, err := os.Stat(rootDir)
 		if err != nil || !info.IsDir() {
 			continue
 		}
+
+		sources = addOverviewFileIndex(builder, sources, repoPath, root, 1, rlmOverviewFileIndexMaxEntries)
 
 		dirs, err := immediateSubdirs(rootDir)
 		if err != nil {
@@ -486,6 +501,7 @@ func buildRLMOverviewManifest(repoPath string, maxChars int) (rlmOverviewManifes
 
 		for _, dir := range dirs {
 			relDir := filepath.ToSlash(filepath.Join(root, dir))
+			sources = addOverviewFileIndex(builder, sources, repoPath, relDir, rlmOverviewFileIndexMaxDepth, rlmOverviewFileIndexMaxEntries)
 			docPath, content, err := readPackageMetadata(repoPath, relDir, rlmOverviewPackageMaxChars)
 			if err != nil || content == "" {
 				continue
@@ -651,6 +667,111 @@ func estimateRLMOverviewConfidence(answer string, targets []rlmOverviewVerificat
 		return 0.2
 	}
 	return confidence
+}
+
+func rlmOverviewAdaptiveIterationConfig(maxIterations int) modrlm.AdaptiveIterationConfig {
+	if maxIterations <= 0 {
+		maxIterations = rlmOverviewMaxIterations
+	}
+	return modrlm.AdaptiveIterationConfig{
+		BaseIterations:         maxIterations,
+		MaxIterations:          maxIterations,
+		ContextScaleFactor:     100000,
+		EnableEarlyTermination: false,
+		ConfidenceThreshold:    1,
+	}
+}
+
+func addOverviewFileIndex(builder *manifestBuilder, sources []string, repoPath, relDir string, maxDepth, maxEntries int) []string {
+	entries, err := overviewDirectoryEntries(repoPath, relDir, maxDepth, maxEntries)
+	if err != nil || len(entries) == 0 {
+		return sources
+	}
+	if builder.addSection(fmt.Sprintf("File Index: %s", relDir), strings.Join(entries, "\n")) {
+		sources = appendUniqueString(sources, filepath.ToSlash(relDir))
+	}
+	return sources
+}
+
+func overviewDirectoryEntries(repoPath, relDir string, maxDepth, maxEntries int) ([]string, error) {
+	if maxDepth <= 0 {
+		maxDepth = 1
+	}
+	if maxEntries <= 0 {
+		maxEntries = rlmOverviewFileIndexMaxEntries
+	}
+	root := filepath.Join(repoPath, filepath.FromSlash(relDir))
+	info, err := os.Stat(root)
+	if err != nil || !info.IsDir() {
+		return nil, err
+	}
+
+	entries := make([]string, 0, maxEntries)
+	errStop := fmt.Errorf("overview file index limit reached")
+	err = filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return nil
+		}
+		if path == root {
+			return nil
+		}
+		name := entry.Name()
+		if strings.HasPrefix(name, ".") {
+			if entry.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return nil
+		}
+		rel = filepath.ToSlash(rel)
+		depth := overviewRelativeDepth(rel)
+		if depth > maxDepth {
+			if entry.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+
+		repoRel := filepath.ToSlash(filepath.Join(relDir, rel))
+		if entry.IsDir() {
+			if overviewIndexSkipDirs[name] {
+				return filepath.SkipDir
+			}
+			entries = append(entries, repoRel+"/")
+		} else if overviewShouldIndexFile(name) {
+			entries = append(entries, repoRel)
+		}
+		if len(entries) >= maxEntries {
+			return errStop
+		}
+		return nil
+	})
+	if err != nil && err != errStop {
+		return nil, err
+	}
+	sort.Strings(entries)
+	return entries, nil
+}
+
+func overviewRelativeDepth(rel string) int {
+	rel = strings.Trim(filepath.ToSlash(rel), "/")
+	if rel == "" {
+		return 0
+	}
+	return strings.Count(rel, "/") + 1
+}
+
+func overviewShouldIndexFile(name string) bool {
+	ext := strings.ToLower(filepath.Ext(name))
+	if overviewIndexExtensions[ext] {
+		return true
+	}
+	lower := strings.ToLower(name)
+	return lower == "makefile" || lower == "dockerfile" || lower == "license"
 }
 
 func formatTopLevelEntries(entries []os.DirEntry) string {

@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	modrlm "github.com/XiaoConstantine/dspy-go/pkg/modules/rlm"
 )
 
 func TestShouldUseRLMOverviewQuery(t *testing.T) {
@@ -82,6 +84,9 @@ func TestBuildRLMOverviewManifestIncludesMetadataOnly(t *testing.T) {
 	if strings.Contains(manifest.Context, "func Core()") {
 		t.Fatalf("manifest should not include representative source files: %s", manifest.Context)
 	}
+	if !strings.Contains(manifest.Context, "pkg/core/core.go") {
+		t.Fatalf("manifest should include package file names for grounding: %s", manifest.Context)
+	}
 
 	wantSources := []string{"go.mod", "README.md", "pkg/agents/README.md", "pkg/core/doc.go"}
 	for _, source := range wantSources {
@@ -91,6 +96,59 @@ func TestBuildRLMOverviewManifestIncludesMetadataOnly(t *testing.T) {
 	}
 	if containsString(manifest.Sources, "pkg/core/core.go") {
 		t.Fatalf("manifest sources should exclude representative source files: %#v", manifest.Sources)
+	}
+}
+
+func TestBuildRLMOverviewFocusedEvidenceFindsRelevantPaths(t *testing.T) {
+	repoDir := t.TempDir()
+	mustWriteFile(t, filepath.Join(repoDir, "go.mod"), "module github.com/example/maestro\n")
+	mustWriteFile(t, filepath.Join(repoDir, "internal", "github", "client.go"), "package github\n\ntype Client struct{}\n")
+	mustWriteFile(t, filepath.Join(repoDir, "internal", "github", "mcp_review.go"), "package github\n\nfunc ReviewTool() {}\n")
+	mustWriteFile(t, filepath.Join(repoDir, "internal", "github", "mcp_bash.go"), "package github\n\nfunc BashTool() {}\n")
+	mustWriteFile(t, filepath.Join(repoDir, "internal", "search", "planner.go"), "package search\n")
+
+	manifest, err := buildRLMOverviewManifest(repoDir, 30000)
+	if err != nil {
+		t.Fatalf("buildRLMOverviewManifest() error = %v", err)
+	}
+	evidence := buildRLMOverviewFocusedEvidence(repoDir, manifest, "What GitHub-related adapters does Maestro expose?", 12000)
+
+	for _, want := range []string{"internal/github/client.go", "internal/github/mcp_review.go", "internal/github/mcp_bash.go"} {
+		if !strings.Contains(evidence.Text, want) {
+			t.Fatalf("focused evidence missing %q:\n%s", want, evidence.Text)
+		}
+	}
+	if !containsString(evidence.Sources, "internal/github/client.go") {
+		t.Fatalf("focused evidence sources missing github client: %#v", evidence.Sources)
+	}
+}
+
+func TestBuildRLMOverviewFocusedEvidenceFindsSymbolsAndLiterals(t *testing.T) {
+	repoDir := t.TempDir()
+	mustWriteFile(t, filepath.Join(repoDir, "go.mod"), "module github.com/example/maestro\n")
+	mustWriteFile(t, filepath.Join(repoDir, "internal", "orchestration", "rlm_overview.go"), `package orchestration
+
+func (s *Service) handleRLMOverview() {}
+func buildRLMOverviewManifest() {}
+func record() {
+	metadata["rlm_usage"] = map[string]any{}
+}
+`)
+	mustWriteFile(t, filepath.Join(repoDir, "internal", "orchestration", "rlm_artifacts.go"), `package orchestration
+
+func buildRLMOverviewQueryWithOverlay(question, overlay string) string { return question + overlay }
+`)
+
+	manifest, err := buildRLMOverviewManifest(repoDir, 30000)
+	if err != nil {
+		t.Fatalf("buildRLMOverviewManifest() error = %v", err)
+	}
+	evidence := buildRLMOverviewFocusedEvidence(repoDir, manifest, "What are the main pieces of the RLM overview path?", 12000)
+
+	for _, want := range []string{"handleRLMOverview", "buildRLMOverviewManifest", "buildRLMOverviewQueryWithOverlay", "rlm_usage"} {
+		if !strings.Contains(evidence.Text, want) {
+			t.Fatalf("focused evidence missing %q:\n%s", want, evidence.Text)
+		}
 	}
 }
 
@@ -138,6 +196,28 @@ func TestBuildRLMVerificationQuestion(t *testing.T) {
 	}
 	if !strings.Contains(question, "What are the main packages?") {
 		t.Fatalf("verification question missing original question: %s", question)
+	}
+}
+
+func TestRLMOverviewBenchmarkOptionsGuardFullContextQueries(t *testing.T) {
+	cfg := modrlm.DefaultConfig()
+	for _, opt := range rlmOverviewBenchmarkModuleOptions(DefaultRLMOverviewBenchmarkAgentConfig()) {
+		opt(&cfg)
+	}
+	if cfg.MaxFullContextQueryChars != rlmMaxFullContextQueryChars {
+		t.Fatalf("MaxFullContextQueryChars = %d, want %d", cfg.MaxFullContextQueryChars, rlmMaxFullContextQueryChars)
+	}
+	if cfg.ContextInfoPreviewChars != 0 {
+		t.Fatalf("ContextInfoPreviewChars = %d, want 0 to force explicit manifest inspection", cfg.ContextInfoPreviewChars)
+	}
+	if cfg.AdaptiveIteration == nil {
+		t.Fatalf("AdaptiveIteration = nil, want bounded adaptive iteration")
+	}
+	if cfg.AdaptiveIteration.MaxIterations != rlmOverviewMaxIterations {
+		t.Fatalf("AdaptiveIteration.MaxIterations = %d, want %d", cfg.AdaptiveIteration.MaxIterations, rlmOverviewMaxIterations)
+	}
+	if cfg.AdaptiveIteration.EnableEarlyTermination {
+		t.Fatalf("AdaptiveIteration.EnableEarlyTermination = true, want false to avoid shallow default answers")
 	}
 }
 

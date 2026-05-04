@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,6 +13,7 @@ import (
 	"github.com/XiaoConstantine/dspy-go/pkg/agents"
 	"github.com/XiaoConstantine/dspy-go/pkg/agents/optimize"
 	"github.com/XiaoConstantine/dspy-go/pkg/core"
+	modrlm "github.com/XiaoConstantine/dspy-go/pkg/modules/rlm"
 )
 
 type scriptedRLMOverviewBenchmarkAgent struct {
@@ -21,10 +23,14 @@ type scriptedRLMOverviewBenchmarkAgent struct {
 }
 
 type scriptedRLMOverviewResponse struct {
-	answer  string
-	sources []string
-	trace   *agents.ExecutionTrace
-	err     error
+	answer          string
+	sources         []string
+	trace           *agents.ExecutionTrace
+	parseError      string
+	manifestContext string
+	manifestChars   int
+	fullContextCap  int
+	err             error
 }
 
 func (a *scriptedRLMOverviewBenchmarkAgent) Execute(ctx context.Context, input map[string]interface{}) (map[string]interface{}, error) {
@@ -42,11 +48,24 @@ func (a *scriptedRLMOverviewBenchmarkAgent) Execute(ctx context.Context, input m
 	if response.err != nil {
 		return nil, response.err
 	}
-	return map[string]interface{}{
+	output := map[string]interface{}{
 		"answer":     response.answer,
 		"raw_answer": response.answer,
 		"sources":    append([]string(nil), response.sources...),
-	}, nil
+	}
+	if response.parseError != "" {
+		output["parse_error"] = response.parseError
+	}
+	if response.manifestContext != "" {
+		output["manifest_context"] = response.manifestContext
+	}
+	if response.manifestChars > 0 {
+		output["manifest_chars"] = response.manifestChars
+	}
+	if response.fullContextCap > 0 {
+		output["full_context_cap"] = response.fullContextCap
+	}
+	return output, nil
 }
 
 func (a *scriptedRLMOverviewBenchmarkAgent) GetCapabilities() []core.Tool { return nil }
@@ -91,13 +110,13 @@ func TestEvaluateRLMOverviewAnswerScoresFactsSourcesAndTerseness(t *testing.T) {
 		RepoPath:        "/tmp/repo",
 		Question:        "How is the repository organized?",
 		ExpectedFacts:   []string{"internal/orchestration", "internal/review"},
-		ExpectedSources: []string{"README.md", "go.mod"},
+		ExpectedSources: []string{"internal/orchestration", "internal/review", "README.md", "go.mod"},
 		Protected:       true,
 	}
 
 	eval := EvaluateRLMOverviewAnswer(
 		benchmarkCase,
-		"The repo centers on internal/orchestration and internal/review, with entry points described in README.md.",
+		"The repo centers on internal/orchestration and internal/review, with entry points described in README.md and module metadata in go.mod.",
 		[]string{"go.mod"},
 		DefaultRLMOverviewEvaluatorConfig(),
 	)
@@ -274,6 +293,156 @@ func TestEvaluateRLMOverviewAnswerHandlesForbiddenOnlyCases(t *testing.T) {
 	}
 }
 
+func TestEvaluateRLMOverviewAnswerTracksPrecisionAndManifestCoverageSeparately(t *testing.T) {
+	benchmarkCase := RLMOverviewBenchmarkCase{
+		ID:              "precision",
+		RepoPath:        "/tmp/repo",
+		Question:        "What does this repo do?",
+		ExpectedFacts:   []string{"orchestration layer"},
+		ForbiddenFacts:  []string{"React frontend"},
+		ExpectedSources: []string{"README.md"},
+	}
+
+	eval := EvaluateRLMOverviewAnswer(
+		benchmarkCase,
+		"The orchestration layer is described in README.md, but it also has a React frontend in src/App.tsx.",
+		[]string{"README.md"},
+		DefaultRLMOverviewEvaluatorConfig(),
+	)
+	if eval.FactPrecision != 0.5 {
+		t.Fatalf("FactPrecision = %v, want matched/(matched+forbidden)=0.5", eval.FactPrecision)
+	}
+	if eval.SourcePrecision != 0.5 {
+		t.Fatalf("SourcePrecision = %v, want one expected citation and one unexpected citation", eval.SourcePrecision)
+	}
+	if len(eval.UnexpectedSources) != 1 || eval.UnexpectedSources[0] != "src/App.tsx" {
+		t.Fatalf("UnexpectedSources = %#v, want src/App.tsx", eval.UnexpectedSources)
+	}
+
+	manifestOnly := EvaluateRLMOverviewAnswer(
+		benchmarkCase,
+		"The orchestration layer is described by the repository overview.",
+		[]string{"README.md"},
+		DefaultRLMOverviewEvaluatorConfig(),
+	)
+	if manifestOnly.ManifestSourceCoverage != 1 {
+		t.Fatalf("ManifestSourceCoverage = %v, want manifest to contain README.md", manifestOnly.ManifestSourceCoverage)
+	}
+	if manifestOnly.SourceRecall != 0 {
+		t.Fatalf("SourceRecall = %v, want no answer citation", manifestOnly.SourceRecall)
+	}
+	if manifestOnly.SourceCoverage != 1 {
+		t.Fatalf("SourceCoverage = %v, want legacy answer-or-manifest coverage", manifestOnly.SourceCoverage)
+	}
+}
+
+func TestEvaluateRLMOverviewAnswerReportsEvidenceAndSemanticScores(t *testing.T) {
+	repoDir := t.TempDir()
+	servicePath := filepath.Join(repoDir, "internal", "orchestration", "service.go")
+	if err := os.MkdirAll(filepath.Dir(servicePath), 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	if err := os.WriteFile(servicePath, []byte("package orchestration\n\nfunc handleAsk() {}\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	benchmarkCase := RLMOverviewBenchmarkCase{
+		ID:              "semantic",
+		RepoPath:        repoDir,
+		Question:        "Give me an overview of ask.",
+		ExpectedFacts:   []string{"internal/orchestration/service.go"},
+		ExpectedSources: []string{"internal/orchestration/service.go"},
+		FactAliases: map[string][]string{
+			"internal/orchestration/service.go": {"ask routing service"},
+		},
+		SourceAliases: map[string][]string{
+			"internal/orchestration/service.go": {"orchestration service"},
+		},
+	}
+
+	eval := evaluateRLMOverviewAnswerWithEvidence(
+		benchmarkCase,
+		"The ask routing service is grounded in the orchestration service and routes repository questions.",
+		nil,
+		"Relevant file: internal/orchestration/service.go",
+		true,
+		DefaultRLMOverviewEvaluatorConfig(),
+	)
+
+	if eval.ExactGroundingScore >= eval.SemanticQualityScore {
+		t.Fatalf("scores exact=%v semantic=%v, want semantic to rescue alias match", eval.ExactGroundingScore, eval.SemanticQualityScore)
+	}
+	if eval.SemanticFactRecall != 1 || eval.SemanticSourceRecall != 1 {
+		t.Fatalf("semantic recalls = fact %v source %v, want 1/1", eval.SemanticFactRecall, eval.SemanticSourceRecall)
+	}
+	if eval.EvidenceCoverage.FactCoverage != 1 || eval.EvidenceCoverage.SourceCoverage != 1 {
+		t.Fatalf("EvidenceCoverage = %#v, want full compact-context coverage", eval.EvidenceCoverage)
+	}
+	if eval.RepoEvidenceCoverage.FactCoverage != 1 || eval.RepoEvidenceCoverage.SourceCoverage != 1 {
+		t.Fatalf("RepoEvidenceCoverage = %#v, want full repo/richer-manifest coverage", eval.RepoEvidenceCoverage)
+	}
+	if got := classifyRLMOverviewEvaluation(eval); got != "semantic_match" {
+		t.Fatalf("classification = %q, want semantic_match", got)
+	}
+}
+
+func TestEvaluateRLMOverviewAnswerClassifiesContextMissingWhenRepoHasEvidence(t *testing.T) {
+	repoDir := t.TempDir()
+	servicePath := filepath.Join(repoDir, "internal", "orchestration", "service.go")
+	if err := os.MkdirAll(filepath.Dir(servicePath), 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	if err := os.WriteFile(servicePath, []byte("package orchestration\n\nfunc handleAsk() {}\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	benchmarkCase := RLMOverviewBenchmarkCase{
+		ID:              "context-missing",
+		RepoPath:        repoDir,
+		Question:        "Give me an overview of ask.",
+		ExpectedFacts:   []string{"internal/orchestration/service.go"},
+		ExpectedSources: []string{"internal/orchestration/service.go"},
+	}
+
+	eval := evaluateRLMOverviewAnswerWithEvidence(
+		benchmarkCase,
+		"The ask architecture is handled by internal packages.",
+		nil,
+		"## Top-Level Entries\ninternal/\ncmd/",
+		true,
+		DefaultRLMOverviewEvaluatorConfig(),
+	)
+
+	if eval.EvidenceCoverage.FactCoverage != 0 || eval.EvidenceCoverage.SourceCoverage != 0 {
+		t.Fatalf("EvidenceCoverage = %#v, want compact context missing exact evidence", eval.EvidenceCoverage)
+	}
+	if eval.RepoEvidenceCoverage.FactCoverage != 1 || eval.RepoEvidenceCoverage.SourceCoverage != 1 {
+		t.Fatalf("RepoEvidenceCoverage = %#v, want repo/richer manifest evidence present", eval.RepoEvidenceCoverage)
+	}
+	if got := classifyRLMOverviewEvaluation(eval); got != "context_missing" {
+		t.Fatalf("classification = %q, want context_missing", got)
+	}
+}
+
+func TestEvaluateRLMOverviewAnswerCanonicalizesSourceCitations(t *testing.T) {
+	benchmarkCase := RLMOverviewBenchmarkCase{
+		ID:              "source-canonical",
+		RepoPath:        "/tmp/repo",
+		Question:        "Which source grounds this answer?",
+		ExpectedSources: []string{"internal/orchestration"},
+	}
+
+	eval := EvaluateRLMOverviewAnswer(
+		benchmarkCase,
+		"The answer is grounded in `./internal/orchestration/service.go:42` with enough detail.",
+		nil,
+		DefaultRLMOverviewEvaluatorConfig(),
+	)
+
+	if eval.SourcePrecision != 1 || eval.SourceRecall != 1 {
+		t.Fatalf("source precision/recall = %v/%v cited=%#v, want canonical child file citation to match expected dir", eval.SourcePrecision, eval.SourceRecall, eval.CitedSources)
+	}
+}
+
 func TestRLMOverviewBenchmarkExamplesRoundTrip(t *testing.T) {
 	example := RLMOverviewBenchmarkExamples([]RLMOverviewBenchmarkCase{{
 		ID:              "roundtrip",
@@ -285,6 +454,8 @@ func TestRLMOverviewBenchmarkExamplesRoundTrip(t *testing.T) {
 		ExpectedFacts:   []string{"internal/orchestration"},
 		ForbiddenFacts:  []string{"Django"},
 		ExpectedSources: []string{"README.md"},
+		FactAliases:     map[string][]string{"internal/orchestration": {"orchestration package"}},
+		SourceAliases:   map[string][]string{"README.md": {"readme"}},
 		Protected:       true,
 		Tags:            []string{"overview"},
 	}})[0]
@@ -311,6 +482,9 @@ func TestRLMOverviewBenchmarkExamplesRoundTrip(t *testing.T) {
 	}
 	if len(benchmarkCase.ExpectedSources) != 1 || benchmarkCase.ExpectedSources[0] != "README.md" {
 		t.Fatalf("ExpectedSources = %#v, want README.md", benchmarkCase.ExpectedSources)
+	}
+	if got := benchmarkCase.FactAliases["internal/orchestration"][0]; got != "orchestration package" {
+		t.Fatalf("FactAliases = %#v, want round-tripped alias", benchmarkCase.FactAliases)
 	}
 }
 
@@ -377,12 +551,12 @@ func TestRLMOverviewBenchmarkEvaluatorUsesExplicitSourcesAndTraceTokens(t *testi
 		RepoPath:        "/tmp/repo",
 		Question:        "How is this repo organized?",
 		ExpectedFacts:   []string{"internal/orchestration"},
-		ExpectedSources: []string{"README.md"},
+		ExpectedSources: []string{"internal/orchestration", "README.md"},
 	}
 	agent := &scriptedRLMOverviewBenchmarkAgent{
 		responses: map[string]scriptedRLMOverviewResponse{
 			"overview": {
-				answer:  "The repository overview is grounded in internal/orchestration and the surrounding command flow.",
+				answer:  "The repository overview is grounded in internal/orchestration and the surrounding command flow documented in README.md.",
 				sources: []string{"README.md"},
 				trace: &agents.ExecutionTrace{
 					TokenUsage: map[string]int64{"total_tokens": 42},
@@ -407,6 +581,322 @@ func TestRLMOverviewBenchmarkEvaluatorUsesExplicitSourcesAndTraceTokens(t *testi
 	}
 	if got := result.SideInfo.Diagnostics["sources"]; got == nil {
 		t.Fatalf("sources diagnostic missing")
+	}
+}
+
+func TestRunRLMOverviewBenchmarkReportsTraceMetricsAndAcceptanceGate(t *testing.T) {
+	cases := []RLMOverviewBenchmarkCase{{
+		ID:              "trace",
+		RepoPath:        "/tmp/repo",
+		Question:        "How is this repo organized?",
+		ExpectedFacts:   []string{"orchestration layer"},
+		ExpectedSources: []string{"README.md"},
+	}}
+	agent := &scriptedRLMOverviewBenchmarkAgent{
+		responses: map[string]scriptedRLMOverviewResponse{
+			"trace": {
+				answer:         "The orchestration layer is grounded in README.md and summarized with enough detail for review.",
+				sources:        []string{"README.md"},
+				manifestChars:  60000,
+				fullContextCap: 50000,
+				trace: &agents.ExecutionTrace{
+					TokenUsage: map[string]int64{"total_tokens": 75},
+					ContextMetadata: map[string]interface{}{
+						modrlm.TraceMetadataRootPromptMaxTokens:  180,
+						modrlm.TraceMetadataRootPromptMeanTokens: 120,
+						modrlm.TraceMetadataSubLLMCallCount:      2,
+						modrlm.TraceMetadataSubRLMCallCount:      1,
+					},
+					TerminationCause: "final_answer",
+					Steps: []agents.TraceStep{
+						{Index: 1, Success: true},
+					},
+				},
+			},
+		},
+	}
+
+	report, err := RunRLMOverviewBenchmark(context.Background(), agent, cases, RLMOverviewBenchmarkRunConfig{})
+	if err != nil {
+		t.Fatalf("RunRLMOverviewBenchmark() error = %v", err)
+	}
+	if report.RLMMetrics.RootPromptMaxTokens != 180 || report.RLMMetrics.RootPromptMeanTokens != 120 {
+		t.Fatalf("RLMMetrics prompt tokens = %#v, want max=180 mean=120", report.RLMMetrics)
+	}
+	if report.RLMMetrics.SliceQueryRatio != 1 {
+		t.Fatalf("SliceQueryRatio = %v, want large-context subcalls counted as sliced/raw", report.RLMMetrics.SliceQueryRatio)
+	}
+	if report.RLMMetrics.SubcallUsefulRatio != 1 {
+		t.Fatalf("SubcallUsefulRatio = %v, want useful subcall heuristic", report.RLMMetrics.SubcallUsefulRatio)
+	}
+	if report.RLMMetrics.NoOpIterationCount != 1 {
+		t.Fatalf("NoOpIterationCount = %d, want 1", report.RLMMetrics.NoOpIterationCount)
+	}
+	if report.RLMMetrics.FinalAnswerRate != 1 {
+		t.Fatalf("FinalAnswerRate = %v, want 1", report.RLMMetrics.FinalAnswerRate)
+	}
+	if report.AcceptanceGate == nil || !report.AcceptanceGate.Passed {
+		t.Fatalf("AcceptanceGate = %#v, want passed gate", report.AcceptanceGate)
+	}
+}
+
+func TestRunRLMOverviewBenchmarkClassifiesFailuresAndSummarizesAblations(t *testing.T) {
+	repoDir := t.TempDir()
+	servicePath := filepath.Join(repoDir, "internal", "orchestration", "service.go")
+	if err := os.MkdirAll(filepath.Dir(servicePath), 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	if err := os.WriteFile(servicePath, []byte("package orchestration\n\nfunc handleAsk() {}\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	cases := []RLMOverviewBenchmarkCase{
+		{
+			ID:              "context-missing",
+			RepoPath:        repoDir,
+			Question:        "Where is ask routed?",
+			ExpectedFacts:   []string{"internal/orchestration/service.go"},
+			ExpectedSources: []string{"internal/orchestration/service.go"},
+		},
+		{
+			ID:              "semantic-match",
+			RepoPath:        repoDir,
+			Question:        "Where is ask routed?",
+			ExpectedFacts:   []string{"internal/orchestration/service.go"},
+			ExpectedSources: []string{"internal/orchestration/service.go"},
+			FactAliases: map[string][]string{
+				"internal/orchestration/service.go": {"ask routing service"},
+			},
+			SourceAliases: map[string][]string{
+				"internal/orchestration/service.go": {"orchestration service"},
+			},
+		},
+	}
+	agent := &scriptedRLMOverviewBenchmarkAgent{
+		responses: map[string]scriptedRLMOverviewResponse{
+			"context-missing": {
+				answer:          "The ask path is handled by internal packages but the compact manifest is generic.",
+				manifestContext: "## Top-Level Entries\ninternal/\ncmd/",
+			},
+			"semantic-match": {
+				answer:          "The ask routing service is grounded in the orchestration service and routes repository questions.",
+				manifestContext: "Relevant file: internal/orchestration/service.go",
+				trace: &agents.ExecutionTrace{
+					TerminationCause: "final_answer",
+					Steps: []agents.TraceStep{
+						{Index: 1, ActionRaw: "query", Observation: "QueryRaw returned service evidence", Success: true},
+					},
+				},
+			},
+		},
+	}
+
+	report, err := RunRLMOverviewBenchmark(context.Background(), agent, cases, RLMOverviewBenchmarkRunConfig{})
+	if err != nil {
+		t.Fatalf("RunRLMOverviewBenchmark() error = %v", err)
+	}
+	if got := report.Results[0].FailureClassification; got != "context_missing" {
+		t.Fatalf("context case classification = %q, want context_missing", got)
+	}
+	if got := report.Results[1].FailureClassification; got != "semantic_match" {
+		t.Fatalf("semantic case classification = %q, want semantic_match", got)
+	}
+	if report.FailureClasses["context_missing"] != 1 || report.FailureClasses["semantic_match"] != 1 {
+		t.Fatalf("FailureClasses = %#v, want one context_missing and one semantic_match", report.FailureClasses)
+	}
+	if report.Ablations == nil || report.Ablations.SemanticRescuedCases != 1 {
+		t.Fatalf("Ablations = %#v, want one semantic rescued case", report.Ablations)
+	}
+	if report.RLMMetrics.QueryActionCount != 1 || report.RLMMetrics.QueryModeCounts["query_raw"] != 1 {
+		t.Fatalf("RLMMetrics query tracking = %#v, want one query_raw action", report.RLMMetrics)
+	}
+}
+
+func TestRLMOverviewTraceMetricsDoesNotTreatUnknownSmallQueryAsFullContext(t *testing.T) {
+	metrics := rlmOverviewTraceMetrics(RLMOverviewAgentResult{
+		ManifestChars:  18000,
+		FullContextCap: rlmMaxFullContextQueryChars,
+		Trace: &agents.ExecutionTrace{
+			TerminationCause: "final_answer",
+			Steps: []agents.TraceStep{
+				{Index: 1, ActionRaw: "query", Tool: "query", Observation: "inspected relevant manifest chunks", Success: true},
+			},
+		},
+	}, RLMOverviewEvaluation{})
+
+	if metrics.QueryActionCount != 1 || metrics.QueryActionSuccessCount != 1 {
+		t.Fatalf("query metrics = %#v, want one successful query action", metrics)
+	}
+	if metrics.FullContextQuerySuccessCount != 0 {
+		t.Fatalf("FullContextQuerySuccessCount = %d, want 0 for unclassified small-context query", metrics.FullContextQuerySuccessCount)
+	}
+}
+
+func TestRLMOverviewTraceMetricsDoesNotTreatSuccessfulJSONAnswerAsParseError(t *testing.T) {
+	metrics := rlmOverviewTraceMetrics(RLMOverviewAgentResult{
+		ManifestChars:  18000,
+		FullContextCap: rlmMaxFullContextQueryChars,
+		Trace: &agents.ExecutionTrace{
+			TerminationCause: "final_answer",
+			Steps: []agents.TraceStep{
+				{
+					Index:       1,
+					Observation: `{"answer":"The path mentions parseRLMOverviewOutput and an optimized program JSON artifact.","needs_verification":[]}`,
+					Success:     true,
+				},
+			},
+		},
+	}, RLMOverviewEvaluation{})
+
+	if metrics.ParseErrorCount != 0 {
+		t.Fatalf("ParseErrorCount = %d, want 0 for successful answer text mentioning JSON/parse identifiers", metrics.ParseErrorCount)
+	}
+
+	metrics = rlmOverviewTraceMetrics(RLMOverviewAgentResult{
+		ManifestChars:  18000,
+		FullContextCap: rlmMaxFullContextQueryChars,
+		Trace: &agents.ExecutionTrace{
+			TerminationCause: "final_answer",
+			Steps: []agents.TraceStep{
+				{Index: 1, Error: "failed to parse model output: invalid JSON", Success: false},
+			},
+		},
+	}, RLMOverviewEvaluation{})
+	if metrics.ParseErrorCount != 1 {
+		t.Fatalf("ParseErrorCount = %d, want 1 for explicit parse failure", metrics.ParseErrorCount)
+	}
+}
+
+func TestClassifyRLMOverviewCaseReportCoversFailureKinds(t *testing.T) {
+	passThreshold := 0.7
+	cases := []struct {
+		name   string
+		report RLMOverviewBenchmarkCaseReport
+		want   string
+	}{
+		{
+			name: "context missing",
+			report: RLMOverviewBenchmarkCaseReport{
+				Score:            0.2,
+				SchemaValid:      true,
+				EvidenceCoverage: RLMOverviewEvidenceCoverage{FactCoverage: 0, SourceCoverage: 1},
+			},
+			want: "context_missing",
+		},
+		{
+			name: "semantic match",
+			report: RLMOverviewBenchmarkCaseReport{
+				Score:                0.2,
+				ExactGroundingScore:  0.2,
+				SemanticQualityScore: 0.8,
+				FactRecall:           0,
+				SemanticFactRecall:   1,
+				SchemaValid:          true,
+				EvidenceCoverage:     RLMOverviewEvidenceCoverage{FactCoverage: 1, SourceCoverage: 1},
+			},
+			want: "semantic_match",
+		},
+		{
+			name: "answer missing",
+			report: RLMOverviewBenchmarkCaseReport{
+				Score:            0.4,
+				FactRecall:       0,
+				MissingFacts:     []string{"expected"},
+				SchemaValid:      true,
+				EvidenceCoverage: RLMOverviewEvidenceCoverage{FactCoverage: 1, SourceCoverage: 1},
+			},
+			want: "answer_missing",
+		},
+		{
+			name: "real behavior failure",
+			report: RLMOverviewBenchmarkCaseReport{
+				Score:            0.4,
+				SchemaValid:      false,
+				EvidenceCoverage: RLMOverviewEvidenceCoverage{FactCoverage: 1, SourceCoverage: 1},
+			},
+			want: "real_behavior_failure",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := classifyRLMOverviewCaseReport(tc.report, passThreshold); got != tc.want {
+				t.Fatalf("classification = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestRLMOverviewAcceptanceGateRejectsHardFailures(t *testing.T) {
+	report := &RLMOverviewBenchmarkRunReport{
+		EvaluationErrors: 1,
+		CostUSD:          10,
+		PassedExamples:   1,
+		RLMMetrics: RLMOverviewTraceMetricsSummary{
+			FinalAnswerRate:              0.5,
+			ParseErrorCount:              2,
+			FullContextQuerySuccessCount: 1,
+		},
+		ProtectedGate: &RLMOverviewProtectedGateReport{Passed: false},
+	}
+
+	gate := EvaluateRLMOverviewAcceptanceGate(report, RLMOverviewBenchmarkRunConfig{
+		MinFinalAnswerRate:   0.95,
+		MaxParseErrors:       0,
+		MaxCostPerCorrectUSD: 1,
+	})
+	if gate.Passed || gate.Decision != "rejected" {
+		t.Fatalf("gate = %#v, want rejected", gate)
+	}
+	for _, want := range []string{"evaluation_errors", "final_answer_rate", "parse_error_count", "full_context_query_success_count", "cost_per_correct", "protected gate failed"} {
+		if !strings.Contains(strings.Join(gate.Reasons, "\n"), want) {
+			t.Fatalf("gate reasons = %#v, missing %q", gate.Reasons, want)
+		}
+	}
+}
+
+func TestAttachRLMOverviewDirectBaselineComparesQualityTokensCostLatency(t *testing.T) {
+	report := &RLMOverviewBenchmarkRunReport{
+		AverageScore: 0.9,
+		AverageQuality: RLMOverviewQualitySummary{
+			ExactGroundingScore:  0.9,
+			SemanticQualityScore: 0.95,
+		},
+		PassedExamples: 2,
+		TokenUsage:     map[string]int64{"total_tokens": 80},
+		CostUSD:        0.04,
+		LatencyMS:      RLMOverviewLatencySummary{Average: 200},
+		AcceptanceGate: &RLMOverviewAcceptanceGateReport{Passed: true, Decision: "accepted"},
+	}
+	direct := &RLMOverviewBenchmarkRunReport{
+		AverageScore: 0.7,
+		AverageQuality: RLMOverviewQualitySummary{
+			ExactGroundingScore:  0.7,
+			SemanticQualityScore: 0.75,
+		},
+		PassedExamples: 1,
+		TokenUsage:     map[string]int64{"total_tokens": 100},
+		CostUSD:        0.03,
+		LatencyMS:      RLMOverviewLatencySummary{Average: 300},
+	}
+
+	comparison := AttachRLMOverviewDirectBaseline(report, direct)
+	if comparison == nil {
+		t.Fatalf("comparison = nil")
+	}
+	if math.Abs(comparison.QualityDelta-0.2) > 0.000001 {
+		t.Fatalf("QualityDelta = %v, want 0.2", comparison.QualityDelta)
+	}
+	if math.Abs(comparison.ExactGroundingDelta-0.2) > 0.000001 || math.Abs(comparison.SemanticQualityDelta-0.2) > 0.000001 {
+		t.Fatalf("score deltas = exact %v semantic %v, want 0.2/0.2", comparison.ExactGroundingDelta, comparison.SemanticQualityDelta)
+	}
+	if comparison.TokenDelta != -20 || math.Abs(comparison.TokenSavingsRatio-0.2) > 0.000001 {
+		t.Fatalf("token comparison = %#v, want delta=-20 savings=0.2", comparison)
+	}
+	if math.Abs(comparison.RLMCostPerCorrect-0.02) > 0.000001 || math.Abs(comparison.DirectCostPerCorrect-0.03) > 0.000001 {
+		t.Fatalf("cost per correct = %#v, want 0.02 and 0.03", comparison)
+	}
+	if report.DirectBaseline != direct || report.BaselineComparison != comparison {
+		t.Fatalf("baseline comparison was not attached to report")
 	}
 }
 
