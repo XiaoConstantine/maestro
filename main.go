@@ -689,8 +689,10 @@ func codingToolDetail(message *agents.Message) string {
 	if message == nil || message.ToolResult == nil {
 		return ""
 	}
-	contentText := strings.TrimSpace(contentBlocksText(message.ToolResult.DisplayContent))
-	if contentText == "" {
+	contentText := ""
+	if message.ToolResult.DisplayContent != nil {
+		contentText = strings.TrimSpace(contentBlocksText(message.ToolResult.DisplayContent))
+	} else {
 		contentText = strings.TrimSpace(contentBlocksText(message.ToolResult.Content))
 	}
 	if path, ok := message.ToolResult.Details["path"].(string); ok && strings.TrimSpace(path) != "" {

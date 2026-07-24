@@ -56,6 +56,24 @@ func TestMapCodingEventFallsBackToModelContentWhenDisplayContentMissing(t *testi
 	}
 }
 
+func TestMapCodingEventPreservesExplicitlyEmptyDisplayContent(t *testing.T) {
+	event, ok := mapCodingEvent(agents.ExecutionEvent{Payload: agents.ToolCallFinishedEvent{
+		Call:   core.ToolCall{Name: "read"},
+		Status: agents.OperationStatusCompleted,
+		Result: &agents.Message{ToolResult: &agents.MessageToolResult{
+			Content:        []core.ContentBlock{core.NewTextBlock("model-only secret")},
+			DisplayContent: []core.ContentBlock{},
+			Details:        map[string]any{"path": "secret.txt"},
+		}},
+	}})
+	if !ok {
+		t.Fatal("mapCodingEvent() ok = false")
+	}
+	if event.Detail != "secret.txt" {
+		t.Fatalf("event.Detail = %q, want only path when display content is intentionally empty", event.Detail)
+	}
+}
+
 func TestMapCodingEventIgnoresMessageAdded(t *testing.T) {
 	if _, ok := mapCodingEvent(agents.ExecutionEvent{Payload: agents.MessageAddedEvent{}}); ok {
 		t.Fatal("mapCodingEvent() ok = true, want false")
