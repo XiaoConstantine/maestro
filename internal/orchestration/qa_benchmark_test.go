@@ -17,9 +17,8 @@ import (
 )
 
 type fakeQABenchmarkAgent struct {
-	answer      string
-	trace       *agents.ExecutionTrace
-	nativeTrace *native.Trace
+	answer string
+	trace  *agents.ExecutionTrace
 }
 
 type capturingBenchmarkLLM struct {
@@ -90,7 +89,7 @@ func (a *fakeQABenchmarkAgent) GetArtifacts() optimize.AgentArtifacts {
 func (a *fakeQABenchmarkAgent) SetArtifacts(optimize.AgentArtifacts) error { return nil }
 
 func (a *fakeQABenchmarkAgent) Clone() (optimize.OptimizableAgent, error) {
-	return &fakeQABenchmarkAgent{answer: a.answer, trace: a.trace, nativeTrace: a.nativeTrace}, nil
+	return &fakeQABenchmarkAgent{answer: a.answer, trace: a.trace}, nil
 }
 
 func (a *fakeQABenchmarkAgent) LastExecutionTrace() *agents.ExecutionTrace {
@@ -100,27 +99,15 @@ func (a *fakeQABenchmarkAgent) LastExecutionTrace() *agents.ExecutionTrace {
 	return a.trace.Clone()
 }
 
-func (a *fakeQABenchmarkAgent) LastNativeTrace() *native.Trace {
-	if a.nativeTrace == nil {
-		return nil
-	}
-	return a.nativeTrace.Clone()
-}
-
 func TestQABenchmarkEvaluatorScoresFactCoverage(t *testing.T) {
 	evaluator := NewQABenchmarkEvaluator(DefaultQABenchmarkEvaluatorConfig())
 	agent := &fakeQABenchmarkAgent{
 		answer: "The repository is organized around pkg/agents and pkg/modules. pkg/agents contains runtime agents.",
 		trace: &agents.ExecutionTrace{
 			TokenUsage: map[string]int64{
-				"total_tokens": 1234,
-			},
-		},
-		nativeTrace: &native.Trace{
-			TokenUsage: native.TokenUsage{
-				PromptTokens:     700,
-				CompletionTokens: 300,
-				TotalTokens:      1000,
+				"prompt_tokens":     700,
+				"completion_tokens": 300,
+				"total_tokens":      1000,
 			},
 		},
 	}
@@ -141,8 +128,8 @@ func TestQABenchmarkEvaluatorScoresFactCoverage(t *testing.T) {
 	if result.Score != 1.0 {
 		t.Fatalf("score = %v, want 1.0", result.Score)
 	}
-	if result.SideInfo == nil || result.SideInfo.Tokens["total_tokens"] != 1234 {
-		t.Fatalf("tokens = %#v, want total_tokens=1234", result.SideInfo)
+	if result.SideInfo == nil || result.SideInfo.Tokens["total_tokens"] != 1000 {
+		t.Fatalf("tokens = %#v, want total_tokens=1000", result.SideInfo)
 	}
 	if result.SideInfo.Tokens["native_total_tokens"] != 1000 {
 		t.Fatalf("native_total_tokens = %#v, want 1000", result.SideInfo.Tokens)
@@ -369,6 +356,57 @@ func TestQABenchmarkAgent_Execute_ComposesBaseAndOverlayOnce(t *testing.T) {
 	}
 }
 
+func TestQAAgentNativeExecutionReturnsOperationScopedTrace(t *testing.T) {
+	llm := &capturingBenchmarkLLM{
+		capabilities: []core.Capability{core.CapabilityCompletion, core.CapabilityToolCalling},
+		results: []map[string]any{
+			{"function_call": map[string]any{"name": "Finish", "arguments": map[string]any{"answer": "first"}}},
+			{"function_call": map[string]any{"name": "Finish", "arguments": map[string]any{"answer": "second"}}},
+		},
+	}
+	runtimeAgent, err := native.NewAgent(llm, native.Config{MaxTurns: 1})
+	if err != nil {
+		t.Fatalf("native.NewAgent() error = %v", err)
+	}
+	agent := &QAAgent{nativeAgent: runtimeAgent}
+
+	firstAnswer, _, _, firstTrace, err := agent.askWithNativeLocked(context.Background(), "first question", "owner", "repo")
+	if err != nil {
+		t.Fatalf("first askWithNativeLocked() error = %v", err)
+	}
+	secondAnswer, _, _, secondTrace, err := agent.askWithNativeLocked(context.Background(), "second question", "owner", "repo")
+	if err != nil {
+		t.Fatalf("second askWithNativeLocked() error = %v", err)
+	}
+
+	if firstAnswer != "first" || secondAnswer != "second" {
+		t.Fatalf("answers = %q, %q; want first, second", firstAnswer, secondAnswer)
+	}
+	if firstTrace == nil || secondTrace == nil {
+		t.Fatalf("traces = %#v, %#v; want both non-nil", firstTrace, secondTrace)
+	}
+	if got := stringValue(firstTrace.Output["final_answer"]); got != "first" {
+		t.Fatalf("first trace final answer after second run = %q, want first", got)
+	}
+	if firstTrace == secondTrace {
+		t.Fatal("first and second execution returned the same trace pointer")
+	}
+
+	_, _, _, failedTrace, err := agent.askWithNativeLocked(context.Background(), "failing question", "owner", "repo")
+	if err == nil {
+		t.Fatal("failing askWithNativeLocked() error = nil")
+	}
+	if failedTrace == nil {
+		t.Fatal("failed trace = nil")
+	}
+	if failedTrace == secondTrace {
+		t.Fatal("failed execution reused the prior trace pointer")
+	}
+	if failedTrace.Status != agents.TraceStatusFailure {
+		t.Fatalf("failed trace status = %q, want %q", failedTrace.Status, agents.TraceStatusFailure)
+	}
+}
+
 func TestQASkillStorePublishPath_LoadsOverlayWithoutDuplication(t *testing.T) {
 	store := skills.NewFileStore(filepath.Join(t.TempDir(), "skills.json"))
 	overlay := "Prefer exact symbol lookups before broad searches."
@@ -430,6 +468,16 @@ func TestQASkillStorePublishPath_LoadsOverlayWithoutDuplication(t *testing.T) {
 	}
 	if completed, _ := result["completed"].(bool); !completed {
 		t.Fatalf("completed = %#v, want true", result["completed"])
+	}
+	trace := runtimeAgent.LastExecutionTrace()
+	if trace == nil {
+		t.Fatal("LastExecutionTrace() = nil")
+	}
+	if trace.Status != agents.TraceStatusSuccess {
+		t.Fatalf("trace status = %q, want %q", trace.Status, agents.TraceStatusSuccess)
+	}
+	if answer := stringValue(trace.Output["final_answer"]); answer != "done" {
+		t.Fatalf("trace final answer = %q, want done", answer)
 	}
 	if len(llm.prompts) != 1 {
 		t.Fatalf("captured prompts = %d, want 1", len(llm.prompts))

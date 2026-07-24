@@ -44,9 +44,8 @@ type QABenchmarkAgent struct {
 	logger    *logging.Logger
 	artifacts optimize.AgentArtifacts
 
-	mu              sync.RWMutex
-	lastTrace       *agents.ExecutionTrace
-	lastNativeTrace *native.Trace
+	mu        sync.RWMutex
+	lastTrace *agents.ExecutionTrace
 }
 
 var _ optimize.OptimizableAgent = (*QABenchmarkAgent)(nil)
@@ -275,7 +274,6 @@ func (a *QABenchmarkAgent) Execute(ctx context.Context, input map[string]interfa
 
 	a.mu.Lock()
 	a.lastTrace = runtimeAgent.LastExecutionTrace()
-	a.lastNativeTrace = runtimeAgent.LastNativeTrace()
 	a.mu.Unlock()
 
 	return result, err
@@ -348,9 +346,6 @@ func (a *QABenchmarkAgent) Clone() (optimize.OptimizableAgent, error) {
 	if trace := a.LastExecutionTrace(); trace != nil {
 		cloned.lastTrace = trace
 	}
-	if trace := a.LastNativeTrace(); trace != nil {
-		cloned.lastNativeTrace = trace
-	}
 	return cloned, nil
 }
 
@@ -364,18 +359,6 @@ func (a *QABenchmarkAgent) LastExecutionTrace() *agents.ExecutionTrace {
 		return nil
 	}
 	return a.lastTrace.Clone()
-}
-
-func (a *QABenchmarkAgent) LastNativeTrace() *native.Trace {
-	if a == nil {
-		return nil
-	}
-	a.mu.RLock()
-	defer a.mu.RUnlock()
-	if a.lastNativeTrace == nil {
-		return nil
-	}
-	return a.lastNativeTrace.Clone()
 }
 
 func (e *qaBenchmarkEvaluator) Evaluate(ctx context.Context, agent optimize.OptimizableAgent, ex optimize.AgentExample) (*optimize.EvalResult, error) {
@@ -440,19 +423,18 @@ func (e *qaBenchmarkEvaluator) Evaluate(ctx context.Context, agent optimize.Opti
 		sideInfo.Trace = trace
 		if trace != nil {
 			sideInfo.Tokens = traceTokenUsage(trace)
-		}
-	}
-	if nativeTraceProvider, ok := agent.(interface{ LastNativeTrace() *native.Trace }); ok {
-		if trace := nativeTraceProvider.LastNativeTrace(); trace != nil {
-			sideInfo.Diagnostics["native_prompt_tokens"] = trace.TokenUsage.PromptTokens
-			sideInfo.Diagnostics["native_completion_tokens"] = trace.TokenUsage.CompletionTokens
-			sideInfo.Diagnostics["native_total_tokens"] = trace.TokenUsage.TotalTokens
+			promptTokens := trace.TokenUsage["prompt_tokens"]
+			completionTokens := trace.TokenUsage["completion_tokens"]
+			totalTokens := trace.TokenUsage["total_tokens"]
+			sideInfo.Diagnostics["native_prompt_tokens"] = promptTokens
+			sideInfo.Diagnostics["native_completion_tokens"] = completionTokens
+			sideInfo.Diagnostics["native_total_tokens"] = totalTokens
 			if sideInfo.Tokens == nil {
 				sideInfo.Tokens = map[string]int64{}
 			}
-			sideInfo.Tokens["native_prompt_tokens"] = trace.TokenUsage.PromptTokens
-			sideInfo.Tokens["native_completion_tokens"] = trace.TokenUsage.CompletionTokens
-			sideInfo.Tokens["native_total_tokens"] = trace.TokenUsage.TotalTokens
+			sideInfo.Tokens["native_prompt_tokens"] = promptTokens
+			sideInfo.Tokens["native_completion_tokens"] = completionTokens
+			sideInfo.Tokens["native_total_tokens"] = totalTokens
 		}
 	}
 

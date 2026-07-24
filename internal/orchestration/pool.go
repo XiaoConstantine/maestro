@@ -146,35 +146,40 @@ func (a *QAAgent) ConfigureSession(sessionManager *maestrosubagent.SessionManage
 }
 
 func (a *QAAgent) Ask(ctx context.Context, question, repoPath, owner, repo string) (string, float64, []string, error) {
+	answer, confidence, sources, _, err := a.askWithTrace(ctx, question, repoPath, owner, repo)
+	return answer, confidence, sources, err
+}
+
+func (a *QAAgent) askWithTrace(ctx context.Context, question, repoPath, owner, repo string) (string, float64, []string, *agents.ExecutionTrace, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.logger.Debug(ctx, "QAAgent Ask start: session=%q repo=%q question=%q", a.sessionID, repoPath, question)
 
 	if err := a.ensureNativeAgentLocked(ctx, repoPath, owner, repo); err != nil {
 		a.logger.Debug(ctx, "QAAgent ensureNativeAgentLocked error: %v", err)
-		return "", 0, nil, fmt.Errorf("failed to create native QA agent: %w", err)
+		return "", 0, nil, nil, fmt.Errorf("failed to create native QA agent: %w", err)
 	}
 
-	answer, confidence, sources, err := a.askWithNativeLocked(ctx, question, owner, repo)
+	answer, confidence, sources, trace, err := a.askWithNativeLocked(ctx, question, owner, repo)
 	if err == nil {
-		trace := a.nativeAgent.LastNativeTrace()
 		var promptTokens, completionTokens, totalTokens int64
 		var steps int
 		if trace != nil {
-			promptTokens = trace.TokenUsage.PromptTokens
-			completionTokens = trace.TokenUsage.CompletionTokens
-			totalTokens = trace.TokenUsage.TotalTokens
+			promptTokens = trace.TokenUsage["prompt_tokens"]
+			completionTokens = trace.TokenUsage["completion_tokens"]
+			totalTokens = trace.TokenUsage["total_tokens"]
 			steps = len(trace.Steps)
 		}
 		a.logger.Debug(ctx, "QAAgent native ask complete: answer_len=%d confidence=%.2f sources=%d prompt_tokens=%d completion_tokens=%d total_tokens=%d steps=%d", len(answer), confidence, len(sources), promptTokens, completionTokens, totalTokens, steps)
-		return answer, confidence, sources, nil
+		return answer, confidence, sources, trace, nil
 	}
 	a.logger.Debug(ctx, "QAAgent native ask error: %v", err)
 	if shouldFallbackToLegacyQA(err) {
 		a.logger.Warn(ctx, "Native QA failed, falling back to legacy ReAct: %v", err)
-		return a.askWithLegacyReAct(ctx, question, repoPath, owner, repo)
+		answer, confidence, sources, fallbackErr := a.askWithLegacyReAct(ctx, question, repoPath, owner, repo)
+		return answer, confidence, sources, trace, fallbackErr
 	}
-	return "", 0, nil, err
+	return "", 0, nil, trace, err
 }
 
 func (a *QAAgent) SkillState() (string, int) {
@@ -183,34 +188,33 @@ func (a *QAAgent) SkillState() (string, int) {
 	return a.skillDomain, a.loadedSkillVersion
 }
 
-func (a *QAAgent) askWithNativeLocked(ctx context.Context, question, owner, repo string) (string, float64, []string, error) {
-	result, err := a.nativeAgent.Execute(ctx, map[string]interface{}{
+func (a *QAAgent) askWithNativeLocked(ctx context.Context, question, owner, repo string) (string, float64, []string, *agents.ExecutionTrace, error) {
+	execution, err := a.nativeAgent.ExecuteWithTrace(ctx, map[string]interface{}{
 		"task": buildNativeQATask(question, owner, repo),
 	})
+	trace := execution.Trace
 	if err != nil {
-		return "", 0, nil, err
+		return "", 0, nil, trace, err
 	}
 
+	result := execution.Output
 	answer := strings.TrimSpace(stringValue(result["final_answer"]))
-	if answer == "" {
-		if trace := a.nativeAgent.LastNativeTrace(); trace != nil {
-			answer = strings.TrimSpace(trace.FinalAnswer)
-		}
+	if answer == "" && trace != nil {
+		answer = strings.TrimSpace(stringValue(trace.Output["final_answer"]))
 	}
 	if answer == "" {
 		if execErr := strings.TrimSpace(stringValue(result["error"])); execErr != "" {
-			return "", 0, nil, fmt.Errorf("%s", execErr)
+			return "", 0, nil, trace, fmt.Errorf("%s", execErr)
 		}
 	}
 	if answer == "" {
 		answer = fmt.Sprintf("I couldn't find relevant information about \"%s\" in this repository.", question)
 	}
 
-	trace := a.nativeAgent.LastNativeTrace()
-	sources := extractSourcesFromNativeTrace(trace)
+	sources := extractSourcesFromExecutionTrace(trace)
 	confidence := estimateNativeQAConfidence(trace, sources)
 
-	return answer, confidence, sources, nil
+	return answer, confidence, sources, trace, nil
 }
 
 func (a *QAAgent) askWithLegacyReAct(ctx context.Context, question, repoPath, owner, repo string) (string, float64, []string, error) {

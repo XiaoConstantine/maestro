@@ -7,7 +7,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/XiaoConstantine/dspy-go/pkg/agents/native"
+	"github.com/XiaoConstantine/dspy-go/pkg/agents"
 	"github.com/XiaoConstantine/dspy-go/pkg/core"
 	"github.com/XiaoConstantine/dspy-go/pkg/logging"
 )
@@ -44,18 +44,18 @@ func TestBuildNativeSearchToolsSchemas(t *testing.T) {
 	}
 }
 
-func TestExtractSourcesFromNativeTrace(t *testing.T) {
-	trace := &native.Trace{
-		Completed: true,
-		Steps: []native.TraceStep{
+func TestExtractSourcesFromExecutionTrace(t *testing.T) {
+	trace := &agents.ExecutionTrace{
+		Status: agents.TraceStatusSuccess,
+		Steps: []agents.TraceStep{
 			{
-				ToolName: "search_files",
+				Tool: "search_files",
 				ObservationDetails: map[string]any{
 					"files": []string{"README.md", "internal/orchestration/pool.go"},
 				},
 			},
 			{
-				ToolName: "search_content",
+				Tool: "search_content",
 				ObservationDetails: map[string]any{
 					"results": []map[string]any{
 						{"file_path": "internal/orchestration/pool.go", "line_number": 12},
@@ -64,7 +64,7 @@ func TestExtractSourcesFromNativeTrace(t *testing.T) {
 				},
 			},
 			{
-				ToolName: "read_file",
+				Tool: "read_file",
 				Arguments: map[string]any{
 					"path": "internal/orchestration/native_qa.go",
 				},
@@ -72,14 +72,45 @@ func TestExtractSourcesFromNativeTrace(t *testing.T) {
 		},
 	}
 
-	got := extractSourcesFromNativeTrace(trace)
+	got := extractSourcesFromExecutionTrace(trace)
 	want := []string{
 		"README.md",
 		"internal/orchestration/pool.go",
 		"internal/orchestration/native_qa.go",
 	}
 	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("extractSourcesFromNativeTrace() = %#v, want %#v", got, want)
+		t.Fatalf("extractSourcesFromExecutionTrace() = %#v, want %#v", got, want)
+	}
+}
+
+func TestEstimateNativeQAConfidenceFromExecutionTrace(t *testing.T) {
+	tests := []struct {
+		name    string
+		trace   *agents.ExecutionTrace
+		sources []string
+		want    float64
+	}{
+		{name: "nil trace", want: 0},
+		{name: "partial run", trace: &agents.ExecutionTrace{Status: agents.TraceStatusPartial}, want: 0},
+		{name: "successful run", trace: &agents.ExecutionTrace{Status: agents.TraceStatusSuccess}, want: 0.7},
+		{name: "successful run with sources", trace: &agents.ExecutionTrace{Status: agents.TraceStatusSuccess}, sources: []string{"README.md"}, want: 0.9},
+		{
+			name: "tool error lowers confidence",
+			trace: &agents.ExecutionTrace{
+				Status: agents.TraceStatusSuccess,
+				Steps:  []agents.TraceStep{{Tool: "read_file", Error: "not found"}},
+			},
+			sources: []string{"README.md"},
+			want:    0.7,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := estimateNativeQAConfidence(tt.trace, tt.sources); got != tt.want {
+				t.Fatalf("estimateNativeQAConfidence() = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }
 

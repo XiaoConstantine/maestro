@@ -369,7 +369,8 @@ func (s *MaestroService) handleAsk(ctx context.Context, request Request) (*Respo
 		return nil, fmt.Errorf("failed to get QA agent: %w", err)
 	}
 
-	answer, confidence, sources, err := agent.Ask(ctx, request.Question, repoPath, s.config.Owner, s.config.Repo)
+	answer, confidence, sources, trace, err := agent.askWithTrace(ctx, request.Question, repoPath, s.config.Owner, s.config.Repo)
+	s.recordExecutionTraceUsage(ctx, "ask.native", trace)
 	if err != nil {
 		return nil, err
 	}
