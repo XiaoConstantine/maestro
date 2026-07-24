@@ -981,47 +981,47 @@ func writeBenchmarkMarkdown(path string, modelID core.ModelID, cases []orchestra
 		decision = report.AcceptanceGate.Decision
 	}
 	builder.WriteString("# RLM Overview Benchmark Report\n\n")
-	builder.WriteString(fmt.Sprintf("- Decision: %s\n", decision))
-	builder.WriteString(fmt.Sprintf("- Model: %s\n", modelID))
-	builder.WriteString(fmt.Sprintf("- Cases: %d\n", len(cases)))
-	builder.WriteString(fmt.Sprintf("- Average score: %.4f\n", report.AverageScore))
-	builder.WriteString(fmt.Sprintf("- Passed/failed/errors: %d/%d/%d\n", report.PassedExamples, report.FailedExamples, report.EvaluationErrors))
-	builder.WriteString(fmt.Sprintf("- Total tokens: %d\n", totalTokens(report.TokenUsage)))
-	builder.WriteString(fmt.Sprintf("- Cost USD: %.6f\n", report.CostUSD))
-	builder.WriteString(fmt.Sprintf("- Average latency ms: %.2f\n\n", report.LatencyMS.Average))
+	fmt.Fprintf(&builder, "- Decision: %s\n", decision)
+	fmt.Fprintf(&builder, "- Model: %s\n", modelID)
+	fmt.Fprintf(&builder, "- Cases: %d\n", len(cases))
+	fmt.Fprintf(&builder, "- Average score: %.4f\n", report.AverageScore)
+	fmt.Fprintf(&builder, "- Passed/failed/errors: %d/%d/%d\n", report.PassedExamples, report.FailedExamples, report.EvaluationErrors)
+	fmt.Fprintf(&builder, "- Total tokens: %d\n", totalTokens(report.TokenUsage))
+	fmt.Fprintf(&builder, "- Cost USD: %.6f\n", report.CostUSD)
+	fmt.Fprintf(&builder, "- Average latency ms: %.2f\n\n", report.LatencyMS.Average)
 
 	builder.WriteString("## Why\n\n")
 	if report.AcceptanceGate != nil && len(report.AcceptanceGate.Reasons) > 0 {
 		for _, reason := range report.AcceptanceGate.Reasons {
-			builder.WriteString(fmt.Sprintf("- %s\n", reason))
+			fmt.Fprintf(&builder, "- %s\n", reason)
 		}
 	} else {
 		builder.WriteString("- All configured benchmark promotion gates passed.\n")
 	}
 	builder.WriteString("\n## Quality Metrics\n\n")
 	builder.WriteString("| Metric | Value |\n| --- | ---: |\n")
-	builder.WriteString(fmt.Sprintf("| exact_grounding_score | %.4f |\n", report.AverageQuality.ExactGroundingScore))
-	builder.WriteString(fmt.Sprintf("| semantic_quality_score | %.4f |\n", report.AverageQuality.SemanticQualityScore))
-	builder.WriteString(fmt.Sprintf("| fact_recall | %.4f |\n", report.AverageQuality.FactRecall))
-	builder.WriteString(fmt.Sprintf("| fact_precision | %.4f |\n", report.AverageQuality.FactPrecision))
-	builder.WriteString(fmt.Sprintf("| source_recall | %.4f |\n", report.AverageQuality.SourceRecall))
-	builder.WriteString(fmt.Sprintf("| source_precision | %.4f |\n", report.AverageQuality.SourcePrecision))
-	builder.WriteString(fmt.Sprintf("| semantic_fact_recall | %.4f |\n", report.AverageQuality.SemanticFactRecall))
-	builder.WriteString(fmt.Sprintf("| semantic_source_recall | %.4f |\n", report.AverageQuality.SemanticSourceRecall))
-	builder.WriteString(fmt.Sprintf("| evidence_fact_coverage | %.4f |\n", report.AverageQuality.EvidenceFactCoverage))
-	builder.WriteString(fmt.Sprintf("| evidence_source_coverage | %.4f |\n", report.AverageQuality.EvidenceSourceCoverage))
-	builder.WriteString(fmt.Sprintf("| repo_fact_coverage | %.4f |\n", report.AverageQuality.RepoFactCoverage))
-	builder.WriteString(fmt.Sprintf("| repo_source_coverage | %.4f |\n", report.AverageQuality.RepoSourceCoverage))
-	builder.WriteString(fmt.Sprintf("| manifest_source_coverage | %.4f |\n", report.AverageQuality.ManifestSourceCoverage))
-	builder.WriteString(fmt.Sprintf("| schema_valid_rate | %.4f |\n", report.AverageQuality.SchemaValidRate))
-	builder.WriteString(fmt.Sprintf("| terseness | %.4f |\n\n", report.AverageQuality.Terseness))
+	fmt.Fprintf(&builder, "| exact_grounding_score | %.4f |\n", report.AverageQuality.ExactGroundingScore)
+	fmt.Fprintf(&builder, "| semantic_quality_score | %.4f |\n", report.AverageQuality.SemanticQualityScore)
+	fmt.Fprintf(&builder, "| fact_recall | %.4f |\n", report.AverageQuality.FactRecall)
+	fmt.Fprintf(&builder, "| fact_precision | %.4f |\n", report.AverageQuality.FactPrecision)
+	fmt.Fprintf(&builder, "| source_recall | %.4f |\n", report.AverageQuality.SourceRecall)
+	fmt.Fprintf(&builder, "| source_precision | %.4f |\n", report.AverageQuality.SourcePrecision)
+	fmt.Fprintf(&builder, "| semantic_fact_recall | %.4f |\n", report.AverageQuality.SemanticFactRecall)
+	fmt.Fprintf(&builder, "| semantic_source_recall | %.4f |\n", report.AverageQuality.SemanticSourceRecall)
+	fmt.Fprintf(&builder, "| evidence_fact_coverage | %.4f |\n", report.AverageQuality.EvidenceFactCoverage)
+	fmt.Fprintf(&builder, "| evidence_source_coverage | %.4f |\n", report.AverageQuality.EvidenceSourceCoverage)
+	fmt.Fprintf(&builder, "| repo_fact_coverage | %.4f |\n", report.AverageQuality.RepoFactCoverage)
+	fmt.Fprintf(&builder, "| repo_source_coverage | %.4f |\n", report.AverageQuality.RepoSourceCoverage)
+	fmt.Fprintf(&builder, "| manifest_source_coverage | %.4f |\n", report.AverageQuality.ManifestSourceCoverage)
+	fmt.Fprintf(&builder, "| schema_valid_rate | %.4f |\n", report.AverageQuality.SchemaValidRate)
+	fmt.Fprintf(&builder, "| terseness | %.4f |\n\n", report.AverageQuality.Terseness)
 
 	builder.WriteString("## Failure Classification\n\n")
 	if len(report.FailureClasses) > 0 {
 		builder.WriteString("| Class | Count |\n| --- | ---: |\n")
 		for _, class := range []string{"context_missing", "semantic_match", "answer_missing", "real_behavior_failure"} {
 			if count := report.FailureClasses[class]; count > 0 {
-				builder.WriteString(fmt.Sprintf("| %s | %d |\n", class, count))
+				fmt.Fprintf(&builder, "| %s | %d |\n", class, count)
 			}
 		}
 		builder.WriteString("\n")
@@ -1031,24 +1031,24 @@ func writeBenchmarkMarkdown(path string, modelID core.ModelID, cases []orchestra
 
 	builder.WriteString("## RLM Behavior Metrics\n\n")
 	builder.WriteString("| Metric | Value |\n| --- | ---: |\n")
-	builder.WriteString(fmt.Sprintf("| root_prompt_max_tokens | %d |\n", report.RLMMetrics.RootPromptMaxTokens))
-	builder.WriteString(fmt.Sprintf("| root_prompt_mean_tokens | %d |\n", report.RLMMetrics.RootPromptMeanTokens))
-	builder.WriteString(fmt.Sprintf("| full_context_query_success_count | %d |\n", report.RLMMetrics.FullContextQuerySuccessCount))
-	builder.WriteString(fmt.Sprintf("| full_context_query_block_count | %d |\n", report.RLMMetrics.FullContextQueryBlockCount))
-	builder.WriteString(fmt.Sprintf("| slice_query_ratio | %.4f |\n", report.RLMMetrics.SliceQueryRatio))
-	builder.WriteString(fmt.Sprintf("| subcall_useful_ratio | %.4f |\n", report.RLMMetrics.SubcallUsefulRatio))
-	builder.WriteString(fmt.Sprintf("| query_action_count | %d |\n", report.RLMMetrics.QueryActionCount))
-	builder.WriteString(fmt.Sprintf("| query_action_success_count | %d |\n", report.RLMMetrics.QueryActionSuccessCount))
-	builder.WriteString(fmt.Sprintf("| no_op_iteration_count | %d |\n", report.RLMMetrics.NoOpIterationCount))
-	builder.WriteString(fmt.Sprintf("| parse_error_count | %d |\n", report.RLMMetrics.ParseErrorCount))
-	builder.WriteString(fmt.Sprintf("| final_answer_rate | %.4f |\n", report.RLMMetrics.FinalAnswerRate))
-	builder.WriteString(fmt.Sprintf("| termination_cause | %s |\n\n", report.RLMMetrics.TerminationCause))
+	fmt.Fprintf(&builder, "| root_prompt_max_tokens | %d |\n", report.RLMMetrics.RootPromptMaxTokens)
+	fmt.Fprintf(&builder, "| root_prompt_mean_tokens | %d |\n", report.RLMMetrics.RootPromptMeanTokens)
+	fmt.Fprintf(&builder, "| full_context_query_success_count | %d |\n", report.RLMMetrics.FullContextQuerySuccessCount)
+	fmt.Fprintf(&builder, "| full_context_query_block_count | %d |\n", report.RLMMetrics.FullContextQueryBlockCount)
+	fmt.Fprintf(&builder, "| slice_query_ratio | %.4f |\n", report.RLMMetrics.SliceQueryRatio)
+	fmt.Fprintf(&builder, "| subcall_useful_ratio | %.4f |\n", report.RLMMetrics.SubcallUsefulRatio)
+	fmt.Fprintf(&builder, "| query_action_count | %d |\n", report.RLMMetrics.QueryActionCount)
+	fmt.Fprintf(&builder, "| query_action_success_count | %d |\n", report.RLMMetrics.QueryActionSuccessCount)
+	fmt.Fprintf(&builder, "| no_op_iteration_count | %d |\n", report.RLMMetrics.NoOpIterationCount)
+	fmt.Fprintf(&builder, "| parse_error_count | %d |\n", report.RLMMetrics.ParseErrorCount)
+	fmt.Fprintf(&builder, "| final_answer_rate | %.4f |\n", report.RLMMetrics.FinalAnswerRate)
+	fmt.Fprintf(&builder, "| termination_cause | %s |\n\n", report.RLMMetrics.TerminationCause)
 	if len(report.RLMMetrics.QueryModeCounts) > 0 {
 		builder.WriteString("Query modes:\n\n")
 		builder.WriteString("| Mode | Count |\n| --- | ---: |\n")
 		for _, mode := range []string{"query_with", "query_raw", "query_batched", "query_batched_raw", "query_async", "query_unknown"} {
 			if count := report.RLMMetrics.QueryModeCounts[mode]; count > 0 {
-				builder.WriteString(fmt.Sprintf("| %s | %d |\n", mode, count))
+				fmt.Fprintf(&builder, "| %s | %d |\n", mode, count)
 			}
 		}
 		builder.WriteString("\n")
@@ -1058,12 +1058,12 @@ func writeBenchmarkMarkdown(path string, modelID core.ModelID, cases []orchestra
 	if report.Ablations != nil {
 		ab := report.Ablations
 		builder.WriteString("| Ablation | Current | Alternative | Delta |\n| --- | ---: | ---: | ---: |\n")
-		builder.WriteString(fmt.Sprintf("| exact_vs_semantic_score | %.4f | %.4f | %.4f |\n", ab.ExactGroundingAverage, ab.SemanticQualityAverage, ab.SemanticQualityDelta))
-		builder.WriteString(fmt.Sprintf("| current_vs_richer_manifest_fact_coverage | %.4f | %.4f | %.4f |\n", ab.CurrentManifestFactCoverage, ab.RicherManifestFactCoverage, ab.ManifestFactCoverageDelta))
-		builder.WriteString(fmt.Sprintf("| current_vs_richer_manifest_source_coverage | %.4f | %.4f | %.4f |\n", ab.CurrentManifestSourceCoverage, ab.RicherManifestSourceCoverage, ab.ManifestSourceCoverageDelta))
+		fmt.Fprintf(&builder, "| exact_vs_semantic_score | %.4f | %.4f | %.4f |\n", ab.ExactGroundingAverage, ab.SemanticQualityAverage, ab.SemanticQualityDelta)
+		fmt.Fprintf(&builder, "| current_vs_richer_manifest_fact_coverage | %.4f | %.4f | %.4f |\n", ab.CurrentManifestFactCoverage, ab.RicherManifestFactCoverage, ab.ManifestFactCoverageDelta)
+		fmt.Fprintf(&builder, "| current_vs_richer_manifest_source_coverage | %.4f | %.4f | %.4f |\n", ab.CurrentManifestSourceCoverage, ab.RicherManifestSourceCoverage, ab.ManifestSourceCoverageDelta)
 		builder.WriteString("\n")
-		builder.WriteString(fmt.Sprintf("- Semantic rescued cases: %d\n", ab.SemanticRescuedCases))
-		builder.WriteString(fmt.Sprintf("- Context-missing cases: %d\n\n", ab.ContextMissingCases))
+		fmt.Fprintf(&builder, "- Semantic rescued cases: %d\n", ab.SemanticRescuedCases)
+		fmt.Fprintf(&builder, "- Context-missing cases: %d\n\n", ab.ContextMissingCases)
 	} else {
 		builder.WriteString("Ablation summary was not available.\n\n")
 	}
@@ -1072,21 +1072,21 @@ func writeBenchmarkMarkdown(path string, modelID core.ModelID, cases []orchestra
 	if report.BaselineComparison != nil {
 		cmp := report.BaselineComparison
 		builder.WriteString("| Metric | RLM | Direct | Delta |\n| --- | ---: | ---: | ---: |\n")
-		builder.WriteString(fmt.Sprintf("| average_score | %.4f | %.4f | %.4f |\n", cmp.RLMAverageScore, cmp.DirectAverageScore, cmp.QualityDelta))
-		builder.WriteString(fmt.Sprintf("| exact_grounding_score | %.4f | %.4f | %.4f |\n", cmp.RLMExactGroundingScore, cmp.DirectExactGroundingScore, cmp.ExactGroundingDelta))
-		builder.WriteString(fmt.Sprintf("| semantic_quality_score | %.4f | %.4f | %.4f |\n", cmp.RLMSemanticQualityScore, cmp.DirectSemanticQualityScore, cmp.SemanticQualityDelta))
-		builder.WriteString(fmt.Sprintf("| total_tokens | %d | %d | %d |\n", cmp.RLMTokens, cmp.DirectTokens, cmp.TokenDelta))
-		builder.WriteString(fmt.Sprintf("| average_latency_ms | %.2f | %.2f | %.2f |\n", cmp.RLMLatencyAverageMS, cmp.DirectLatencyAverageMS, cmp.RLMLatencyAverageMS-cmp.DirectLatencyAverageMS))
-		builder.WriteString(fmt.Sprintf("| cost_per_correct_usd | %.6f | %.6f | %.6f |\n", cmp.RLMCostPerCorrect, cmp.DirectCostPerCorrect, cmp.RLMCostPerCorrect-cmp.DirectCostPerCorrect))
+		fmt.Fprintf(&builder, "| average_score | %.4f | %.4f | %.4f |\n", cmp.RLMAverageScore, cmp.DirectAverageScore, cmp.QualityDelta)
+		fmt.Fprintf(&builder, "| exact_grounding_score | %.4f | %.4f | %.4f |\n", cmp.RLMExactGroundingScore, cmp.DirectExactGroundingScore, cmp.ExactGroundingDelta)
+		fmt.Fprintf(&builder, "| semantic_quality_score | %.4f | %.4f | %.4f |\n", cmp.RLMSemanticQualityScore, cmp.DirectSemanticQualityScore, cmp.SemanticQualityDelta)
+		fmt.Fprintf(&builder, "| total_tokens | %d | %d | %d |\n", cmp.RLMTokens, cmp.DirectTokens, cmp.TokenDelta)
+		fmt.Fprintf(&builder, "| average_latency_ms | %.2f | %.2f | %.2f |\n", cmp.RLMLatencyAverageMS, cmp.DirectLatencyAverageMS, cmp.RLMLatencyAverageMS-cmp.DirectLatencyAverageMS)
+		fmt.Fprintf(&builder, "| cost_per_correct_usd | %.6f | %.6f | %.6f |\n", cmp.RLMCostPerCorrect, cmp.DirectCostPerCorrect, cmp.RLMCostPerCorrect-cmp.DirectCostPerCorrect)
 	} else {
 		builder.WriteString("Direct baseline comparison was not run.\n")
 	}
 	builder.WriteString("\n## Protected Gate\n\n")
 	if report.ProtectedGate != nil {
-		builder.WriteString(fmt.Sprintf("- Passed: %t\n", report.ProtectedGate.Passed))
-		builder.WriteString(fmt.Sprintf("- Protected cases: %d\n", len(report.ProtectedGate.ProtectedCaseIDs)))
-		builder.WriteString(fmt.Sprintf("- Regressions: %d\n", len(report.ProtectedGate.Regressions)))
-		builder.WriteString(fmt.Sprintf("- Missing baseline cases: %d\n", len(report.ProtectedGate.MissingBaseline)))
+		fmt.Fprintf(&builder, "- Passed: %t\n", report.ProtectedGate.Passed)
+		fmt.Fprintf(&builder, "- Protected cases: %d\n", len(report.ProtectedGate.ProtectedCaseIDs))
+		fmt.Fprintf(&builder, "- Regressions: %d\n", len(report.ProtectedGate.Regressions))
+		fmt.Fprintf(&builder, "- Missing baseline cases: %d\n", len(report.ProtectedGate.MissingBaseline))
 	} else {
 		builder.WriteString("Protected gate was not configured.\n")
 	}
@@ -1104,17 +1104,17 @@ func writeOptimizationMarkdownForRequest(req runOptimizationRequest, checkpoint 
 func writeOptimizationMarkdown(path string, req runOptimizationRequest, checkpoint optimizationCheckpoint) error {
 	var builder strings.Builder
 	builder.WriteString("# RLM Overview GEPA Report\n\n")
-	builder.WriteString(fmt.Sprintf("- Decision: %s\n", checkpoint.Decision))
-	builder.WriteString(fmt.Sprintf("- Model: %s\n", req.modelID))
-	builder.WriteString(fmt.Sprintf("- Training examples: %d\n", checkpoint.TrainingExampleCount))
-	builder.WriteString(fmt.Sprintf("- Validation examples: %d\n", checkpoint.ValidationExampleCount))
-	builder.WriteString(fmt.Sprintf("- Artifact apply success: %t\n", checkpoint.ArtifactApplySuccess))
-	builder.WriteString(fmt.Sprintf("- Artifact written: %t\n\n", checkpoint.ArtifactWritten))
+	fmt.Fprintf(&builder, "- Decision: %s\n", checkpoint.Decision)
+	fmt.Fprintf(&builder, "- Model: %s\n", req.modelID)
+	fmt.Fprintf(&builder, "- Training examples: %d\n", checkpoint.TrainingExampleCount)
+	fmt.Fprintf(&builder, "- Validation examples: %d\n", checkpoint.ValidationExampleCount)
+	fmt.Fprintf(&builder, "- Artifact apply success: %t\n", checkpoint.ArtifactApplySuccess)
+	fmt.Fprintf(&builder, "- Artifact written: %t\n\n", checkpoint.ArtifactWritten)
 
 	builder.WriteString("## Why\n\n")
 	if checkpoint.AcceptanceGate != nil && len(checkpoint.AcceptanceGate.Reasons) > 0 {
 		for _, reason := range checkpoint.AcceptanceGate.Reasons {
-			builder.WriteString(fmt.Sprintf("- %s\n", reason))
+			fmt.Fprintf(&builder, "- %s\n", reason)
 		}
 	} else if checkpoint.AcceptanceGate != nil && checkpoint.AcceptanceGate.Decision == "smoke_tested" {
 		builder.WriteString("- The run is smoke-tested because a required production gate was intentionally skipped or no-improvement mode was enabled.\n")
@@ -1123,28 +1123,28 @@ func writeOptimizationMarkdown(path string, req runOptimizationRequest, checkpoi
 	}
 	builder.WriteString("\n## GEPA Validation\n\n")
 	builder.WriteString("| Metric | Value |\n| --- | ---: |\n")
-	builder.WriteString(fmt.Sprintf("| baseline_validation | %.4f |\n", checkpoint.BaselineValidation))
-	builder.WriteString(fmt.Sprintf("| baseline_evaluation_errors | %d |\n", checkpoint.BaselineEvalErrors))
-	builder.WriteString(fmt.Sprintf("| best_search | %.4f |\n", checkpoint.BestSearch))
-	builder.WriteString(fmt.Sprintf("| best_validation | %.4f |\n", checkpoint.BestValidation))
-	builder.WriteString(fmt.Sprintf("| best_validation_errors | %d |\n", checkpoint.BestValidationErrors))
-	builder.WriteString(fmt.Sprintf("| replay_validation | %.4f |\n", checkpoint.ReplayValidation))
-	builder.WriteString(fmt.Sprintf("| replay_evaluation_errors | %d |\n", checkpoint.ReplayEvalErrors))
-	builder.WriteString(fmt.Sprintf("| validation_delta | %.4f |\n", checkpoint.ValidationDelta))
-	builder.WriteString(fmt.Sprintf("| search_to_replay_gap | %.4f |\n", checkpoint.SearchToReplayGap))
-	builder.WriteString(fmt.Sprintf("| protected_delta | %.4f |\n", checkpoint.ProtectedDelta))
-	builder.WriteString(fmt.Sprintf("| metric_call_count | %d |\n", checkpoint.MetricCallCount))
-	builder.WriteString(fmt.Sprintf("| candidate_count | %d |\n", checkpoint.CandidateCount))
-	builder.WriteString(fmt.Sprintf("| pareto_frontier_size | %d |\n\n", checkpoint.ParetoFrontierSize))
+	fmt.Fprintf(&builder, "| baseline_validation | %.4f |\n", checkpoint.BaselineValidation)
+	fmt.Fprintf(&builder, "| baseline_evaluation_errors | %d |\n", checkpoint.BaselineEvalErrors)
+	fmt.Fprintf(&builder, "| best_search | %.4f |\n", checkpoint.BestSearch)
+	fmt.Fprintf(&builder, "| best_validation | %.4f |\n", checkpoint.BestValidation)
+	fmt.Fprintf(&builder, "| best_validation_errors | %d |\n", checkpoint.BestValidationErrors)
+	fmt.Fprintf(&builder, "| replay_validation | %.4f |\n", checkpoint.ReplayValidation)
+	fmt.Fprintf(&builder, "| replay_evaluation_errors | %d |\n", checkpoint.ReplayEvalErrors)
+	fmt.Fprintf(&builder, "| validation_delta | %.4f |\n", checkpoint.ValidationDelta)
+	fmt.Fprintf(&builder, "| search_to_replay_gap | %.4f |\n", checkpoint.SearchToReplayGap)
+	fmt.Fprintf(&builder, "| protected_delta | %.4f |\n", checkpoint.ProtectedDelta)
+	fmt.Fprintf(&builder, "| metric_call_count | %d |\n", checkpoint.MetricCallCount)
+	fmt.Fprintf(&builder, "| candidate_count | %d |\n", checkpoint.CandidateCount)
+	fmt.Fprintf(&builder, "| pareto_frontier_size | %d |\n\n", checkpoint.ParetoFrontierSize)
 
 	builder.WriteString("## Protected Replay\n\n")
 	if checkpoint.ProtectedReport != nil {
-		builder.WriteString(fmt.Sprintf("- Average score: %.4f\n", checkpoint.ProtectedReport.AverageScore))
-		builder.WriteString(fmt.Sprintf("- Final answer rate: %.4f\n", checkpoint.ProtectedReport.RLMMetrics.FinalAnswerRate))
-		builder.WriteString(fmt.Sprintf("- Parse errors: %d\n", checkpoint.ProtectedReport.RLMMetrics.ParseErrorCount))
-		builder.WriteString(fmt.Sprintf("- Full-context query successes: %d\n", checkpoint.ProtectedReport.RLMMetrics.FullContextQuerySuccessCount))
+		fmt.Fprintf(&builder, "- Average score: %.4f\n", checkpoint.ProtectedReport.AverageScore)
+		fmt.Fprintf(&builder, "- Final answer rate: %.4f\n", checkpoint.ProtectedReport.RLMMetrics.FinalAnswerRate)
+		fmt.Fprintf(&builder, "- Parse errors: %d\n", checkpoint.ProtectedReport.RLMMetrics.ParseErrorCount)
+		fmt.Fprintf(&builder, "- Full-context query successes: %d\n", checkpoint.ProtectedReport.RLMMetrics.FullContextQuerySuccessCount)
 		if checkpoint.ProtectedReport.AcceptanceGate != nil {
-			builder.WriteString(fmt.Sprintf("- Replay decision: %s\n", checkpoint.ProtectedReport.AcceptanceGate.Decision))
+			fmt.Fprintf(&builder, "- Replay decision: %s\n", checkpoint.ProtectedReport.AcceptanceGate.Decision)
 		}
 	} else {
 		builder.WriteString("Protected replay was not run.\n")

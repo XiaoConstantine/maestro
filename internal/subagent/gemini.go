@@ -34,7 +34,7 @@ func NewGeminiProcessor(logger *logging.Logger, sessionDir string, apiKey string
 		return nil, fmt.Errorf("GOOGLE_API_KEY or GEMINI_API_KEY not set")
 	}
 
-	llm, err := llms.NewGeminiLLM(apiKey, core.ModelGoogleGemini3ProPreview)
+	llm, err := llms.NewGeminiLLM(apiKey, core.ModelGoogleGemini31ProPreview)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create Gemini LLM: %w", err)
 	}
@@ -84,7 +84,7 @@ func (p *GeminiProcessor) Process(ctx context.Context, task agents.Task, taskCon
 		"response":    response,
 		"output_file": outputFile,
 		"task_type":   taskType,
-		"model":       "gemini-3-pro-preview",
+		"model":       string(p.llm.ModelID()),
 	}, nil
 }
 

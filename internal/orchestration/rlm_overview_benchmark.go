@@ -508,10 +508,6 @@ func overviewSourcePrecisionWithAliases(citedSources []string, expectedSources [
 	return float64(matches) / float64(len(cited))
 }
 
-func unexpectedOverviewSources(citedSources []string, expectedSources []string) []string {
-	return unexpectedOverviewSourcesWithAliases(citedSources, expectedSources, nil)
-}
-
 func unexpectedOverviewSourcesWithAliases(citedSources []string, expectedSources []string, aliases map[string][]string) []string {
 	expected := nonEmptyStrings(expectedSources)
 	if len(citedSources) == 0 || len(expected) == 0 {
@@ -524,10 +520,6 @@ func unexpectedOverviewSourcesWithAliases(citedSources []string, expectedSources
 		}
 	}
 	return unexpected
-}
-
-func overviewSourceMatchesAny(source string, expectedSources []string) bool {
-	return overviewSourceMatchesAnyWithAliases(source, expectedSources, nil)
 }
 
 func overviewSourceMatchesAnyWithAliases(source string, expectedSources []string, aliases map[string][]string) bool {

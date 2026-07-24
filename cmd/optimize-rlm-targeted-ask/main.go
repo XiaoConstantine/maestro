@@ -266,7 +266,7 @@ func main() {
 		return
 	}
 
-	bestArtifacts := seedArtifacts.Clone()
+	var bestArtifacts optimize.AgentArtifacts
 	baselineScore := 0.0
 	bestValidation := 0.0
 	validationDelta := 0.0

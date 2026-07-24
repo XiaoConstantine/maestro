@@ -608,17 +608,6 @@ type TUIServiceAdapter struct {
 	repo    string
 }
 
-func shortenWorkspacePath(path string) string {
-	path = strings.TrimSpace(path)
-	if path == "" {
-		return ""
-	}
-	if home, err := os.UserHomeDir(); err == nil && home != "" && strings.HasPrefix(path, home) {
-		return "~" + path[len(home):]
-	}
-	return path
-}
-
 func NewTUIServiceAdapter(service *orchestration.MaestroService, owner, repo string) *TUIServiceAdapter {
 	return &TUIServiceAdapter{
 		service: service,

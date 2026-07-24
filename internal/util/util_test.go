@@ -20,7 +20,7 @@ func TestNormalizeModelName(t *testing.T) {
 			name:     "google gemini 3 dot 0 pro alias",
 			provider: "google",
 			model:    "gemini-3.0-pro",
-			want:     string(core.ModelGoogleGemini3ProPreview),
+			want:     string(core.ModelGoogleGemini31ProPreview),
 		},
 		{
 			name:     "google gemini 3 flash alias",
@@ -53,8 +53,8 @@ func TestConstructModelIDNormalizesGoogleAliases(t *testing.T) {
 	}
 
 	got := ConstructModelID(cfg)
-	if got != core.ModelGoogleGemini3ProPreview {
-		t.Fatalf("ConstructModelID() = %q, want %q", got, core.ModelGoogleGemini3ProPreview)
+	if got != core.ModelGoogleGemini31ProPreview {
+		t.Fatalf("ConstructModelID() = %q, want %q", got, core.ModelGoogleGemini31ProPreview)
 	}
 }
 

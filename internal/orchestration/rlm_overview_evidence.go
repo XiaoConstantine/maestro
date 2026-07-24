@@ -94,12 +94,8 @@ func buildRLMOverviewFocusedEvidence(repoPath string, manifest rlmOverviewManife
 		})
 	}
 
-	for _, candidate := range overviewEvidenceSourceCandidates(repoPath, pathSources, expandedTerms, broadQuestion) {
-		candidates = append(candidates, candidate)
-	}
-	for _, candidate := range overviewEvidenceAbsenceCandidates(question, repoEntries) {
-		candidates = append(candidates, candidate)
-	}
+	candidates = append(candidates, overviewEvidenceSourceCandidates(repoPath, pathSources, expandedTerms, broadQuestion)...)
+	candidates = append(candidates, overviewEvidenceAbsenceCandidates(question, repoEntries)...)
 
 	candidates = dedupeOverviewEvidenceCandidates(candidates)
 	sort.SliceStable(candidates, func(i, j int) bool {

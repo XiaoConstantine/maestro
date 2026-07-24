@@ -47,7 +47,7 @@ func normalizeModelName(provider, name string) string {
 	case "google":
 		switch strings.ToLower(name) {
 		case "gemini-3.0-pro", "gemini-3-pro":
-			return string(core.ModelGoogleGemini3ProPreview)
+			return string(core.ModelGoogleGemini31ProPreview)
 		case "gemini-3.0-flash", "gemini-3-flash":
 			return string(core.ModelGoogleGemini3FlashPreview)
 		}
@@ -161,11 +161,12 @@ func ValidateModelConfig(cfg *ModelConfig) error {
 	cfg.ModelName = normalizeModelName(cfg.ModelProvider, cfg.ModelName)
 	cfg.BaseURL = resolveProviderBaseURL(cfg)
 
-	if cfg.ModelProvider == "openai-codex" {
+	switch cfg.ModelProvider {
+	case "openai-codex":
 		if err := maestroauth.HasOpenAICredentials(); err != nil {
 			return fmt.Errorf("resolve ChatGPT subscription credentials: %w", err)
 		}
-	} else if cfg.ModelProvider == "anthropic" || cfg.ModelProvider == "google" || cfg.ModelProvider == "openai" {
+	case "anthropic", "google", "openai":
 		key, err := CheckProviderAPIKey(cfg.ModelProvider, cfg.APIKey)
 		if err != nil && !isLocalBaseURL(cfg.BaseURL) {
 			return err
