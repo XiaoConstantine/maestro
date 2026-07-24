@@ -511,25 +511,33 @@ func (m *MaestroModel) renderInfoSection() string {
 	modelNameStyle := lipgloss.NewStyle().
 		Foreground(m.theme.TextPrimary)
 
-	// Working directory / repo path
+	// Authoritative workspace path
 	var pathLine string
-	if m.config != nil && m.config.Owner != "" {
-		pathLine = pathStyle.Render(fmt.Sprintf("~/%s/%s", m.config.Owner, m.config.Repo))
-	} else {
+	workspace := ""
+	if m.backend != nil {
+		workspace = strings.TrimSpace(m.backend.GetWorkspace())
+	}
+	if workspace == "" {
 		cwd, _ := os.Getwd()
-		if cwd != "" {
-			// Shorten home directory
-			home, _ := os.UserHomeDir()
-			if home != "" && strings.HasPrefix(cwd, home) {
-				cwd = "~" + cwd[len(home):]
-			}
-			pathLine = pathStyle.Render(cwd)
+		workspace = cwd
+	}
+	if workspace != "" {
+		home, _ := os.UserHomeDir()
+		if home != "" && strings.HasPrefix(workspace, home) {
+			workspace = "~" + workspace[len(home):]
 		}
+		pathLine = pathStyle.Render(workspace)
 	}
 
 	// Model info line
+	modelLabel := "Maestro coding agent"
+	if m.backend != nil {
+		if info := strings.TrimSpace(m.backend.GetModelInfo()); info != "" {
+			modelLabel = info
+		}
+	}
 	modelLine := lipgloss.NewStyle().PaddingLeft(2).Render(
-		modelIconStyle.Render("◇ ") + modelNameStyle.Render("AI Code Review Agent"),
+		modelIconStyle.Render("◇ ") + modelNameStyle.Render(modelLabel),
 	)
 
 	return lipgloss.JoinVertical(lipgloss.Left,

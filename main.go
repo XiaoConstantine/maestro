@@ -608,6 +608,17 @@ type TUIServiceAdapter struct {
 	repo    string
 }
 
+func shortenWorkspacePath(path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return ""
+	}
+	if home, err := os.UserHomeDir(); err == nil && home != "" && strings.HasPrefix(path, home) {
+		return "~" + path[len(home):]
+	}
+	return path
+}
+
 func NewTUIServiceAdapter(service *orchestration.MaestroService, owner, repo string) *TUIServiceAdapter {
 	return &TUIServiceAdapter{
 		service: service,
@@ -664,6 +675,40 @@ func (a *TUIServiceAdapter) CancelCodingTask() bool {
 	return a.service != nil && a.service.CancelCodingRun()
 }
 
+func codingPath(arguments map[string]any) string {
+	if arguments == nil {
+		return ""
+	}
+	if path, ok := arguments["path"].(string); ok {
+		return path
+	}
+	return ""
+}
+
+func codingToolDetail(message *agents.Message) string {
+	if message == nil || message.ToolResult == nil {
+		return ""
+	}
+	contentText := strings.TrimSpace(contentBlocksText(message.ToolResult.Content))
+	if path, ok := message.ToolResult.Details["path"].(string); ok && strings.TrimSpace(path) != "" {
+		if contentText != "" {
+			return fmt.Sprintf("%s — %s", path, contentText)
+		}
+		return path
+	}
+	return contentText
+}
+
+func contentBlocksText(blocks []core.ContentBlock) string {
+	parts := make([]string, 0, len(blocks))
+	for _, block := range blocks {
+		if text := strings.TrimSpace(block.String()); text != "" {
+			parts = append(parts, text)
+		}
+	}
+	return strings.Join(parts, "\n")
+}
+
 func mapCodingEvent(event agents.ExecutionEvent) (terminal.CodingEvent, bool) {
 	switch payload := event.Payload.(type) {
 	case agents.RunStartedEvent:
@@ -671,9 +716,17 @@ func mapCodingEvent(event agents.ExecutionEvent) (terminal.CodingEvent, bool) {
 	case agents.TurnStartedEvent:
 		return terminal.CodingEvent{Kind: "turn", Status: "started", Detail: fmt.Sprintf("Turn %d/%d", payload.Turn, payload.MaxTurns)}, true
 	case agents.ToolExecutionStartedEvent:
-		return terminal.CodingEvent{Kind: "tool", Tool: payload.Call.Name, Status: "started", Detail: fmt.Sprintf("Running %s", payload.Call.Name)}, true
+		detail := fmt.Sprintf("Running %s", payload.Call.Name)
+		if path := codingPath(payload.Call.Arguments); path != "" {
+			detail = fmt.Sprintf("Running %s %s", payload.Call.Name, path)
+		}
+		return terminal.CodingEvent{Kind: "tool", Tool: payload.Call.Name, Status: "started", Detail: detail}, true
 	case agents.ToolCallFinishedEvent:
-		return terminal.CodingEvent{Kind: "tool", Tool: payload.Call.Name, Status: string(payload.Status), Detail: fmt.Sprintf("%s %s", payload.Call.Name, payload.Status)}, true
+		detail := codingToolDetail(payload.Result)
+		if detail == "" {
+			detail = fmt.Sprintf("%s %s", payload.Call.Name, payload.Status)
+		}
+		return terminal.CodingEvent{Kind: "tool", Tool: payload.Call.Name, Status: string(payload.Status), Detail: detail}, true
 	case agents.RunFinishedEvent:
 		return terminal.CodingEvent{Kind: "run", Status: string(payload.Status), Detail: payload.Diagnostic}, true
 	default:
@@ -714,6 +767,20 @@ func (a *TUIServiceAdapter) GetRepoInfo() terminal.RepoInfo {
 		Repo:   a.repo,
 		Branch: "main",
 	}
+}
+
+func (a *TUIServiceAdapter) GetWorkspace() string {
+	if a == nil || a.service == nil {
+		return ""
+	}
+	return a.service.WorkspaceRoot()
+}
+
+func (a *TUIServiceAdapter) GetModelInfo() string {
+	if a == nil || a.service == nil {
+		return ""
+	}
+	return a.service.CodingModelInfo()
 }
 
 func (a *TUIServiceAdapter) IsReady() bool {
@@ -824,6 +891,11 @@ func runModernUI(cfg *config) error {
 		return fmt.Errorf("failed to create storage path: %w", err)
 	}
 
+	workspaceRoot, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("resolve workspace root: %w", err)
+	}
+
 	// Create MaestroService (singleton for this session)
 	service, err := orchestration.NewMaestroService(ctx, &orchestration.ServiceConfig{
 		MemoryType:                orchestration.MemoryInMemory,
@@ -838,6 +910,7 @@ func runModernUI(cfg *config) error {
 		GitHubToken:               cfg.githubToken,
 		IndexWorkers:              cfg.indexWorkers,
 		ReviewWorkers:             cfg.reviewWorkers,
+		WorkspaceRoot:             workspaceRoot,
 		AllowCodingBash:           cfg.allowCodingBash,
 	}, githubTools)
 	if err != nil {

@@ -1,6 +1,6 @@
 # Maestro Coding Session
 
-Maestro's interactive default is a workspace coding agent. Natural-language TUI input runs a provider-neutral `dspy-go` native agent against the cloned repository; `/ask` remains the read-only repository-QA route.
+Maestro's interactive default is a workspace coding agent. Natural-language TUI input runs a provider-neutral `dspy-go` native agent against one authoritative workspace root; `/ask` remains the read-only repository-QA route.
 
 ## Architecture
 
@@ -16,7 +16,7 @@ The boundaries mirror Tau/Pi:
 
 - `dspy-go/pkg/agents` owns the reusable execution loop, typed events, messages, and canonical traces.
 - `internal/coding.Session` owns Maestro's workspace tools, active-run cancellation, and session persistence configuration.
-- `internal/orchestration` selects the cloned workspace and records trace usage.
+- `internal/orchestration` selects one authoritative workspace, supplies explicit Maestro coding instructions, and records trace usage.
 - `terminal` maps typed lifecycle events into Bubble Tea display progress.
 
 The frontend does not inspect provider responses or parse result maps.
@@ -30,7 +30,9 @@ A coding session registers these workspace-contained file tools by default:
 - `write`
 - `edit`
 
-File tools reject paths outside the cloned repository workspace. Shell execution is disabled by default because setting a working directory is not a sandbox: shell commands can otherwise access absolute paths, `$HOME`, and the network. Pass `--allow-coding-bash` to opt into unrestricted `bash` with the workspace as its initial working directory.
+File tools reject paths outside the authoritative workspace root. Shell execution is disabled by default because setting a working directory is not a sandbox: shell commands can otherwise access absolute paths, `$HOME`, and the network. Pass `--allow-coding-bash` to opt into unrestricted `bash` with the workspace as its initial working directory.
+
+The coding agent receives explicit provider/model/workspace instructions and evidence rules: after any `write` or `edit`, it must verify the mutation with tool evidence before calling `Finish`. Final answers should describe only mutations that were actually observed in the workspace trace.
 
 One run may mutate a session at a time. Overlapping prompts are rejected. Press **Esc** to cancel the active coding run. Run, turn, and tool lifecycle events update the TUI progress display. Output and accounting use the operation-scoped `ExecutionTrace` returned by `ExecuteWithTrace`, avoiding races against a mutable last-trace accessor.
 
@@ -52,6 +54,8 @@ Enter a task such as:
 ```text
 Inspect the failing tests, implement the smallest fix, and run the focused tests.
 ```
+
+In interactive mode, the workspace is the current working directory you launched Maestro from. The header path, coding tools, and any file-tree view should all refer to that same root.
 
 For a non-interactive smoke test:
 

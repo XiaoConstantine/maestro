@@ -229,10 +229,12 @@ go run . login openai
 
 Maestro opens the browser, receives the OAuth callback on `127.0.0.1:1455`, and stores access/refresh credentials in `~/.maestro/credentials.json` with mode `0600`. Tokens are refreshed automatically and are never printed. Override the path with `MAESTRO_CREDENTIALS_PATH`.
 
-Then launch Maestro with a Codex model:
+Then launch Maestro from the repository you want to edit. Maestro uses that current working directory as the authoritative coding workspace:
 
 ```bash
-go run . --interactive \
+cd /path/to/repository
+
+go run /tmp/maestro-v086 --interactive \
   --owner XiaoConstantine \
   --repo dspy-go \
   --model openai-codex:gpt-5.4
@@ -245,6 +247,8 @@ go run . logout openai
 ```
 
 The `openai-codex` provider resolves the stored credential before every request and refreshes it automatically. The regular `openai` provider remains API-key-only; `--api-key` and `OPENAI_API_KEY` apply to that provider, not subscription access.
+
+Coding tools, the displayed workspace path, and any file-tree view all use that same workspace root. Successful writes are durable there rather than disappearing in a hidden review clone.
 
 ### **Model Selection**
 

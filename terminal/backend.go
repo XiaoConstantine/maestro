@@ -26,6 +26,12 @@ type MaestroBackend interface {
 	// GetRepoInfo returns information about the current repository.
 	GetRepoInfo() RepoInfo
 
+	// GetWorkspace returns the authoritative coding workspace path.
+	GetWorkspace() string
+
+	// GetModelInfo returns the active provider/model label for coding.
+	GetModelInfo() string
+
 	// IsReady returns true if the backend is initialized and ready.
 	IsReady() bool
 
@@ -118,6 +124,10 @@ func (b *NoOpBackend) Gemini(ctx context.Context, prompt string, taskType string
 func (b *NoOpBackend) GetRepoInfo() RepoInfo {
 	return b.repoInfo
 }
+
+func (b *NoOpBackend) GetWorkspace() string { return "" }
+
+func (b *NoOpBackend) GetModelInfo() string { return "" }
 
 func (b *NoOpBackend) IsReady() bool {
 	return false

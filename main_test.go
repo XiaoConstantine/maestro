@@ -11,13 +11,27 @@ import (
 
 func TestMapCodingEventMapsToolLifecycle(t *testing.T) {
 	event, ok := mapCodingEvent(agents.ExecutionEvent{Payload: agents.ToolExecutionStartedEvent{
-		Call: core.ToolCall{Name: "edit"},
+		Call: core.ToolCall{Name: "edit", Arguments: map[string]any{"path": "main.go"}},
 	}})
 	if !ok {
 		t.Fatal("mapCodingEvent() ok = false")
 	}
-	if event.Kind != "tool" || event.Tool != "edit" || event.Status != "started" {
-		t.Fatalf("event = %#v, want started edit tool", event)
+	if event.Kind != "tool" || event.Tool != "edit" || event.Status != "started" || event.Detail != "Running edit main.go" {
+		t.Fatalf("event = %#v, want started edit tool with path detail", event)
+	}
+}
+
+func TestMapCodingEventMapsToolResultDetails(t *testing.T) {
+	event, ok := mapCodingEvent(agents.ExecutionEvent{Payload: agents.ToolCallFinishedEvent{
+		Call:   core.ToolCall{Name: "write"},
+		Status: agents.OperationStatusCompleted,
+		Result: &agents.Message{ToolResult: &agents.MessageToolResult{Content: []core.ContentBlock{core.NewTextBlock("wrote 12 bytes to who_are_you.txt")}, Details: map[string]any{"path": "who_are_you.txt"}}},
+	}})
+	if !ok {
+		t.Fatal("mapCodingEvent() ok = false")
+	}
+	if event.Detail != "who_are_you.txt — wrote 12 bytes to who_are_you.txt" {
+		t.Fatalf("event.Detail = %q", event.Detail)
 	}
 }
 

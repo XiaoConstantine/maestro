@@ -83,6 +83,7 @@ type ServiceConfig struct {
 	GitHubToken                 string
 	IndexWorkers                int
 	ReviewWorkers               int
+	WorkspaceRoot               string
 	BudgetConfig                maestrobudget.Config
 	BudgetManager               *maestrobudget.BudgetManager
 	AllowCodingBash             bool
@@ -401,6 +402,36 @@ func codingAnswer(result agents.AgentExecutionResult) (string, error) {
 	return answer, nil
 }
 
+const maestroCodingSystemPrompt = `You are Maestro's workspace coding agent.
+
+Provider/model: %s / %s
+Workspace: %s
+Repository: %s/%s
+
+Rules:
+- Treat the workspace above as the only authoritative repository for this session.
+- Use tool evidence from this workspace for every claim about files or code.
+- After any write or edit, verify the mutation by reading the affected file or otherwise observing the changed workspace before calling Finish.
+- Do not claim a file was created, updated, or fixed unless the trace includes that mutation and a post-mutation verification step.
+- If verification fails or is incomplete, say so explicitly instead of claiming success.
+- Prefer the smallest correct change that solves the task.
+- /ask is a separate read-only QA flow; this session is for coding work in the workspace above.
+`
+
+func buildCodingSystemPrompt(llm core.LLM, workspace, owner, repo string) string {
+	provider := "unknown-provider"
+	model := "unknown-model"
+	if llm != nil {
+		if strings.TrimSpace(llm.ProviderName()) != "" {
+			provider = strings.TrimSpace(llm.ProviderName())
+		}
+		if strings.TrimSpace(llm.ModelID()) != "" {
+			model = strings.TrimSpace(llm.ModelID())
+		}
+	}
+	return fmt.Sprintf(maestroCodingSystemPrompt, provider, model, workspace, strings.TrimSpace(owner), strings.TrimSpace(repo))
+}
+
 func (s *MaestroService) codingSessionFor(ctx context.Context, workspace string) (*maestrocoding.Session, error) {
 	s.codingMu.Lock()
 	defer s.codingMu.Unlock()
@@ -420,11 +451,13 @@ func (s *MaestroService) codingSessionFor(ctx context.Context, workspace string)
 		s.codingWorkspace = ""
 		s.codingSessionID = ""
 	}
+	defaultLLM := core.GetDefaultLLM()
 	session, err := maestrocoding.NewSession(maestrocoding.Config{
-		LLM:          core.GetDefaultLLM(),
+		LLM:          defaultLLM,
 		Workspace:    workspace,
 		SessionID:    sessionID,
 		SessionStore: s.sessionStore,
+		SystemPrompt: buildCodingSystemPrompt(defaultLLM, workspace, s.config.Owner, s.config.Repo),
 		AllowBash:    s.config.AllowCodingBash,
 	})
 	if err != nil {
@@ -444,10 +477,41 @@ func codingSessionID(sessionName string) string {
 }
 
 func (s *MaestroService) repositoryWorkspace(ctx context.Context) string {
+	if s != nil && s.config != nil {
+		if workspace := strings.TrimSpace(s.config.WorkspaceRoot); workspace != "" {
+			return workspace
+		}
+	}
 	if reviewAgent, err := s.pool.GetReviewAgent(ctx); err == nil {
 		return reviewAgent.ClonedRepoPath()
 	}
 	return ""
+}
+
+func (s *MaestroService) WorkspaceRoot() string {
+	if s == nil {
+		return ""
+	}
+	return strings.TrimSpace(s.repositoryWorkspace(context.Background()))
+}
+
+func (s *MaestroService) CodingModelInfo() string {
+	llm := core.GetDefaultLLM()
+	if llm == nil {
+		return ""
+	}
+	provider := strings.TrimSpace(llm.ProviderName())
+	model := strings.TrimSpace(llm.ModelID())
+	if provider == "" && model == "" {
+		return ""
+	}
+	if provider == "" {
+		return model
+	}
+	if model == "" {
+		return provider
+	}
+	return provider + ":" + model
 }
 
 func (s *MaestroService) CancelCodingRun() bool {

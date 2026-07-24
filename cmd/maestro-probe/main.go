@@ -197,6 +197,7 @@ func run() error {
 		RLMTargetedAskArtifactsPath: rlmTargetedArtifactsPath,
 		Owner:                       owner,
 		Repo:                        repo,
+		WorkspaceRoot:               resolvedRepoPath,
 		BudgetManager:               budgetManager,
 		AllowCodingBash:             allowCodingBash,
 	}, nil)
