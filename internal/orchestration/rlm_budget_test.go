@@ -5,12 +5,39 @@ import (
 	"testing"
 	"time"
 
+	"github.com/XiaoConstantine/dspy-go/pkg/agents"
 	"github.com/XiaoConstantine/dspy-go/pkg/core"
 	"github.com/XiaoConstantine/dspy-go/pkg/logging"
 	modrlm "github.com/XiaoConstantine/dspy-go/pkg/modules/rlm"
 	maestrobudget "github.com/XiaoConstantine/maestro/internal/budget"
 	"github.com/XiaoConstantine/maestro/internal/types"
 )
+
+func TestRecordExecutionTraceUsageUpdatesBudgetStatus(t *testing.T) {
+	manager := maestrobudget.NewBudgetManager(maestrobudget.DefaultConfig())
+	service := &MaestroService{
+		budgetManager: manager,
+		logger:        logging.GetLogger(),
+	}
+	service.recordExecutionTraceUsage(context.Background(), "ask.native", &agents.ExecutionTrace{
+		TokenUsage: map[string]int64{
+			"prompt_tokens":     100,
+			"completion_tokens": 25,
+			"total_tokens":      125,
+		},
+	})
+
+	status := service.BudgetStatus()
+	if status == nil {
+		t.Fatal("BudgetStatus() = nil")
+	}
+	if status.TotalTokens != 125 {
+		t.Fatalf("TotalTokens = %d, want 125", status.TotalTokens)
+	}
+	if got := status.ByAgent["ask.native"].TotalTokens; got != 125 {
+		t.Fatalf("agent tokens = %d, want 125", got)
+	}
+}
 
 func TestRecordRLMTraceUsageUpdatesBudgetStatus(t *testing.T) {
 	manager := maestrobudget.NewBudgetManager(maestrobudget.Config{MaxBudgetUSD: 1.00})

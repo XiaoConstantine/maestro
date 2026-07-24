@@ -515,7 +515,7 @@ This avoids a broad UI interface change during the first migration.
 3. Wire sessionevent SQLite into the native runtime.
 4. Add explicit create-or-get session bootstrap.
 5. Expose run + session control methods.
-6. Wire native `OnEvent` callbacks into a Maestro event adapter for TUI/CLI consumption.
+6. Wire the typed `native.Config.EventSink` into a Maestro event adapter for TUI/CLI consumption.
 7. Add `bash` environment passthrough configuration for repo-local developer workflows where needed.
 8. Define the per-request agent-construction model for concurrency safety.
 9. Add `Runtime.Close()` and wire shutdown ownership.
@@ -581,7 +581,7 @@ Important wording:
 1. Rewire the existing session commands to native/sessionevent-backed storage.
 2. Add branch switch/fork commands where missing.
 3. Surface current session + branch in the status UI.
-4. Stream native lifecycle events through the TUI using the runtime `OnEvent` path and existing `ProgressMsg` plumbing.
+4. Stream typed native lifecycle events through the TUI using `native.Config.EventSink` and existing `ProgressMsg` plumbing.
 
 #### Acceptance Criteria
 

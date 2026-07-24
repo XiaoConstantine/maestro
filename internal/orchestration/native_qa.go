@@ -11,7 +11,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/XiaoConstantine/dspy-go/pkg/agents/native"
+	"github.com/XiaoConstantine/dspy-go/pkg/agents"
 	"github.com/XiaoConstantine/dspy-go/pkg/agents/sessionevent"
 	"github.com/XiaoConstantine/dspy-go/pkg/core"
 	"github.com/XiaoConstantine/dspy-go/pkg/logging"
@@ -380,7 +380,7 @@ func newNativeToolResult(modelText, displayText string, details map[string]any) 
 	}
 }
 
-func extractSourcesFromNativeTrace(trace *native.Trace) []string {
+func extractSourcesFromExecutionTrace(trace *agents.ExecutionTrace) []string {
 	if trace == nil {
 		return nil
 	}
@@ -397,8 +397,8 @@ func extractSourcesFromNativeTrace(trace *native.Trace) []string {
 	}
 
 	for _, step := range trace.Steps {
-		addTraceSources(add, step.ToolName, step.ObservationDetails)
-		if strings.EqualFold(step.ToolName, "read_file") {
+		addTraceSources(add, step.Tool, step.ObservationDetails)
+		if strings.EqualFold(step.Tool, "read_file") {
 			add(firstString(step.Arguments, "file_path", "path", "filepath", "file"))
 		}
 	}
@@ -462,8 +462,8 @@ func addFilesFromResults(add func(string), value any) {
 	}
 }
 
-func estimateNativeQAConfidence(trace *native.Trace, sources []string) float64 {
-	if trace == nil || !trace.Completed {
+func estimateNativeQAConfidence(trace *agents.ExecutionTrace, sources []string) float64 {
+	if trace == nil || trace.Status != agents.TraceStatusSuccess {
 		return 0
 	}
 
@@ -472,7 +472,7 @@ func estimateNativeQAConfidence(trace *native.Trace, sources []string) float64 {
 		confidence = 0.9
 	}
 	for _, step := range trace.Steps {
-		if step.IsError {
+		if step.Error != "" {
 			confidence -= 0.2
 		}
 	}

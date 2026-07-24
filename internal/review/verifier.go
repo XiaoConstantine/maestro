@@ -213,8 +213,8 @@ func (a *PRReviewAgent) verifyReviewComments(ctx context.Context, comments []PRR
 
 	raw := strings.TrimSpace(reviewStringValue(result["final_answer"]))
 	if raw == "" {
-		if trace := verifier.LastNativeTrace(); trace != nil {
-			raw = strings.TrimSpace(trace.FinalAnswer)
+		if trace := verifier.LastExecutionTrace(); trace != nil {
+			raw = strings.TrimSpace(reviewStringValue(trace.Output["final_answer"]))
 		}
 	}
 	if raw == "" {
