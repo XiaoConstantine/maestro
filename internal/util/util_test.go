@@ -1,7 +1,9 @@
 package util
 
 import (
+	"context"
 	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/XiaoConstantine/dspy-go/pkg/core"
@@ -72,6 +74,19 @@ func TestValidateModelConfigAcceptsOpenAIProvider(t *testing.T) {
 	}
 }
 
+func TestCheckProviderAPIKeyOpenAIIgnoresSubscriptionToken(t *testing.T) {
+	t.Setenv("OPENAI_OAUTH_TOKEN", "oat-env")
+	t.Setenv("OPENAI_API_KEY", "api-key")
+
+	got, err := CheckProviderAPIKey("openai", "")
+	if err != nil {
+		t.Fatalf("CheckProviderAPIKey() error = %v", err)
+	}
+	if got != "api-key" {
+		t.Fatalf("CheckProviderAPIKey() = %q, want api-key", got)
+	}
+}
+
 func TestCheckProviderAPIKeyOpenAI(t *testing.T) {
 	old := os.Getenv("OPENAI_API_KEY")
 	t.Cleanup(func() {
@@ -89,6 +104,26 @@ func TestCheckProviderAPIKeyOpenAI(t *testing.T) {
 	}
 	if got != "env-openai-key" {
 		t.Fatalf("CheckProviderAPIKey() = %q, want %q", got, "env-openai-key")
+	}
+}
+
+func TestValidateAndLoadOpenAICodexUsesStoredSubscription(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "credentials.json")
+	t.Setenv("MAESTRO_CREDENTIALS_PATH", path)
+	credential := `{"version":1,"openai":{"access_token":"oat-stored","account_id":"account","expires_at":"2000-01-01T00:00:00Z"}}`
+	if err := os.WriteFile(path, []byte(credential), 0600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	cfg := &ModelConfig{ModelProvider: "openai-codex", ModelName: "gpt-5.4"}
+	if err := ValidateModelConfig(cfg); err != nil {
+		t.Fatalf("ValidateModelConfig() error = %v", err)
+	}
+	llm, err := LoadLLMFromModelConfig(context.Background(), cfg, "gpt-5.4")
+	if err != nil {
+		t.Fatalf("LoadLLMFromModelConfig() error = %v", err)
+	}
+	if got := llm.ProviderName(); got != "openai-codex" {
+		t.Fatalf("ProviderName() = %q, want openai-codex", got)
 	}
 }
 
@@ -139,7 +174,9 @@ func TestValidateModelConfigSkipsAPIKeyForLocalOpenAI(t *testing.T) {
 }
 
 func TestValidateModelConfigRequiresAPIKeyForRemoteOpenAI(t *testing.T) {
+	t.Setenv("OPENAI_OAUTH_TOKEN", "")
 	t.Setenv("OPENAI_API_KEY", "")
+	t.Setenv("MAESTRO_CREDENTIALS_PATH", filepath.Join(t.TempDir(), "missing.json"))
 
 	cfg := &ModelConfig{
 		ModelProvider: "openai",

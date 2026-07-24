@@ -18,6 +18,7 @@ import (
 	"github.com/XiaoConstantine/dspy-go/pkg/llms"
 	"github.com/XiaoConstantine/dspy-go/pkg/logging"
 	maestroace "github.com/XiaoConstantine/maestro/internal/ace"
+	maestroauth "github.com/XiaoConstantine/maestro/internal/auth"
 	"github.com/XiaoConstantine/maestro/internal/github"
 	"github.com/XiaoConstantine/maestro/internal/orchestration"
 	"github.com/XiaoConstantine/maestro/internal/review"
@@ -244,7 +245,7 @@ Available slash commands in interactive mode:
 
 	// Add flags
 	rootCmd.PersistentFlags().StringVar(&cfg.apiKey, "api-key", "", "API Key for vendors")
-	rootCmd.PersistentFlags().StringVar(&cfg.githubToken, "github-token", os.Getenv("MAESTRO_GITHUB_TOKEN"), "Github token")
+	rootCmd.PersistentFlags().StringVar(&cfg.githubToken, "github-token", "", "Github token (defaults to MAESTRO_GITHUB_TOKEN)")
 	rootCmd.PersistentFlags().StringVar(&cfg.owner, "owner", "", "Repository owner")
 	rootCmd.PersistentFlags().StringVar(&cfg.repo, "repo", "", "Repository")
 	rootCmd.PersistentFlags().StringVar(&cfg.memoryPath, "path", "~/.maestro/", "Path for sqlite table")
@@ -256,7 +257,7 @@ Available slash commands in interactive mode:
 	rootCmd.PersistentFlags().BoolP("interactive", "i", false, "Run in interactive mode")
 
 	rootCmd.PersistentFlags().StringP("model", "m", "", `Full model specification (e.g. "ollama:mistral:q4", "llamacpp:", "anthropic:claude-3")`)
-	rootCmd.PersistentFlags().StringVar(&cfg.modelProvider, "provider", DefaultModelProvider, "Model provider (llamacpp, ollama, anthropic)")
+	rootCmd.PersistentFlags().StringVar(&cfg.modelProvider, "provider", DefaultModelProvider, "Model provider (llamacpp, ollama, anthropic, google, openai, openai-codex)")
 	rootCmd.PersistentFlags().StringVar(&cfg.modelName, "model-name", DefaultModelName, "Specific model name")
 	rootCmd.PersistentFlags().StringVar(&cfg.modelConfig, "model-config", "", "Additional model configuration")
 	rootCmd.PersistentFlags().StringVar(&cfg.qaArtifacts, "qa-artifacts", os.Getenv("MAESTRO_QA_ARTIFACTS"), "Optional path to GEPA-tuned QA artifacts JSON")
@@ -275,12 +276,49 @@ Available slash commands in interactive mode:
 	// improves throughput by overlapping HTTP requests.
 	rootCmd.PersistentFlags().IntVar(&cfg.reviewWorkers, "review-workers", 120, "Number of concurrent workers for parallel review")
 
-	// Mark required flags
-	rootCmd.PersistentPreRun = func(cmd *cobra.Command, args []string) {
-		if cfg.githubToken == "" {
-			fmt.Fprintln(os.Stderr, "GitHub token required via --github-token or MAESTRO_GITHUB_TOKEN")
-			os.Exit(1)
+	rootCmd.AddCommand(
+		&cobra.Command{
+			Use:   "login openai",
+			Short: "Connect a ChatGPT Plus/Pro subscription",
+			Args:  cobra.ExactArgs(1),
+			RunE: func(cmd *cobra.Command, args []string) error {
+				if !strings.EqualFold(args[0], "openai") {
+					return fmt.Errorf("unsupported login provider %q", args[0])
+				}
+				ctx, cancel := context.WithTimeout(cmd.Context(), 5*time.Minute)
+				defer cancel()
+				return maestroauth.LoginOpenAI(ctx, cmd.OutOrStdout())
+			},
+		},
+		&cobra.Command{
+			Use:   "logout openai",
+			Short: "Remove a stored ChatGPT subscription credential",
+			Args:  cobra.ExactArgs(1),
+			RunE: func(cmd *cobra.Command, args []string) error {
+				if !strings.EqualFold(args[0], "openai") {
+					return fmt.Errorf("unsupported logout provider %q", args[0])
+				}
+				if err := maestroauth.LogoutOpenAI(); err != nil {
+					return err
+				}
+				fmt.Fprintln(cmd.OutOrStdout(), "OpenAI subscription disconnected.")
+				return nil
+			},
+		},
+	)
+
+	// Mark required flags for repository operations; auth commands do not need GitHub access.
+	rootCmd.PersistentPreRunE = func(cmd *cobra.Command, args []string) error {
+		if cmd.Name() == "login" || cmd.Name() == "logout" {
+			return nil
 		}
+		if cfg.githubToken == "" {
+			cfg.githubToken = strings.TrimSpace(os.Getenv("MAESTRO_GITHUB_TOKEN"))
+		}
+		if cfg.githubToken == "" {
+			return fmt.Errorf("GitHub token required via --github-token or MAESTRO_GITHUB_TOKEN")
+		}
+		return nil
 	}
 
 	if err := rootCmd.Execute(); err != nil {

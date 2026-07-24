@@ -219,6 +219,33 @@ The repo still contains ACE and RLM-related runtime wiring, but the most importa
   - `--protected-regression-tolerance`
   - `--max-runtime`
 
+### **ChatGPT / Codex Subscription Login**
+
+Connect a ChatGPT Plus or Pro subscription without an OpenAI API key:
+
+```bash
+go run . login openai
+```
+
+Maestro opens the browser, receives the OAuth callback on `127.0.0.1:1455`, and stores access/refresh credentials in `~/.maestro/credentials.json` with mode `0600`. Tokens are refreshed automatically and are never printed. Override the path with `MAESTRO_CREDENTIALS_PATH`.
+
+Then launch Maestro with a Codex model:
+
+```bash
+go run . --interactive \
+  --owner XiaoConstantine \
+  --repo dspy-go \
+  --model openai-codex:gpt-5.4
+```
+
+Disconnect with:
+
+```bash
+go run . logout openai
+```
+
+The `openai-codex` provider resolves the stored credential before every request and refreshes it automatically. The regular `openai` provider remains API-key-only; `--api-key` and `OPENAI_API_KEY` apply to that provider, not subscription access.
+
 ### **Model Selection**
 
 ```bash

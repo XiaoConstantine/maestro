@@ -16,7 +16,9 @@ import (
 	"time"
 
 	"github.com/XiaoConstantine/dspy-go/pkg/core"
+	"github.com/XiaoConstantine/dspy-go/pkg/llms"
 	"github.com/XiaoConstantine/dspy-go/pkg/logging"
+	maestroauth "github.com/XiaoConstantine/maestro/internal/auth"
 	"github.com/XiaoConstantine/maestro/internal/types"
 )
 
@@ -30,7 +32,7 @@ type ModelConfig struct {
 }
 
 const (
-	defaultOpenAIBaseURL      = "https://us.api.openai.com"
+	defaultOpenAIBaseURL      = "https://api.openai.com"
 	defaultLocalLLMTimeoutSec = 300
 )
 
@@ -159,19 +161,22 @@ func ValidateModelConfig(cfg *ModelConfig) error {
 	cfg.ModelName = normalizeModelName(cfg.ModelProvider, cfg.ModelName)
 	cfg.BaseURL = resolveProviderBaseURL(cfg)
 
-	if cfg.ModelProvider == "anthropic" || cfg.ModelProvider == "google" || cfg.ModelProvider == "openai" {
+	if cfg.ModelProvider == "openai-codex" {
+		if err := maestroauth.HasOpenAICredentials(); err != nil {
+			return fmt.Errorf("resolve ChatGPT subscription credentials: %w", err)
+		}
+	} else if cfg.ModelProvider == "anthropic" || cfg.ModelProvider == "google" || cfg.ModelProvider == "openai" {
 		key, err := CheckProviderAPIKey(cfg.ModelProvider, cfg.APIKey)
 		if err != nil && !isLocalBaseURL(cfg.BaseURL) {
 			return err
 		}
-		// Update the config with the key from environment if one was found
 		if key != "" {
 			cfg.APIKey = key
 		}
 	}
 	// Validate provider
 	switch cfg.ModelProvider {
-	case "llamacpp:", "ollama", "anthropic", "google", "openai", "llamacpp":
+	case "llamacpp:", "ollama", "anthropic", "google", "openai", "openai-codex", "llamacpp":
 		// Valid providers
 	default:
 		return fmt.Errorf("unsupported model provider: %s", cfg.ModelProvider)
@@ -216,6 +221,12 @@ func ProviderConfigFromModelConfig(cfg *ModelConfig) core.ProviderConfig {
 
 // LoadLLMFromModelConfig loads an LLM using the provider configuration derived from the model config.
 func LoadLLMFromModelConfig(ctx context.Context, cfg *ModelConfig, modelID core.ModelID) (core.LLM, error) {
+	if cfg != nil && registryProviderName(cfg.ModelProvider) == "openai-codex" {
+		return llms.NewOpenAICodexLLM(modelID,
+			llms.WithOpenAICodexCredentials(maestroauth.OpenAICredentials),
+			llms.WithOpenAICodexOriginator("maestro"),
+		)
+	}
 	return core.LoadLLMFromConfig(ctx, ProviderConfigFromModelConfig(cfg), modelID)
 }
 
@@ -244,9 +255,7 @@ func CheckProviderAPIKey(provider, apiKey string) (string, error) {
 			os.Getenv("GEMINI_API_KEY"),
 		)
 	case "openai":
-		envKey = FirstNonEmpty(
-			os.Getenv("OPENAI_API_KEY"),
-		)
+		envKey = FirstNonEmpty(os.Getenv("OPENAI_API_KEY"))
 	default:
 		// For other providers, we don't check environment variables
 		return "", fmt.Errorf("API key required for %s provider", provider)
