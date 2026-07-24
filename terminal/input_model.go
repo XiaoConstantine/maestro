@@ -12,7 +12,7 @@ import (
 type InputCommandHandler func(cmd string, args []string) tea.Cmd
 
 // InputQuestionHandler is called when a natural language question is entered.
-type InputQuestionHandler func(question string) tea.Cmd
+type InputQuestionHandler func(question string) (tea.Cmd, bool)
 
 // InputModel handles text input and command parsing.
 type InputModel struct {
@@ -145,22 +145,26 @@ func (m *InputModel) Update(msg tea.Msg) (*InputModel, tea.Cmd) {
 				return m, nil
 			}
 
-			// Add to history
-			m.addToHistory(value)
+			var questionCmd tea.Cmd
+			if !strings.HasPrefix(value, "/") && m.onQuestion != nil {
+				var accepted bool
+				questionCmd, accepted = m.onQuestion(value)
+				if !accepted {
+					return m, questionCmd
+				}
+			}
 
-			// Clear input and suggestions
+			// Add accepted input to history, then clear the editor.
+			m.addToHistory(value)
 			m.textarea.Reset()
 			m.showSuggestions = false
 			m.suggestions = nil
 			m.selectedSuggestion = 0
 
-			// Parse and handle
 			if strings.HasPrefix(value, "/") {
 				return m, m.parseCommand(value)
 			}
-			if m.onQuestion != nil {
-				return m, m.onQuestion(value)
-			}
+			return m, questionCmd
 
 		case "up":
 			// Navigate suggestions if showing

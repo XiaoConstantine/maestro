@@ -4,7 +4,28 @@ import (
 	"context"
 	"path/filepath"
 	"testing"
+
+	"github.com/XiaoConstantine/dspy-go/pkg/agents"
+	"github.com/XiaoConstantine/dspy-go/pkg/core"
 )
+
+func TestMapCodingEventMapsToolLifecycle(t *testing.T) {
+	event, ok := mapCodingEvent(agents.ExecutionEvent{Payload: agents.ToolExecutionStartedEvent{
+		Call: core.ToolCall{Name: "edit"},
+	}})
+	if !ok {
+		t.Fatal("mapCodingEvent() ok = false")
+	}
+	if event.Kind != "tool" || event.Tool != "edit" || event.Status != "started" {
+		t.Fatalf("event = %#v, want started edit tool", event)
+	}
+}
+
+func TestMapCodingEventIgnoresMessageAdded(t *testing.T) {
+	if _, ok := mapCodingEvent(agents.ExecutionEvent{Payload: agents.MessageAddedEvent{}}); ok {
+		t.Fatal("mapCodingEvent() ok = true, want false")
+	}
+}
 
 func TestResolveCLIStoragePath_DirectoryPathUsesRepoDBName(t *testing.T) {
 	cfg := &config{

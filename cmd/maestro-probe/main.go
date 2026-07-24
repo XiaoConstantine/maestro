@@ -90,12 +90,13 @@ func run() error {
 		rlmTargetedArtifactsPath string
 		timeout                  time.Duration
 		verbose                  bool
+		allowCodingBash          bool
 	)
 
 	flag.Usage = func() {
 		fmt.Fprintf(flag.CommandLine.Output(), "Usage: maestro-probe --question <question> [flags]\n\n")
-		fmt.Fprintf(flag.CommandLine.Output(), "Runs MaestroService.ProcessRequest(RequestAsk) against a local repository and prints the response metadata as JSON.\n")
-		fmt.Fprintf(flag.CommandLine.Output(), "Scope: ask-side verification only; this does not exercise the PR review/RLM review path.\n\n")
+		fmt.Fprintf(flag.CommandLine.Output(), "Runs a Maestro ask or coding request against a local repository and prints response metadata as JSON.\n")
+		fmt.Fprintf(flag.CommandLine.Output(), "Use --strategy coding for workspace tools; PR review is not exercised.\n\n")
 		flag.PrintDefaults()
 	}
 
@@ -109,12 +110,13 @@ func run() error {
 	flag.StringVar(&modelConfig, "model-config", "", "Additional model configuration")
 	flag.StringVar(&apiKey, "api-key", "", "API key for external model providers")
 	flag.StringVar(&baseURL, "base-url", "", "Optional base URL override")
-	flag.StringVar(&strategy, "strategy", "", "Optional ask strategy override: native, rlm, or rlm-targeted")
+	flag.StringVar(&strategy, "strategy", "", "Execution strategy: native, rlm, rlm-targeted, or coding")
 	flag.StringVar(&memoryPath, "memory-path", "", "Optional Maestro memory path; defaults under /tmp")
 	flag.StringVar(&rlmOverviewArtifactsPath, "rlm-overview-artifact", "", "Optional RLM overview optimized program path")
 	flag.StringVar(&rlmTargetedArtifactsPath, "rlm-targeted-ask-artifact", "", "Optional RLM targeted ask optimized program path")
 	flag.DurationVar(&timeout, "timeout", 5*time.Minute, "Request timeout")
 	flag.BoolVar(&verbose, "verbose", false, "Enable debug logging to stderr")
+	flag.BoolVar(&allowCodingBash, "allow-coding-bash", false, "Allow unrestricted shell commands for --strategy coding")
 	flag.Parse()
 
 	if strings.TrimSpace(question) == "" {
@@ -179,7 +181,8 @@ func run() error {
 	core.GlobalConfig.DefaultLLM = defaultLLM
 
 	previousStrategy, hadStrategy := os.LookupEnv("MAESTRO_FORCE_ASK_STRATEGY")
-	if strategy = strings.TrimSpace(strategy); strategy != "" {
+	strategy = strings.TrimSpace(strategy)
+	if strategy != "" && strategy != "coding" {
 		if err := os.Setenv("MAESTRO_FORCE_ASK_STRATEGY", strategy); err != nil {
 			return fmt.Errorf("set ask strategy: %w", err)
 		}
@@ -195,6 +198,7 @@ func run() error {
 		Owner:                       owner,
 		Repo:                        repo,
 		BudgetManager:               budgetManager,
+		AllowCodingBash:             allowCodingBash,
 	}, nil)
 	if err != nil {
 		return fmt.Errorf("create service: %w", err)
@@ -206,12 +210,13 @@ func run() error {
 	}()
 	service.SetReviewAgent(&localReviewAgent{repoPath: resolvedRepoPath, status: types.NewIndexingStatus()})
 
-	response, err := service.ProcessRequest(ctx, orchestration.Request{
-		Type:     orchestration.RequestAsk,
-		Question: question,
-	})
+	request := orchestration.Request{Type: orchestration.RequestAsk, Question: question}
+	if strategy == "coding" {
+		request = orchestration.Request{Type: orchestration.RequestCoding, Prompt: question}
+	}
+	response, err := service.ProcessRequest(ctx, request)
 	if err != nil {
-		return fmt.Errorf("process ask request: %w", err)
+		return fmt.Errorf("process %s request: %w", request.Type, err)
 	}
 
 	output := probeOutput{

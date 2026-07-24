@@ -3,11 +3,14 @@ package orchestration
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"maps"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -18,6 +21,7 @@ import (
 	"github.com/XiaoConstantine/dspy-go/pkg/logging"
 	maestroace "github.com/XiaoConstantine/maestro/internal/ace"
 	maestrobudget "github.com/XiaoConstantine/maestro/internal/budget"
+	maestrocoding "github.com/XiaoConstantine/maestro/internal/coding"
 	"github.com/XiaoConstantine/maestro/internal/subagent"
 	"github.com/XiaoConstantine/maestro/internal/types"
 	"github.com/briandowns/spinner"
@@ -58,6 +62,7 @@ type RequestType string
 
 const (
 	RequestReview RequestType = "review"
+	RequestCoding RequestType = "coding"
 	RequestAsk    RequestType = "ask"
 	RequestClaude RequestType = "claude"
 	RequestGemini RequestType = "gemini"
@@ -80,6 +85,7 @@ type ServiceConfig struct {
 	ReviewWorkers               int
 	BudgetConfig                maestrobudget.Config
 	BudgetManager               *maestrobudget.BudgetManager
+	AllowCodingBash             bool
 }
 
 type Request struct {
@@ -90,6 +96,7 @@ type Request struct {
 	TaskType   string // e.g., "search", "generate", "review"
 	Context    map[string]interface{}
 	OnProgress func(status string)
+	EventSink  agents.EventSink
 }
 
 type Response struct {
@@ -114,6 +121,12 @@ type MaestroService struct {
 	rlmOverviewSkillStore  skills.Store
 	rlmOverviewSkillDomain string
 	budgetManager          *maestrobudget.BudgetManager
+
+	codingMu           sync.Mutex
+	codingSession      *maestrocoding.Session
+	codingSessionID    string
+	codingWorkspace    string
+	codingShuttingDown bool
 
 	mu          sync.RWMutex
 	initialized bool
@@ -273,6 +286,8 @@ func (s *MaestroService) ProcessRequest(ctx context.Context, request Request) (*
 	switch request.Type {
 	case RequestReview:
 		return s.withBudgetMetadata(s.handleReview(ctx, request))
+	case RequestCoding:
+		return s.withBudgetMetadata(s.handleCoding(ctx, request))
 	case RequestAsk:
 		return s.withBudgetMetadata(s.handleAsk(ctx, request))
 	case RequestClaude:
@@ -324,11 +339,126 @@ func (s *MaestroService) handleReview(ctx context.Context, request Request) (*Re
 	}, nil
 }
 
-func (s *MaestroService) handleAsk(ctx context.Context, request Request) (*Response, error) {
-	repoPath := ""
-	if reviewAgent, err := s.pool.GetReviewAgent(ctx); err == nil {
-		repoPath = reviewAgent.ClonedRepoPath()
+func (s *MaestroService) handleCoding(ctx context.Context, request Request) (*Response, error) {
+	workspace := s.repositoryWorkspace(ctx)
+	if workspace == "" {
+		return &Response{
+			Type:   RequestCoding,
+			Answer: "Repository is still being cloned. Please wait a moment and try again.",
+		}, nil
 	}
+
+	session, err := s.codingSessionFor(ctx, workspace)
+	if err != nil {
+		return nil, err
+	}
+	result, err := session.Prompt(ctx, request.Prompt, request.EventSink)
+	s.recordExecutionTraceUsage(ctx, "coding.native", result.Trace)
+	if err != nil {
+		return nil, err
+	}
+
+	answer, err := codingAnswer(result)
+	if err != nil {
+		return nil, err
+	}
+	return &Response{
+		Type:   RequestCoding,
+		Answer: answer,
+		Metadata: map[string]interface{}{
+			"workspace": workspace,
+			"trace":     result.Trace,
+		},
+	}, nil
+}
+
+func codingAnswer(result agents.AgentExecutionResult) (string, error) {
+	answer := strings.TrimSpace(stringValue(result.Output["final_answer"]))
+	if answer == "" && result.Trace != nil {
+		answer = strings.TrimSpace(stringValue(result.Trace.Output["final_answer"]))
+	}
+	if answer == "" {
+		if diagnostic := strings.TrimSpace(stringValue(result.Output["error"])); diagnostic != "" {
+			if result.Trace != nil && result.Trace.Status == agents.TraceStatusPartial {
+				return "Coding run stopped: " + diagnostic, nil
+			}
+			return "", fmt.Errorf("coding run failed: %s", diagnostic)
+		}
+		if result.Trace != nil && result.Trace.Status != agents.TraceStatusSuccess {
+			diagnostic := strings.TrimSpace(result.Trace.Error)
+			if diagnostic == "" {
+				diagnostic = strings.TrimSpace(result.Trace.TerminationCause)
+			}
+			if diagnostic == "" {
+				diagnostic = "no final answer"
+			}
+			return "Coding run stopped: " + diagnostic, nil
+		}
+	}
+	if answer == "" {
+		return "", fmt.Errorf("coding run completed without a final answer")
+	}
+	return answer, nil
+}
+
+func (s *MaestroService) codingSessionFor(ctx context.Context, workspace string) (*maestrocoding.Session, error) {
+	s.codingMu.Lock()
+	defer s.codingMu.Unlock()
+	if s.codingShuttingDown {
+		return nil, fmt.Errorf("coding service is shutting down")
+	}
+
+	sessionID := codingSessionID(s.GetCurrentSession())
+	if s.codingSession != nil && s.codingWorkspace == workspace && s.codingSessionID == sessionID {
+		return s.codingSession, nil
+	}
+	if s.codingSession != nil {
+		if err := s.codingSession.Close(ctx); err != nil {
+			return nil, fmt.Errorf("close previous coding session: %w", err)
+		}
+		s.codingSession = nil
+		s.codingWorkspace = ""
+		s.codingSessionID = ""
+	}
+	session, err := maestrocoding.NewSession(maestrocoding.Config{
+		LLM:          core.GetDefaultLLM(),
+		Workspace:    workspace,
+		SessionID:    sessionID,
+		SessionStore: s.sessionStore,
+		AllowBash:    s.config.AllowCodingBash,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("create coding session: %w", err)
+	}
+	s.codingSession = session
+	s.codingWorkspace = workspace
+	s.codingSessionID = sessionID
+	return session, nil
+}
+
+const codingSessionNamespace = "maestro:internal:coding:"
+
+func codingSessionID(sessionName string) string {
+	digest := sha256.Sum256([]byte(sessionName))
+	return codingSessionNamespace + hex.EncodeToString(digest[:])
+}
+
+func (s *MaestroService) repositoryWorkspace(ctx context.Context) string {
+	if reviewAgent, err := s.pool.GetReviewAgent(ctx); err == nil {
+		return reviewAgent.ClonedRepoPath()
+	}
+	return ""
+}
+
+func (s *MaestroService) CancelCodingRun() bool {
+	s.codingMu.Lock()
+	session := s.codingSession
+	s.codingMu.Unlock()
+	return session != nil && session.Cancel()
+}
+
+func (s *MaestroService) handleAsk(ctx context.Context, request Request) (*Response, error) {
+	repoPath := s.repositoryWorkspace(ctx)
 
 	if repoPath == "" {
 		return &Response{
@@ -498,22 +628,41 @@ func (s *MaestroService) IsReady() bool {
 }
 
 func (s *MaestroService) Shutdown(ctx context.Context) error {
-	s.pool.Shutdown(ctx)
+	var shutdownErrs []error
+	codingStopped := true
 
-	if s.sessionStore != nil {
-		if err := s.sessionStore.Close(); err != nil {
-			s.logger.Warn(ctx, "Failed to close session event store: %v", err)
+	s.codingMu.Lock()
+	s.codingShuttingDown = true
+	codingSession := s.codingSession
+	s.codingMu.Unlock()
+	if codingSession != nil {
+		if err := codingSession.Close(ctx); err != nil {
+			codingStopped = false
+			s.logger.Warn(ctx, "Failed to stop coding session: %v", err)
+			shutdownErrs = append(shutdownErrs, fmt.Errorf("stop coding session: %w", err))
 		}
 	}
 
-	// Close ACE manager to flush pending learnings
+	if codingStopped {
+		s.pool.Shutdown(ctx)
+	}
+
+	if codingStopped && s.sessionStore != nil {
+		if err := s.sessionStore.Close(); err != nil {
+			s.logger.Warn(ctx, "Failed to close session event store: %v", err)
+			shutdownErrs = append(shutdownErrs, fmt.Errorf("close session event store: %w", err))
+		}
+	}
+
+	// Close ACE independently so pending learnings are flushed even when a run resists cancellation.
 	if s.aceManager != nil {
 		if err := s.aceManager.Close(); err != nil {
 			s.logger.Warn(ctx, "Failed to close ACE manager: %v", err)
+			shutdownErrs = append(shutdownErrs, fmt.Errorf("close ACE manager: %w", err))
 		}
 	}
 
-	return nil
+	return errors.Join(shutdownErrs...)
 }
 
 // GetACEManager returns the ACE manager for self-improving agent capabilities.
@@ -546,6 +695,9 @@ func (s *MaestroService) CreateSession(ctx context.Context, name string) error {
 	if name == "" {
 		name = generateSessionName()
 	}
+	if strings.HasPrefix(name, "maestro:internal:") {
+		return fmt.Errorf("session name uses reserved Maestro namespace")
+	}
 
 	initialContext := map[string]interface{}{
 		"owner":   s.config.Owner,
@@ -571,6 +723,9 @@ func (s *MaestroService) CreateSession(ctx context.Context, name string) error {
 
 // SwitchSession switches to an existing session.
 func (s *MaestroService) SwitchSession(ctx context.Context, name string) error {
+	if strings.HasPrefix(name, "maestro:internal:") {
+		return fmt.Errorf("session name uses reserved Maestro namespace")
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -651,7 +806,17 @@ func (s *MaestroService) ListSessions(ctx context.Context) ([]subagent.Session, 
 		return nil, fmt.Errorf("session manager not initialized")
 	}
 
-	return s.sessionManager.ListSessions()
+	sessions, err := s.sessionManager.ListSessions()
+	if err != nil {
+		return nil, err
+	}
+	visible := sessions[:0]
+	for _, session := range sessions {
+		if !strings.HasPrefix(session.ID, "maestro:internal:") {
+			visible = append(visible, session)
+		}
+	}
+	return visible, nil
 }
 
 // GetCurrentSession returns the name of the current session.

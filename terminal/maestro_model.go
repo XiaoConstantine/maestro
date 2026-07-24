@@ -59,12 +59,20 @@ type MaestroModel struct {
 
 	// Program reference for sending async updates
 	program *tea.Program
+
+	codingRunActive bool
+	codingCancel    context.CancelFunc
 }
 
 // ProgressMsg is sent to update the UI with progress information.
 type ProgressMsg struct {
 	Status string
 	Detail string
+}
+
+type CodingResultMsg struct {
+	Content string
+	Error   error
 }
 
 // NewMaestroModel creates a new root TUI model.
@@ -105,7 +113,7 @@ func NewMaestroModel(cfg *MaestroConfig, backend MaestroBackend) *MaestroModel {
 	m.registerCommands()
 
 	// Add welcome message
-	m.addMessage("assistant", "Welcome to Maestro! Type /help for commands or ask questions directly.")
+	m.addMessage("assistant", "Welcome to Maestro! Enter a coding task, or use /ask for read-only repository questions.")
 
 	return m
 }
@@ -168,6 +176,16 @@ func (m *MaestroModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case "esc":
 			// Handle escape based on current state
+			if m.codingRunActive {
+				if m.codingCancel != nil {
+					m.codingCancel()
+				}
+				if m.backend != nil {
+					m.backend.CancelCodingTask()
+				}
+				m.progressModel.SetMessage("Canceling...")
+				return m, nil
+			}
 			if m.commandPalette.IsVisible() {
 				m.commandPalette.Hide()
 				return m, nil
@@ -301,6 +319,20 @@ func (m *MaestroModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.addMessage("assistant", msg.Content)
 		m.statusBar.SetMessage("")
 		m.progressModel.Hide() // Ensure progress is hidden when response arrives
+
+	case CodingResultMsg:
+		if m.codingCancel != nil {
+			m.codingCancel()
+			m.codingCancel = nil
+		}
+		m.codingRunActive = false
+		m.statusBar.SetMessage("")
+		m.progressModel.Hide()
+		if msg.Error != nil {
+			m.addMessage("system", fmt.Sprintf("Error: %v", msg.Error))
+		} else {
+			m.addMessage("assistant", msg.Content)
+		}
 
 	case SessionPickerMsg:
 		// Enter session picker mode
@@ -712,31 +744,36 @@ func (m *MaestroModel) handleCommand(cmd string, args []string) tea.Cmd {
 	}
 }
 
-// handleQuestion processes a natural language question.
-func (m *MaestroModel) handleQuestion(question string) tea.Cmd {
+// handleQuestion processes natural language as a workspace coding task.
+func (m *MaestroModel) handleQuestion(question string) (tea.Cmd, bool) {
+	if m.codingRunActive {
+		return func() tea.Msg {
+			return ErrorMsg{Error: fmt.Errorf("a coding run is already active; press Esc to cancel it")}
+		}, false
+	}
 	m.addMessage("user", question)
+	m.codingRunActive = true
+	runCtx, cancel := context.WithCancel(m.ctx)
+	m.codingCancel = cancel
 
-	// Start progress display
-	startCmd := m.progressModel.Start("Thinking...")
-
-	// Capture program reference
+	startCmd := m.progressModel.Start("Starting coding agent...")
 	prog := m.program
 
-	askCmd := func() tea.Msg {
+	taskCmd := func() tea.Msg {
 		if m.backend == nil || !m.backend.IsReady() {
-			prog.Send(ProgressMsg{Status: ""}) // Clear progress
-			return ResponseMsg{Content: "Backend not ready. Please configure the agent."}
+			return CodingResultMsg{Error: fmt.Errorf("backend not ready; configure the agent")}
 		}
-
-		response, err := m.backend.AskQuestion(m.ctx, question)
-		prog.Send(ProgressMsg{Status: ""}) // Clear progress
-		if err != nil {
-			return ErrorMsg{Error: err}
-		}
-		return ResponseMsg{Content: response}
+		response, err := m.backend.RunCodingTask(runCtx, question, func(event CodingEvent) {
+			status := event.Detail
+			if status == "" {
+				status = event.Status
+			}
+			prog.Send(ProgressMsg{Status: status, Detail: event.Tool})
+		})
+		return CodingResultMsg{Content: response, Error: err}
 	}
 
-	return tea.Batch(startCmd, askCmd)
+	return tea.Batch(startCmd, taskCmd), true
 }
 
 // Command implementations
@@ -760,6 +797,7 @@ func (m *MaestroModel) cmdHelp() tea.Cmd {
   /clear                 Clear the conversation
   /exit, /quit           Exit Maestro
 
+Natural-language input runs the coding agent with ls/read/write/edit (bash is opt-in).
 Current session: %s
 
 Keyboard shortcuts:
@@ -767,7 +805,8 @@ Keyboard shortcuts:
   Ctrl+C                 Exit
   Up/Down                Scroll conversation
   i                      Enter insert mode
-  Enter                  Submit input (insert mode)`, currentSession)
+  Enter                  Submit input (insert mode)
+  Esc                    Cancel the active coding run`, currentSession)
 
 	return func() tea.Msg {
 		return ResponseMsg{Content: help}

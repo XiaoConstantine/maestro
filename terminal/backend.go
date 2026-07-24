@@ -8,7 +8,13 @@ type MaestroBackend interface {
 	// ReviewPR initiates a PR review and returns comments.
 	ReviewPR(ctx context.Context, prNumber int, onProgress func(status string)) ([]ReviewComment, error)
 
-	// AskQuestion sends a question to the agent and returns the response.
+	// RunCodingTask executes a workspace-scoped coding-agent prompt.
+	RunCodingTask(ctx context.Context, prompt string, onEvent func(CodingEvent)) (string, error)
+
+	// CancelCodingTask cancels the active coding-agent run.
+	CancelCodingTask() bool
+
+	// AskQuestion sends a read-only question to the repository QA agent.
 	AskQuestion(ctx context.Context, question string) (string, error)
 
 	// Claude sends a prompt to Claude CLI subagent and returns the response.
@@ -38,6 +44,13 @@ type MaestroBackend interface {
 }
 
 // SessionInfo contains metadata about a session.
+type CodingEvent struct {
+	Kind   string
+	Tool   string
+	Status string
+	Detail string
+}
+
 type SessionInfo struct {
 	Name      string
 	CreatedAt string
@@ -83,6 +96,12 @@ func (b *NoOpBackend) ReviewPR(ctx context.Context, prNumber int, onProgress fun
 	}
 	return nil, nil
 }
+
+func (b *NoOpBackend) RunCodingTask(ctx context.Context, prompt string, onEvent func(CodingEvent)) (string, error) {
+	return "Backend not configured. Please initialize with a valid agent.", nil
+}
+
+func (b *NoOpBackend) CancelCodingTask() bool { return false }
 
 func (b *NoOpBackend) AskQuestion(ctx context.Context, question string) (string, error) {
 	return "Backend not configured. Please initialize with a valid agent.", nil

@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/XiaoConstantine/dspy-go/pkg/agents"
 	"github.com/XiaoConstantine/dspy-go/pkg/agents/ace"
 	"github.com/XiaoConstantine/dspy-go/pkg/core"
 	"github.com/XiaoConstantine/dspy-go/pkg/llms"
@@ -109,6 +110,7 @@ type config struct {
 	prNumber               int
 	verbose                bool
 	verifyOnly             bool
+	allowCodingBash        bool
 	modelProvider          string
 	modelName              string
 	modelConfig            string // For additional model-specific configuration
@@ -249,6 +251,7 @@ Available slash commands in interactive mode:
 	rootCmd.PersistentFlags().IntVar(&cfg.prNumber, "pr", 0, "Pull request number")
 	rootCmd.PersistentFlags().BoolVar(&cfg.verbose, "verbose", false, "Enable verbose logging")
 	rootCmd.PersistentFlags().BoolVar(&cfg.verifyOnly, "verify-only", false, "Only verify token permissions")
+	rootCmd.PersistentFlags().BoolVar(&cfg.allowCodingBash, "allow-coding-bash", false, "Allow the coding agent to run unrestricted shell commands in the workspace")
 
 	rootCmd.PersistentFlags().BoolP("interactive", "i", false, "Run in interactive mode")
 
@@ -599,6 +602,47 @@ func (a *TUIServiceAdapter) ReviewPR(ctx context.Context, prNumber int, onProgre
 	return result, nil
 }
 
+func (a *TUIServiceAdapter) RunCodingTask(ctx context.Context, prompt string, onEvent func(terminal.CodingEvent)) (string, error) {
+	var sink agents.EventSink
+	if onEvent != nil {
+		sink = agents.EventSinkFunc(func(_ context.Context, event agents.ExecutionEvent) {
+			if mapped, ok := mapCodingEvent(event); ok {
+				onEvent(mapped)
+			}
+		})
+	}
+	response, err := a.service.ProcessRequest(ctx, orchestration.Request{
+		Type:      orchestration.RequestCoding,
+		Prompt:    prompt,
+		EventSink: sink,
+	})
+	if err != nil {
+		return "", err
+	}
+	return response.Answer, nil
+}
+
+func (a *TUIServiceAdapter) CancelCodingTask() bool {
+	return a.service != nil && a.service.CancelCodingRun()
+}
+
+func mapCodingEvent(event agents.ExecutionEvent) (terminal.CodingEvent, bool) {
+	switch payload := event.Payload.(type) {
+	case agents.RunStartedEvent:
+		return terminal.CodingEvent{Kind: "run", Status: "started", Detail: payload.Task}, true
+	case agents.TurnStartedEvent:
+		return terminal.CodingEvent{Kind: "turn", Status: "started", Detail: fmt.Sprintf("Turn %d/%d", payload.Turn, payload.MaxTurns)}, true
+	case agents.ToolExecutionStartedEvent:
+		return terminal.CodingEvent{Kind: "tool", Tool: payload.Call.Name, Status: "started", Detail: fmt.Sprintf("Running %s", payload.Call.Name)}, true
+	case agents.ToolCallFinishedEvent:
+		return terminal.CodingEvent{Kind: "tool", Tool: payload.Call.Name, Status: string(payload.Status), Detail: fmt.Sprintf("%s %s", payload.Call.Name, payload.Status)}, true
+	case agents.RunFinishedEvent:
+		return terminal.CodingEvent{Kind: "run", Status: string(payload.Status), Detail: payload.Diagnostic}, true
+	default:
+		return terminal.CodingEvent{}, false
+	}
+}
+
 func (a *TUIServiceAdapter) AskQuestion(ctx context.Context, question string) (string, error) {
 	response, err := a.service.ProcessRequest(ctx, orchestration.Request{
 		Type:     orchestration.RequestAsk,
@@ -756,6 +800,7 @@ func runModernUI(cfg *config) error {
 		GitHubToken:               cfg.githubToken,
 		IndexWorkers:              cfg.indexWorkers,
 		ReviewWorkers:             cfg.reviewWorkers,
+		AllowCodingBash:           cfg.allowCodingBash,
 	}, githubTools)
 	if err != nil {
 		return fmt.Errorf("failed to create service: %w", err)

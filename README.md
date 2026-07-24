@@ -9,8 +9,8 @@ Maestro is an AI code review and repository analysis assistant built on top of `
 │                               USER INTERFACE                                │
 │                                                                              │
 │  CLI / TUI                                                                  │
-│  • PR review                                                                │
-│  • /ask repository questions                                                │
+│  • workspace coding sessions (ls/read/write/edit; bash opt-in)               │
+│  • PR review and /ask repository questions                                  │
 │  • optional review artifact + skill-store loading                           │
 └──────────────────────────────────────┬───────────────────────────────────────┘
                                        │
@@ -19,8 +19,8 @@ Maestro is an AI code review and repository analysis assistant built on top of `
 │                              MAESTRO SERVICE                                │
 │                                                                              │
 │  Root CLI + TUI routing                                                     │
-│  • review path                                                              │
-│  • ask / overview path                                                      │
+│  • coding-agent path with typed lifecycle events                            │
+│  • review and ask / overview paths                                          │
 │  • model and provider wiring                                                │
 │  • ACE + persisted skill integration                                        │
 └───────────────┬───────────────────────────────────────┬──────────────────────┘
@@ -69,6 +69,7 @@ Maestro is an AI code review and repository analysis assistant built on top of `
 - **Guideline Integration**: review runs can use cached guidelines and repository-aware context.
 - **Artifact-Aware Runtime**: live review runs can load tuned review artifacts and persisted skill stores.
 - **Repository Ask Support**: Maestro can answer codebase questions in addition to reviewing PRs.
+- **Coding Sessions**: Natural-language TUI input runs a workspace-scoped native agent with `ls`, `read`, `write`, and `edit`; unrestricted `bash` requires explicit `--allow-coding-bash`. `/ask` remains read-only QA.
 
 ### **Intelligent Review Pipeline**
 - **Specialized PR Review Agent**: Maestro uses a dedicated Go review path rather than a generic chat wrapper.
@@ -83,7 +84,9 @@ Maestro is an AI code review and repository analysis assistant built on top of `
 
 ### **Terminal UI (TUI v2)**
 - **Interactive Mode**: the root command still launches the modern interactive interface when no PR is provided.
-- **Slash-Command Workflow**: Maestro supports review and ask-style interaction patterns.
+- **Coding-Agent Workflow**: Natural-language prompts can inspect and edit the cloned workspace while typed run/turn/tool events update progress; shell verification is explicit opt-in.
+- **Slash-Command Workflow**: `/ask`, `/review`, session, and subagent commands remain explicit specialist paths.
+- **Cancellation**: Escape cancels the active coding run.
 - **Shared Runtime Wiring**: the same service layer backs both direct CLI review and interactive usage.
 
 ### **Semantic Code Search (Sgrep)**
@@ -219,6 +222,14 @@ The repo still contains ACE and RLM-related runtime wiring, but the most importa
 ### **Model Selection**
 
 ```bash
+# Interactive coding session (natural prompts edit the cloned workspace; /ask is read-only QA)
+go run . --interactive --model google:gemini-2.5-flash --owner XiaoConstantine --repo dspy-go
+
+# Non-interactive coding-session probe
+go run ./cmd/maestro-probe --strategy coding --allow-coding-bash --repo-path /path/to/repo \
+  --question "Inspect the failing test, fix it, and run the focused test" \
+  --model google:gemini-2.5-flash
+
 # Gemini
 go run . --model google:gemini-2.5-flash --owner XiaoConstantine --repo dspy-go --pr 291
 
