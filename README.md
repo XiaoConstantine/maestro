@@ -84,7 +84,7 @@ Maestro is an AI code review and repository analysis assistant built on top of `
 
 ### **Terminal UI (TUI v2)**
 - **Interactive Mode**: the root command still launches the modern interactive interface when no PR is provided.
-- **Coding-Agent Workflow**: Natural-language prompts can inspect and edit the cloned workspace while typed run/turn/tool events update progress; shell verification is explicit opt-in.
+- **Coding-Agent Workflow**: Natural-language prompts can inspect and edit the authoritative workspace you launched Maestro from while typed run/turn/tool events update progress; shell verification is explicit opt-in.
 - **Slash-Command Workflow**: `/ask`, `/review`, session, and subagent commands remain explicit specialist paths.
 - **Cancellation**: Escape cancels the active coding run.
 - **Shared Runtime Wiring**: the same service layer backs both direct CLI review and interactive usage.
@@ -229,12 +229,15 @@ go run . login openai
 
 Maestro opens the browser, receives the OAuth callback on `127.0.0.1:1455`, and stores access/refresh credentials in `~/.maestro/credentials.json` with mode `0600`. Tokens are refreshed automatically and are never printed. Override the path with `MAESTRO_CREDENTIALS_PATH`.
 
-Then launch Maestro from the repository you want to edit. Maestro uses that current working directory as the authoritative coding workspace:
+Then build or install Maestro, change into the repository you want to edit, and launch it there. Maestro uses that current working directory as the authoritative coding workspace:
 
 ```bash
+# From the Maestro checkout
+go build -o /tmp/maestro .
+
 cd /path/to/repository
 
-go run /tmp/maestro-v086 --interactive \
+/tmp/maestro --interactive \
   --owner XiaoConstantine \
   --repo dspy-go \
   --model openai-codex:gpt-5.4
@@ -253,7 +256,7 @@ Coding tools, the displayed workspace path, and any file-tree view all use that 
 ### **Model Selection**
 
 ```bash
-# Interactive coding session (natural prompts edit the cloned workspace; /ask is read-only QA)
+# Interactive coding session (natural prompts edit the current workspace; /ask is read-only QA)
 go run . --interactive --model google:gemini-2.5-flash --owner XiaoConstantine --repo dspy-go
 
 # Non-interactive coding-session probe

@@ -514,8 +514,8 @@ func (m *MaestroModel) renderInfoSection() string {
 	// Authoritative workspace path
 	var pathLine string
 	workspace := ""
-	if m.backend != nil {
-		workspace = strings.TrimSpace(m.backend.GetWorkspace())
+	if provider, ok := m.backend.(workspaceInfoProvider); ok {
+		workspace = strings.TrimSpace(provider.GetWorkspace())
 	}
 	if workspace == "" {
 		cwd, _ := os.Getwd()
@@ -531,8 +531,8 @@ func (m *MaestroModel) renderInfoSection() string {
 
 	// Model info line
 	modelLabel := "Maestro coding agent"
-	if m.backend != nil {
-		if info := strings.TrimSpace(m.backend.GetModelInfo()); info != "" {
+	if provider, ok := m.backend.(modelInfoProvider); ok {
+		if info := strings.TrimSpace(provider.GetModelInfo()); info != "" {
 			modelLabel = info
 		}
 	}

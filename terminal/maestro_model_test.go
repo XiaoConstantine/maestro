@@ -2,6 +2,7 @@ package terminal
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
@@ -85,6 +86,27 @@ func (b *cancelAwareBackend) IsReady() bool { return true }
 func (b *cancelAwareBackend) RunCodingTask(ctx context.Context, _ string, _ func(CodingEvent)) (string, error) {
 	b.sawCanceledContext = ctx.Err() != nil
 	return "", ctx.Err()
+}
+
+func TestRenderInfoSectionFallsBackWithoutOptionalWorkspaceInterfaces(t *testing.T) {
+	backend := &cancelAwareBackend{NoOpBackend: NewNoOpBackend("owner", "repo")}
+	model := NewMaestroModel(&MaestroConfig{}, backend)
+	info := model.renderInfoSection()
+	if info == "" {
+		t.Fatal("renderInfoSection() = empty, want fallback content")
+	}
+	if !containsAll(info, "Maestro coding agent") {
+		t.Fatalf("renderInfoSection() = %q, want fallback model label", info)
+	}
+}
+
+func containsAll(haystack string, needles ...string) bool {
+	for _, needle := range needles {
+		if !strings.Contains(haystack, needle) {
+			return false
+		}
+	}
+	return true
 }
 
 func TestPlanInputModeLayoutDropsChromeOnShortPane(t *testing.T) {

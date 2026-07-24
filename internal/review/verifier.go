@@ -199,10 +199,10 @@ func (a *PRReviewAgent) verifyReviewComments(ctx context.Context, comments []PRR
 	verifyCtx, cancel := context.WithTimeout(ctx, reviewVerificationTimeoutFor(len(candidates)))
 	defer cancel()
 
-	var result map[string]interface{}
+	var execution agents.AgentExecutionResult
 	err = console.WithSpinner(verifyCtx, "Verifying merged findings against repository", func() error {
 		var execErr error
-		result, execErr = verifier.Execute(verifyCtx, map[string]interface{}{
+		execution, execErr = verifier.ExecuteWithTrace(verifyCtx, map[string]interface{}{
 			"task": taskPrompt,
 		})
 		return execErr
@@ -211,11 +211,10 @@ func (a *PRReviewAgent) verifyReviewComments(ctx context.Context, comments []PRR
 		return comments, nil, err
 	}
 
+	result := execution.Output
 	raw := strings.TrimSpace(reviewStringValue(result["final_answer"]))
-	if raw == "" {
-		if trace := verifier.LastExecutionTrace(); trace != nil {
-			raw = strings.TrimSpace(reviewStringValue(trace.Output["final_answer"]))
-		}
+	if raw == "" && execution.Trace != nil {
+		raw = strings.TrimSpace(reviewStringValue(execution.Trace.Output["final_answer"]))
 	}
 	if raw == "" {
 		if execErr := strings.TrimSpace(reviewStringValue(result["error"])); execErr != "" {

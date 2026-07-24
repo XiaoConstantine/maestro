@@ -26,12 +26,6 @@ type MaestroBackend interface {
 	// GetRepoInfo returns information about the current repository.
 	GetRepoInfo() RepoInfo
 
-	// GetWorkspace returns the authoritative coding workspace path.
-	GetWorkspace() string
-
-	// GetModelInfo returns the active provider/model label for coding.
-	GetModelInfo() string
-
 	// IsReady returns true if the backend is initialized and ready.
 	IsReady() bool
 
@@ -81,6 +75,14 @@ type MaestroConfig struct {
 }
 
 // NoOpBackend is a placeholder backend for testing.
+type workspaceInfoProvider interface {
+	GetWorkspace() string
+}
+
+type modelInfoProvider interface {
+	GetModelInfo() string
+}
+
 type NoOpBackend struct {
 	repoInfo RepoInfo
 }
