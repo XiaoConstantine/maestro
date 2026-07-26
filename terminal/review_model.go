@@ -169,16 +169,16 @@ func createCrushReviewStyles(theme *Theme) *ReviewStyles {
 			Foreground(theme.TextPrimary),
 
 		CommentHighlight: lipgloss.NewStyle().
-			Background(lipgloss.Color("#3A3C55")).
+			Background(theme.Surface).
 			Foreground(theme.TextPrimary).
 			Bold(true),
 
 		// Severity - simple colored dots
 		SeverityCritical: lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#FF6B6B")),
+			Foreground(theme.LogoPrimary),
 
 		SeverityWarning: lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#FFD93D")),
+			Foreground(theme.Secondary),
 
 		SeveritySuggestion: lipgloss.NewStyle().
 			Foreground(theme.StatusHighlight),
@@ -197,10 +197,10 @@ func createCrushReviewStyles(theme *Theme) *ReviewStyles {
 			Padding(0, 1),
 
 		DiffAdded: lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#7FE9DE")),
+			Foreground(theme.String),
 
 		DiffRemoved: lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#FF6B6B")),
+			Foreground(theme.LogoPrimary),
 
 		Suggestion: lipgloss.NewStyle().
 			Foreground(theme.StatusHighlight).
@@ -696,11 +696,7 @@ func (m *ReviewModel) renderList() string {
 		// Style based on whether file header is selected
 		var fileHeader string
 		if isFileSelected {
-			fileHeader = lipgloss.NewStyle().
-				Background(lipgloss.Color("#3A3C55")).
-				Foreground(m.theme.TextPrimary).
-				Bold(true).
-				Render(arrow + fileName + " " + countStr)
+			fileHeader = m.styles.CommentHighlight.Render(arrow + fileName + " " + countStr)
 		} else {
 			fileHeader = lipgloss.NewStyle().
 				Foreground(m.theme.TextMuted).
@@ -1062,7 +1058,7 @@ func wrapText(text string, width int) []string {
 
 // RunReviewTUI launches the interactive review TUI.
 func RunReviewTUI(comments []ReviewComment, onPost func([]ReviewComment) error) error {
-	theme := ClaudeCodeTheme()
+	theme := ResolveTheme(false)
 	model := NewReviewModel(comments, theme)
 	model.SetOnPost(onPost)
 

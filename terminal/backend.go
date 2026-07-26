@@ -82,6 +82,8 @@ type MaestroConfig struct {
 	Verbose       bool
 	IndexWorkers  int
 	ReviewWorkers int
+	HighContrast  bool
+	ReduceMotion  bool
 }
 
 // NoOpBackend is a placeholder backend for testing.

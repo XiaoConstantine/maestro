@@ -57,7 +57,7 @@ func (t *Theme) CreateComponentStyles() *ComponentStyles {
 			PaddingLeft(1),
 
 		FileSelected: lipgloss.NewStyle().
-			Background(lipgloss.Color("#3A3C55")).
+			Background(t.Surface).
 			Foreground(t.Accent).
 			Bold(true),
 
@@ -90,7 +90,7 @@ func (t *Theme) CreateComponentStyles() *ComponentStyles {
 			Bold(true),
 
 		TodoCompleted: lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#7FE9DE")).
+			Foreground(t.String).
 			Strikethrough(true),
 
 		TodoCheckbox: lipgloss.NewStyle().

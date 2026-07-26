@@ -206,7 +206,7 @@ func (m *ToolActivityModel) renderRun(entry ToolActivityEntry, width int) string
 		color = m.theme.TextMuted
 	default:
 		icon = "✗"
-		color = lipgloss.Color("#FF6B6B")
+		color = m.theme.LogoPrimary
 	}
 	text := fmt.Sprintf("%s run %s · %d turns · %d tools", icon, entry.Status, entry.Turn, entry.ToolCalls)
 	if entry.Detail != "" {
@@ -227,11 +227,11 @@ func (m *ToolActivityModel) renderTool(entry ToolActivityEntry, width int, selec
 			color = m.theme.Secondary
 		case "rejected":
 			icon = "✗"
-			color = lipgloss.Color("#FF6B6B")
+			color = m.theme.LogoPrimary
 		default:
 			if entry.Status != "completed" && entry.Status != "succeeded" {
 				icon = "✗"
-				color = lipgloss.Color("#FF6B6B")
+				color = m.theme.LogoPrimary
 			}
 		}
 	}

@@ -9,6 +9,9 @@ import (
 )
 
 func TestRenderAssistantMessageRendersMarkdown(t *testing.T) {
+	t.Setenv("NO_COLOR", "")
+	t.Setenv("MAESTRO_THEME", "")
+	t.Setenv("MAESTRO_REDUCE_MOTION", "")
 	model := NewMaestroModel(&MaestroConfig{}, NewNoOpBackend("owner", "repo"))
 	message := Message{Content: "# Result\n\nUse **care** and `go test`."}
 

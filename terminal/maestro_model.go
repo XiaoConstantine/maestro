@@ -119,7 +119,7 @@ type SessionMutationMsg struct {
 
 // NewMaestroModel creates a new root TUI model.
 func NewMaestroModel(cfg *MaestroConfig, backend MaestroBackend) *MaestroModel {
-	theme := ClaudeCodeTheme()
+	theme := ResolveTheme(cfg != nil && cfg.HighContrast)
 	styles := theme.CreateStyles()
 
 	vp := viewport.New()
@@ -150,6 +150,11 @@ func NewMaestroModel(cfg *MaestroConfig, backend MaestroBackend) *MaestroModel {
 
 	// Create input model and hide optional capabilities the backend does not expose.
 	m.inputModel = NewInputModel(theme, m.handleCommand, m.handleQuestion)
+	reduceMotion := cfg != nil && cfg.ReduceMotion
+	if value := strings.TrimSpace(os.Getenv("MAESTRO_REDUCE_MOTION")); value != "" && value != "0" {
+		reduceMotion = true
+	}
+	m.progressModel.SetReducedMotion(reduceMotion)
 	if _, ok := backend.(modelSelectionProvider); !ok {
 		m.inputModel.removeCommand("model")
 		m.commandPalette.removeCommand("model")
@@ -1495,11 +1500,11 @@ func (m *MaestroModel) renderMessages() {
 		case "system":
 			// System messages: warning style
 			icon := lipgloss.NewStyle().
-				Foreground(lipgloss.Color("#FF6B6B")).
+				Foreground(m.theme.LogoPrimary).
 				Bold(true).
 				Render("⚠ ")
 			content := lipgloss.NewStyle().
-				Foreground(lipgloss.Color("#FF6B6B")).
+				Foreground(m.theme.LogoPrimary).
 				Render(msg.Content)
 			sb.WriteString(icon + content)
 		}

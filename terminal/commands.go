@@ -234,7 +234,7 @@ func (cp *CommandPaletteModel) renderCommandItem(cmd Command, selected bool) str
 
 	if selected {
 		style = lipgloss.NewStyle().
-			Background(lipgloss.Color("#3A3C55")).
+			Background(cp.theme.Surface).
 			Foreground(cp.theme.Accent).
 			Bold(true)
 	} else {

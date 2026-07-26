@@ -1,11 +1,14 @@
 package terminal
 
 import (
+	"fmt"
+	"image/color"
 	"strings"
 
 	"charm.land/glamour/v2"
 	glamouransi "charm.land/glamour/v2/ansi"
 	glamourstyles "charm.land/glamour/v2/styles"
+	"charm.land/lipgloss/v2"
 )
 
 func messageWidthBucket(width int) int {
@@ -23,7 +26,7 @@ func (m *MaestroModel) renderAssistantMessage(message *Message, width int) strin
 	}
 
 	message.renderCount++
-	styles := maestroMarkdownStyles()
+	styles := maestroMarkdownStyles(m.theme)
 	renderer, err := glamour.NewTermRenderer(
 		glamour.WithStyles(styles),
 		glamour.WithWordWrap(bucket),
@@ -44,12 +47,18 @@ func (m *MaestroModel) renderAssistantMessage(message *Message, width int) strin
 	return message.Rendered
 }
 
-func maestroMarkdownStyles() glamouransi.StyleConfig {
-	styles := glamourstyles.DarkStyleConfig
+func maestroMarkdownStyles(theme *Theme) glamouransi.StyleConfig {
 	zero := uint(0)
+	if _, noColor := theme.TextPrimary.(lipgloss.NoColor); noColor {
+		styles := glamourstyles.NoTTYStyleConfig
+		styles.Document.Margin = &zero
+		styles.CodeBlock.Margin = &zero
+		return styles
+	}
+	styles := glamourstyles.DarkStyleConfig
 	styles.Document.Margin = &zero
-	styles.Document.Color = stringPointer("#E8E9F3")
-	styles.Heading.Color = stringPointer("#E8985A")
+	styles.Document.Color = markdownColor(theme.TextPrimary)
+	styles.Heading.Color = markdownColor(theme.LogoPrimary)
 	for _, heading := range []*glamouransi.StyleBlock{
 		&styles.H1,
 		&styles.H2,
@@ -58,28 +67,30 @@ func maestroMarkdownStyles() glamouransi.StyleConfig {
 		&styles.H5,
 		&styles.H6,
 	} {
-		heading.Color = stringPointer("#E8985A")
+		heading.Color = markdownColor(theme.LogoPrimary)
 		heading.BackgroundColor = nil
 	}
-	styles.Link.Color = stringPointer("#00D9FF")
-	styles.LinkText.Color = stringPointer("#00D9FF")
-	styles.Code.Color = stringPointer("#D4D4E5")
-	styles.Code.BackgroundColor = stringPointer("#2B2D42")
+	styles.Link.Color = markdownColor(theme.Accent)
+	styles.LinkText.Color = markdownColor(theme.Accent)
+	styles.Code.Color = markdownColor(theme.Code)
+	styles.Code.BackgroundColor = markdownColor(theme.Surface)
 	styles.CodeBlock.Margin = &zero
-	styles.CodeBlock.Color = stringPointer("#D4D4E5")
+	styles.CodeBlock.Color = markdownColor(theme.Code)
 	if styles.CodeBlock.Chroma != nil {
 		chroma := *styles.CodeBlock.Chroma
 		styles.CodeBlock.Chroma = &chroma
-		styles.CodeBlock.Chroma.Text.Color = stringPointer("#D4D4E5")
-		styles.CodeBlock.Chroma.Comment.Color = stringPointer("#6B6B7E")
-		styles.CodeBlock.Chroma.Keyword.Color = stringPointer("#B185F7")
-		styles.CodeBlock.Chroma.KeywordReserved.Color = stringPointer("#B185F7")
-		styles.CodeBlock.Chroma.KeywordType.Color = stringPointer("#B185F7")
-		styles.CodeBlock.Chroma.LiteralString.Color = stringPointer("#7FE9DE")
+		styles.CodeBlock.Chroma.Text.Color = markdownColor(theme.Code)
+		styles.CodeBlock.Chroma.Comment.Color = markdownColor(theme.Comment)
+		styles.CodeBlock.Chroma.Keyword.Color = markdownColor(theme.Keyword)
+		styles.CodeBlock.Chroma.KeywordReserved.Color = markdownColor(theme.Keyword)
+		styles.CodeBlock.Chroma.KeywordType.Color = markdownColor(theme.Keyword)
+		styles.CodeBlock.Chroma.LiteralString.Color = markdownColor(theme.String)
 	}
 	return styles
 }
 
-func stringPointer(value string) *string {
-	return &value
+func markdownColor(value color.Color) *string {
+	r, g, b, _ := value.RGBA()
+	hex := fmt.Sprintf("#%02X%02X%02X", uint8(r>>8), uint8(g>>8), uint8(b>>8))
+	return &hex
 }

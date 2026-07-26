@@ -112,6 +112,8 @@ type config struct {
 	verbose                bool
 	verifyOnly             bool
 	allowCodingBash        bool
+	highContrast           bool
+	reduceMotion           bool
 	modelProvider          string
 	modelName              string
 	modelConfig            string // For additional model-specific configuration
@@ -219,6 +221,12 @@ Available slash commands in interactive mode:
   /ask <QUESTION>         - Ask a question about the repository
   /exit or /quit          - Exit the application`,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if cfg.highContrast {
+				_ = os.Setenv("MAESTRO_THEME", "high-contrast")
+			}
+			if cfg.reduceMotion {
+				_ = os.Setenv("MAESTRO_REDUCE_MOTION", "1")
+			}
 			if cmd.Flags().Changed("model") {
 				modelStr, _ := cmd.Flags().GetString("model")
 				provider, name, modelCfg := util.ParseModelString(modelStr)
@@ -253,6 +261,8 @@ Available slash commands in interactive mode:
 	rootCmd.PersistentFlags().BoolVar(&cfg.verbose, "verbose", false, "Enable verbose logging")
 	rootCmd.PersistentFlags().BoolVar(&cfg.verifyOnly, "verify-only", false, "Only verify token permissions")
 	rootCmd.PersistentFlags().BoolVar(&cfg.allowCodingBash, "allow-coding-bash", false, "Allow the coding agent to run unrestricted shell commands in the workspace")
+	rootCmd.PersistentFlags().BoolVar(&cfg.highContrast, "high-contrast", false, "Use the high-contrast TUI theme")
+	rootCmd.PersistentFlags().BoolVar(&cfg.reduceMotion, "reduce-motion", false, "Replace TUI animation with static status indicators")
 
 	rootCmd.PersistentFlags().BoolP("interactive", "i", false, "Run in interactive mode")
 
@@ -957,6 +967,8 @@ func runModernUI(cfg *config) error {
 		Verbose:       cfg.verbose,
 		IndexWorkers:  cfg.indexWorkers,
 		ReviewWorkers: cfg.reviewWorkers,
+		HighContrast:  cfg.highContrast,
+		ReduceMotion:  cfg.reduceMotion,
 	}
 
 	// Create service adapter for TUI

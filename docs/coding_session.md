@@ -61,6 +61,8 @@ Inspect the failing tests, implement the smallest fix, and run the focused tests
 
 In interactive mode, the workspace is the current working directory you launched Maestro from. The responsive header labels that workspace and the active provider/model; coding tools and any file-tree view should all refer to the same root.
 
+For accessible presentation, use `--high-contrast` (or `MAESTRO_THEME=high-contrast`) for stronger text and border contrast, and `--reduce-motion` (or `MAESTRO_REDUCE_MOTION=1`) for static progress indicators. `NO_COLOR` independently removes colors while preserving labels, severity shapes, emphasis, and layout; it does not imply reduced motion.
+
 Prompt controls:
 
 - **Enter** runs the current task.

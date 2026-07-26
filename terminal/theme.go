@@ -2,6 +2,8 @@ package terminal
 
 import (
 	"image/color"
+	"os"
+	"strings"
 
 	"charm.land/lipgloss/v2"
 )
@@ -69,6 +71,42 @@ func ClaudeCodeTheme() *Theme {
 		Comment: lipgloss.Color("#6B6B7E"), // Same as muted text
 		String:  lipgloss.Color("#7FE9DE"), // Cyan-green for strings
 		Keyword: lipgloss.Color("#B185F7"), // Light purple for keywords
+	}
+}
+
+// ResolveTheme selects the configured/environment theme for any TUI host.
+func ResolveTheme(highContrast bool) *Theme {
+	theme := ClaudeCodeTheme()
+	if highContrast || strings.EqualFold(strings.TrimSpace(os.Getenv("MAESTRO_THEME")), "high-contrast") {
+		theme = HighContrastTheme()
+	}
+	if os.Getenv("NO_COLOR") != "" {
+		theme = NoColorTheme()
+	}
+	return theme
+}
+
+// HighContrastTheme returns Maestro's palette with stronger muted text and borders.
+func HighContrastTheme() *Theme {
+	theme := ClaudeCodeTheme()
+	theme.Surface = lipgloss.Color("#343653")
+	theme.TextSecondary = lipgloss.Color("#C8C9D6")
+	theme.TextMuted = lipgloss.Color("#A0A2B5")
+	theme.Comment = theme.TextMuted
+	theme.Border = lipgloss.Color("#737691")
+	return theme
+}
+
+// NoColorTheme removes color while preserving shape, spacing, and emphasis.
+func NoColorTheme() *Theme {
+	none := lipgloss.NoColor{}
+	return &Theme{
+		Background: none, Surface: none,
+		TextPrimary: none, TextSecondary: none, TextMuted: none,
+		Accent: none, Secondary: none, Border: none, Cursor: none,
+		LogoPrimary: none, LogoSecondary: none, LogoField: none,
+		StatusHighlight: none,
+		Code:            none, Comment: none, String: none, Keyword: none,
 	}
 }
 

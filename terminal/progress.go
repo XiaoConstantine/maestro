@@ -22,17 +22,18 @@ const (
 
 // ProgressModel displays agent progress with Crush-style animation.
 type ProgressModel struct {
-	width    int
-	theme    *Theme
-	state    ProgressState
-	message  string
-	detail   string
-	elapsed  time.Duration
-	start    time.Time
-	frame    int
-	id       int
-	visible  bool
-	spinning bool
+	width         int
+	theme         *Theme
+	state         ProgressState
+	message       string
+	detail        string
+	elapsed       time.Duration
+	start         time.Time
+	frame         int
+	id            int
+	visible       bool
+	spinning      bool
+	reducedMotion bool
 }
 
 // ProgressTickMsg triggers animation updates.
@@ -103,11 +104,12 @@ func (p *ProgressModel) View() string {
 
 // renderWorking renders the working state with animation.
 func (p *ProgressModel) renderWorking() string {
-	// Crush-style animated spinner using cycling characters
-	spinnerChars := []rune("⣾⣽⣻⢿⡿⣟⣯⣷")
-	spinnerFrame := spinnerChars[p.frame%len(spinnerChars)]
+	spinnerText := "[working]"
+	if !p.reducedMotion {
+		spinnerChars := []rune("⣾⣽⣻⢿⡿⣟⣯⣷")
+		spinnerText = string(spinnerChars[p.frame%len(spinnerChars)])
+	}
 
-	// Coral/orange color for spinner (matching logo)
 	spinnerStyle := lipgloss.NewStyle().
 		Foreground(p.theme.StatusHighlight)
 
@@ -121,7 +123,7 @@ func (p *ProgressModel) renderWorking() string {
 		Foreground(p.theme.TextMuted)
 
 	parts := []string{
-		spinnerStyle.Render(string(spinnerFrame)),
+		spinnerStyle.Render(spinnerText),
 		" ",
 		msgStyle.Render(p.message),
 	}
@@ -162,11 +164,11 @@ func (p *ProgressModel) renderComplete() string {
 // renderError renders the error state.
 func (p *ProgressModel) renderError() string {
 	icon := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#FF6B6B")).
+		Foreground(p.theme.LogoPrimary).
 		Render("✗")
 
 	msg := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#FF6B6B")).
+		Foreground(p.theme.LogoPrimary).
 		Render(p.message)
 
 	return icon + " " + msg
@@ -174,12 +176,21 @@ func (p *ProgressModel) renderError() string {
 
 // tick returns a command to trigger the next animation frame.
 func (p *ProgressModel) tick() tea.Cmd {
-	return tea.Tick(100*time.Millisecond, func(t time.Time) tea.Msg {
+	interval := 100 * time.Millisecond
+	if p.reducedMotion {
+		interval = time.Second
+	}
+	return tea.Tick(interval, func(t time.Time) tea.Msg {
 		return ProgressTickMsg{id: p.id}
 	})
 }
 
 // Public methods for controlling progress
+
+// SetReducedMotion replaces animation with a static working label.
+func (p *ProgressModel) SetReducedMotion(reduced bool) {
+	p.reducedMotion = reduced
+}
 
 // Start begins showing progress with the given message.
 func (p *ProgressModel) Start(message string) tea.Cmd {
