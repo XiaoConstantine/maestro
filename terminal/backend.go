@@ -93,6 +93,17 @@ type modelInfoProvider interface {
 	GetModelInfo() string
 }
 
+type ModelOption struct {
+	ID          string
+	Description string
+	Current     bool
+}
+
+type modelSelectionProvider interface {
+	ListModels(context.Context) ([]ModelOption, error)
+	SetModel(context.Context, string) error
+}
+
 type NoOpBackend struct {
 	repoInfo RepoInfo
 }

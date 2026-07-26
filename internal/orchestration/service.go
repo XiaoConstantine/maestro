@@ -601,14 +601,25 @@ func (s *MaestroService) handleAsk(ctx context.Context, request Request) (*Respo
 }
 
 func (s *MaestroService) handleClaude(ctx context.Context, request Request) (*Response, error) {
-	return s.executeSubagentTool(ctx, s.claudeTool, RequestClaude, "claude", request)
+	tool, session := s.subagentSnapshot(true)
+	return s.executeSubagentTool(ctx, tool, session, RequestClaude, "claude", request)
 }
 
 func (s *MaestroService) handleGemini(ctx context.Context, request Request) (*Response, error) {
-	return s.executeSubagentTool(ctx, s.geminiTool, RequestGemini, "gemini", request)
+	tool, session := s.subagentSnapshot(false)
+	return s.executeSubagentTool(ctx, tool, session, RequestGemini, "gemini", request)
 }
 
-func (s *MaestroService) executeSubagentTool(ctx context.Context, tool core.Tool, responseType RequestType, subagentName string, request Request) (*Response, error) {
+func (s *MaestroService) subagentSnapshot(claude bool) (core.Tool, string) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if claude {
+		return s.claudeTool, s.currentSession
+	}
+	return s.geminiTool, s.currentSession
+}
+
+func (s *MaestroService) executeSubagentTool(ctx context.Context, tool core.Tool, session string, responseType RequestType, subagentName string, request Request) (*Response, error) {
 	if tool == nil {
 		return nil, fmt.Errorf("%s subagent not initialized", subagentName)
 	}
@@ -628,7 +639,7 @@ func (s *MaestroService) executeSubagentTool(ctx context.Context, tool core.Tool
 		TaskID:          taskID,
 		ParentAgentID:   "maestro-service",
 		ParentAgentType: "maestro-service",
-		SessionID:       s.currentSession,
+		SessionID:       session,
 		Input:           maps.Clone(taskContext),
 	}
 	result, err := tool.Execute(dspysubagent.WithParentContext(ctx, parent), taskContext)

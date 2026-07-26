@@ -38,7 +38,9 @@ The coding agent receives explicit provider/model/workspace instructions and evi
 
 One run may mutate a session at a time. Overlapping prompts are rejected. Press **Esc** to cancel the active coding run. Run, turn, and tool lifecycle events update the current-step spinner and a durable activity block anchored between the submitted task and final response. The block retains turn boundaries, matched tool start/finish state, elapsed tool time, and final turn/tool counts after completion. On panes at least 80 columns wide, active tool/review context can occupy a right rail; narrower panes keep the activity inline. Once shown, the rail request survives responsive narrowing and can be dismissed or restored with **Ctrl+\\** without losing evidence. Tab focuses available transcript regions; while tool activity is focused, Up/Down navigates and Enter or Space expands the selected result detail. Assistant responses render as width-aware Markdown with Maestro-themed code highlighting; rendered blocks are cached by width bucket so progress ticks and small resizes do not repeatedly parse unchanged messages. The contextual status bar keeps cancellation and navigation actions visible without overwhelming narrow terminals. Output and accounting use the operation-scoped `ExecutionTrace` returned by `ExecuteWithTrace`, avoiding races against a mutable last-trace accessor.
 
-The active Maestro session name selects the native session id, so switching or creating a session selects separate persisted coding history.
+The active Maestro session name selects the native session id, so switching or creating a session selects separate persisted coding history. Session selection is presented as an overlay rather than transcript content. Session mutation is rejected during active coding, `/ask`/review/subagent work, or another pending model/session change; after confirmed success, Maestro clears the previous session's visible messages, activity, and review state before identifying the new session. The header always identifies the workspace, active model, and session.
+
+Backends may implement the small model-selection capability to expose configured model choices through **Ctrl+M** or `/model`; unsupported backends do not advertise either entry point. The picker can be browsed during a run, but selection is atomically reserved and rejected until the run is idle. Run admission waits for a pending model change, and correlated completion prevents a stale result from closing newer UI state. A successful choice applies to the next run and does not silently restart or rewrite the active session.
 
 ## Running
 
@@ -65,6 +67,7 @@ Prompt controls:
 - **Ctrl+J** inserts a newline without submitting. The composer grows to at most 30% of terminal height or 10 rows and displays multiline size metadata.
 - **/** displays matching slash commands inline.
 - **Ctrl+P** opens the searchable command palette.
+- **Ctrl+M** or **/model** opens model selection when the backend exposes configured choices.
 - **Up/Down** navigates command suggestions or prompt history.
 - **Tab** accepts a visible command suggestion first; otherwise it cycles the composer and available tool/review transcript regions.
 - **Ctrl+\\** toggles the responsive context rail when run or review context exists.
@@ -82,4 +85,4 @@ go run ./cmd/maestro-probe \
 
 ## Current boundary
 
-This slice establishes the coding-session execution spine. Tau-level steering/follow-up queues, compaction, session-tree transcript rendering, project instruction discovery, skill/prompt pickers, model switching, and token-delta streaming remain follow-up frontend/session features. They should be added above `dspy-go`'s canonical contracts rather than by creating another execution loop.
+This slice establishes the coding-session execution spine. Tau-level steering/follow-up queues, compaction, session-tree transcript rendering, project instruction discovery, skill/prompt pickers, production model-catalog wiring, and token-delta streaming remain follow-up frontend/session features. They should be added above `dspy-go`'s canonical contracts rather than by creating another execution loop.

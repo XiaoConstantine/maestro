@@ -480,6 +480,17 @@ func (m *InputModel) addToHistory(value string) {
 	m.historyIndex = -1
 }
 
+func (m *InputModel) removeCommand(name string) {
+	commands := m.allCommands[:0]
+	for _, command := range m.allCommands {
+		if command.Name != name {
+			commands = append(commands, command)
+		}
+	}
+	m.allCommands = commands
+	m.updateSuggestions()
+}
+
 // GetHistory returns the command history.
 func (m *InputModel) GetHistory() []string {
 	return m.history

@@ -9,6 +9,8 @@ const (
 	// ModeSessionPicker selects a persisted coding session. Its historical value
 	// is retained for compatibility with any persisted or external state.
 	ModeSessionPicker MaestroMode = 3
+	// ModeModelPicker selects the model used by the next coding run.
+	ModeModelPicker MaestroMode = 4
 )
 
 // InputFocus identifies the active region within the primary surface.
@@ -30,6 +32,8 @@ func (m MaestroMode) String() string {
 		return "INPUT"
 	case ModeSessionPicker:
 		return "SESSION"
+	case ModeModelPicker:
+		return "MODEL"
 	default:
 		return "UNKNOWN"
 	}

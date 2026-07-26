@@ -8,7 +8,204 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 )
+
+type modelPickerBackend struct {
+	*NoOpBackend
+	models   []ModelOption
+	selected string
+}
+
+func (b *modelPickerBackend) ListModels(context.Context) ([]ModelOption, error) {
+	return append([]ModelOption(nil), b.models...), nil
+}
+
+func (b *modelPickerBackend) SetModel(_ context.Context, id string) error {
+	b.selected = id
+	return nil
+}
+
+func TestModelPickerSelectsNextRunModel(t *testing.T) {
+	backend := &modelPickerBackend{
+		NoOpBackend: NewNoOpBackend("owner", "repo"),
+		models: []ModelOption{
+			{ID: "google:gemini-3-flash", Current: true},
+			{ID: "openai-codex:gpt-5.4"},
+		},
+	}
+	model := NewMaestroModel(&MaestroConfig{}, backend)
+	_, cmd := model.Update(tea.KeyPressMsg{Code: 'm', Mod: tea.ModCtrl})
+	if cmd == nil {
+		t.Fatal("Ctrl+M command = nil")
+	}
+	_, _ = model.Update(cmd())
+	if model.mode != ModeModelPicker || model.modelPickerIdx != 0 {
+		t.Fatalf("model picker state = mode:%v index:%d", model.mode, model.modelPickerIdx)
+	}
+	_, _ = model.Update(tea.KeyPressMsg{Code: tea.KeyDown})
+	_, selectCmd := model.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if selectCmd == nil {
+		t.Fatal("model select command = nil")
+	}
+	_, _ = model.Update(selectCmd())
+	if backend.selected != "openai-codex:gpt-5.4" || model.mode != ModeInput {
+		t.Fatalf("selected = %q mode = %v", backend.selected, model.mode)
+	}
+}
+
+func TestModelSelectionReservationBlocksRunsAndStaleResults(t *testing.T) {
+	backend := &modelPickerBackend{NoOpBackend: NewNoOpBackend("owner", "repo"), models: []ModelOption{{ID: "model-a"}}}
+	model := NewMaestroModel(&MaestroConfig{}, backend)
+	_, _ = model.Update(ModelPickerMsg{Models: backend.models})
+	_, selectCmd := model.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	requestID := model.pickerRequestID
+	if !model.modelSelectionPending || selectCmd == nil {
+		t.Fatal("model selection was not reserved")
+	}
+	if _, accepted := model.handleQuestion("run too soon"); accepted {
+		t.Fatal("coding run admitted during pending model selection")
+	}
+	_, _ = model.Update(ModelSelectedMsg{RequestID: requestID + 1, ID: "stale"})
+	if !model.modelSelectionPending || model.mode != ModeModelPicker {
+		t.Fatal("stale model result mutated pending picker")
+	}
+	_, _ = model.Update(selectCmd())
+	if model.modelSelectionPending || backend.selected != "model-a" {
+		t.Fatalf("selection completion = pending:%v selected:%q", model.modelSelectionPending, backend.selected)
+	}
+}
+
+func TestModelPickerRejectsSelectionDuringActiveRun(t *testing.T) {
+	backend := &modelPickerBackend{NoOpBackend: NewNoOpBackend("owner", "repo"), models: []ModelOption{{ID: "model-a"}}}
+	model := NewMaestroModel(&MaestroConfig{}, backend)
+	_, _ = model.Update(ModelPickerMsg{Models: backend.models})
+	model.codingRunActive = true
+
+	_, cmd := model.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatal("active-run model selection command = nil")
+	}
+	if _, ok := cmd().(ErrorMsg); !ok || backend.selected != "" {
+		t.Fatalf("active-run selection changed model to %q", backend.selected)
+	}
+}
+
+func TestPickerLoadResponsesAreCorrelatedAndDismissible(t *testing.T) {
+	backend := &modelPickerBackend{NoOpBackend: NewNoOpBackend("owner", "repo"), models: []ModelOption{{ID: "new"}}}
+	model := NewMaestroModel(&MaestroConfig{}, backend)
+	model.pickerLoadID = 2
+	_, _ = model.Update(ModelPickerMsg{RequestID: 1, Models: []ModelOption{{ID: "old"}}})
+	if model.mode != ModeInput {
+		t.Fatal("stale picker response opened overlay")
+	}
+	_, _ = model.Update(ModelPickerMsg{RequestID: 2, Models: backend.models})
+	if model.mode != ModeModelPicker || model.modelPickerModels[0].ID != "new" {
+		t.Fatal("current picker response was not applied")
+	}
+	_, _ = model.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+	requestID := model.pickerLoadID
+	_, _ = model.Update(ModelPickerMsg{RequestID: requestID - 1, Models: []ModelOption{{ID: "late"}}})
+	if model.mode != ModeInput {
+		t.Fatal("dismissed picker reopened from late response")
+	}
+}
+
+func TestSessionLoadOutcomesRespectGeneration(t *testing.T) {
+	model := NewMaestroModel(&MaestroConfig{}, NewNoOpBackend("owner", "repo"))
+	model.pickerLoadID = 2
+	_ = model.progressModel.Start("newer load")
+	_, _ = model.Update(SessionPickerMsg{RequestID: 1, Error: fmt.Errorf("stale")})
+	if !model.progressModel.IsVisible() {
+		t.Fatal("stale session error cleared newer progress")
+	}
+	_, _ = model.Update(SessionPickerMsg{RequestID: 2})
+	if !model.progressModel.IsVisible() || !strings.Contains(model.messages[len(model.messages)-1].Content, "No sessions") {
+		t.Fatal("accepted empty session result disturbed unrelated progress or omitted its message")
+	}
+}
+
+func TestPickerIsModalAndLongListKeepsSelectionVisible(t *testing.T) {
+	backend := &modelPickerBackend{NoOpBackend: NewNoOpBackend("owner", "repo")}
+	for i := 0; i < 20; i++ {
+		backend.models = append(backend.models, ModelOption{ID: fmt.Sprintf("model-%02d", i)})
+	}
+	model := NewMaestroModel(&MaestroConfig{}, backend)
+	model.width, model.height = 60, 12
+	_, _ = model.Update(ModelPickerMsg{Models: backend.models})
+	model.modelPickerIdx = 19
+	model.inputModel.SetValue("draft")
+	model.railVisible = true
+	railBefore := model.railVisible
+	focusBefore := model.inputFocus
+	_, _ = model.Update(tea.KeyPressMsg{Code: 'p', Mod: tea.ModCtrl})
+	_, _ = model.Update(tea.KeyPressMsg{Code: '\\', Mod: tea.ModCtrl})
+	_, _ = model.Update(tea.KeyPressMsg{Code: tea.KeyTab})
+	_, _ = model.Update(tea.KeyPressMsg{Code: 'x'})
+	if model.commandPalette.IsVisible() || model.inputModel.Value() != "draft" || model.railVisible != railBefore || model.inputFocus != focusBefore {
+		t.Fatal("picker allowed hidden command/input routing")
+	}
+	view := ansi.Strip(model.renderModelPicker())
+	if !strings.Contains(view, "model-19") || strings.Contains(view, "model-00") {
+		t.Fatalf("long picker window = %q", view)
+	}
+}
+
+func TestUnsupportedModelCapabilityIsNotAdvertised(t *testing.T) {
+	model := NewMaestroModel(&MaestroConfig{}, NewNoOpBackend("owner", "repo"))
+	for _, command := range model.inputModel.allCommands {
+		if command.Name == "model" {
+			t.Fatal("unsupported model command advertised in composer")
+		}
+	}
+	for _, command := range model.commandPalette.commands {
+		if command.Name == "model" {
+			t.Fatal("unsupported model command advertised in palette")
+		}
+	}
+}
+
+func TestSessionMutationRequiresIdleRunAndResetsVisibleState(t *testing.T) {
+	model := NewMaestroModel(&MaestroConfig{}, NewNoOpBackend("owner", "repo"))
+	model.codingRunActive = true
+	cmd := model.handleCommand("session", []string{"switch", "other"})
+	if _, ok := cmd().(ErrorMsg); !ok || model.sessionMutationPending {
+		t.Fatal("session switch admitted during coding run")
+	}
+
+	model.codingRunActive = false
+	model.specialistRuns = 1
+	if _, err := model.reserveSessionMutation(); err == nil {
+		t.Fatal("session mutation admitted during specialist run")
+	}
+	model.specialistRuns = 0
+	requestID, err := model.reserveSessionMutation()
+	if err != nil {
+		t.Fatalf("reserveSessionMutation() error = %v", err)
+	}
+	model.messages = []Message{{Role: "user", Content: "old"}}
+	model.toolActivity.Apply(CodingEvent{Kind: "tool", Tool: "read", Status: "completed"})
+	model.reviewResults = []ReviewComment{{FilePath: "old.go"}}
+	_, _ = model.Update(SessionMutationMsg{RequestID: requestID, Name: "other"})
+	if model.sessionMutationPending || model.toolActivity.HasEntries() || len(model.reviewResults) != 0 || len(model.messages) != 1 {
+		t.Fatalf("session reset = pending:%v tools:%v reviews:%d messages:%d", model.sessionMutationPending, model.toolActivity.HasEntries(), len(model.reviewResults), len(model.messages))
+	}
+	if !strings.Contains(model.messages[0].Content, "other") {
+		t.Fatalf("session confirmation = %q", model.messages[0].Content)
+	}
+}
+
+func TestSessionPickerIsOverlayNotTranscript(t *testing.T) {
+	model := NewMaestroModel(&MaestroConfig{}, NewNoOpBackend("owner", "repo"))
+	_, _ = model.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
+	_, _ = model.Update(SessionPickerMsg{Sessions: []SessionInfo{{Name: "other", CreatedAt: "today"}}})
+	if transcript := ansi.Strip(model.viewport.View()); strings.Contains(transcript, "other") {
+		t.Fatalf("session picker leaked into transcript: %q", transcript)
+	}
+	if view := ansi.Strip(model.View().Content); !strings.Contains(view, "other") {
+		t.Fatalf("session overlay missing from view: %q", view)
+	}
+}
 
 func TestSessionPickerModeRetainsHistoricalValue(t *testing.T) {
 	if ModeSessionPicker != MaestroMode(3) {

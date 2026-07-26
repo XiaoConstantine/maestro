@@ -471,6 +471,17 @@ func (cp *CommandPaletteModel) RegisterCommand(cmd Command) {
 	cp.commands = append(cp.commands, cmd)
 }
 
+func (cp *CommandPaletteModel) removeCommand(name string) {
+	commands := cp.commands[:0]
+	for _, command := range cp.commands {
+		if command.Name != name {
+			commands = append(commands, command)
+		}
+	}
+	cp.commands = commands
+	cp.filterCommands(cp.input.Value())
+}
+
 // CommandResultMsg is sent when a command completes.
 type CommandResultMsg struct {
 	Result string

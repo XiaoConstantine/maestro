@@ -48,9 +48,16 @@ type MaestroModel struct {
 	reviewModel   *ReviewModel
 	inputFocus    InputFocus
 
-	// Session picker state
-	sessionPickerSessions []SessionInfo
-	sessionPickerIdx      int
+	// Picker state
+	sessionPickerSessions  []SessionInfo
+	sessionPickerIdx       int
+	modelPickerModels      []ModelOption
+	modelPickerIdx         int
+	pickerRequestID        uint64
+	pickerLoadID           uint64
+	modelSelectionPending  bool
+	sessionMutationPending bool
+	specialistRuns         int
 
 	// Dimensions
 	width  int
@@ -84,6 +91,32 @@ type CodingEventMsg struct {
 	Event CodingEvent
 }
 
+type ModelPickerMsg struct {
+	RequestID uint64
+	Models    []ModelOption
+	Error     error
+}
+
+type ModelSelectedMsg struct {
+	RequestID uint64
+	ID        string
+	Error     error
+}
+
+type SpecialistResultMsg struct {
+	Content string
+	Error   error
+}
+
+type ReviewFailedMsg struct{ Error error }
+
+type SessionMutationMsg struct {
+	RequestID uint64
+	Name      string
+	Created   bool
+	Error     error
+}
+
 // NewMaestroModel creates a new root TUI model.
 func NewMaestroModel(cfg *MaestroConfig, backend MaestroBackend) *MaestroModel {
 	theme := ClaudeCodeTheme()
@@ -115,8 +148,12 @@ func NewMaestroModel(cfg *MaestroConfig, backend MaestroBackend) *MaestroModel {
 		ctx:            context.Background(),
 	}
 
-	// Create input model
+	// Create input model and hide optional capabilities the backend does not expose.
 	m.inputModel = NewInputModel(theme, m.handleCommand, m.handleQuestion)
+	if _, ok := backend.(modelSelectionProvider); !ok {
+		m.inputModel.removeCommand("model")
+		m.commandPalette.removeCommand("model")
+	}
 
 	// Set up status bar. Workspace and model details are rendered in the header.
 	m.statusBar.SetMode("INPUT")
@@ -180,19 +217,33 @@ func (m *MaestroModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case tea.KeyPressMsg:
+		if (m.mode == ModeSessionPicker || m.mode == ModeModelPicker) &&
+			(msg.String() == "tab" || msg.String() == "ctrl+\\") {
+			return m, nil
+		}
 		// Global key handling
 		switch msg.String() {
 		case "ctrl+c":
 			return m, tea.Quit
 
 		case "ctrl+p":
+			if m.mode == ModeSessionPicker || m.mode == ModeModelPicker {
+				return m, nil
+			}
 			// Toggle command palette
 			if m.commandPalette.IsVisible() {
 				m.commandPalette.Hide()
 			} else {
+				m.pickerLoadID++
 				m.commandPalette.Show()
 			}
 			return m, nil
+
+		case "ctrl+m":
+			if m.commandPalette.IsVisible() || m.mode == ModeSessionPicker || m.mode == ModeModelPicker {
+				return m, nil
+			}
+			return m, m.cmdModelList()
 
 		case "ctrl+\\":
 			if m.hasRailContent() {
@@ -203,7 +254,22 @@ func (m *MaestroModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 
 		case "esc":
-			// Handle escape based on current state
+			m.pickerLoadID++
+			// Overlays close before Esc is interpreted as run cancellation.
+			if m.commandPalette.IsVisible() {
+				m.commandPalette.Hide()
+				return m, nil
+			}
+			if m.mode == ModeSessionPicker || m.mode == ModeModelPicker {
+				m.mode = ModeInput
+				m.sessionPickerSessions = nil
+				m.sessionPickerIdx = 0
+				m.modelPickerModels = nil
+				m.modelPickerIdx = 0
+				m.statusBar.SetMode(ModeInput.String())
+				m.setInputFocus(FocusInput)
+				return m, nil
+			}
 			if m.codingRunActive {
 				if m.codingCancel != nil {
 					m.codingCancel()
@@ -213,19 +279,6 @@ func (m *MaestroModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				m.progressModel.SetMessage("Canceling…")
 				m.statusBar.SetMessage("Waiting for the active run to stop")
-				return m, nil
-			}
-			if m.commandPalette.IsVisible() {
-				m.commandPalette.Hide()
-				return m, nil
-			}
-			// Exit session picker
-			if m.mode == ModeSessionPicker {
-				m.mode = ModeInput
-				m.sessionPickerSessions = nil
-				m.sessionPickerIdx = 0
-				m.statusBar.SetMode(ModeInput.String())
-				m.setInputFocus(FocusInput)
 				return m, nil
 			}
 			// Close review detail view before dismissing all review results.
@@ -281,15 +334,36 @@ func (m *MaestroModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.renderMessages()
 				return m, nil
 			case "enter":
-				// Switch to selected session
+				if m.codingRunActive || m.sessionMutationPending || m.modelSelectionPending || m.specialistRuns > 0 {
+					return m, func() tea.Msg { return ErrorMsg{Error: fmt.Errorf("session changes require an idle coding session")} }
+				}
+				m.sessionMutationPending = true
+				requestID := m.nextPickerRequestID()
 				selected := m.sessionPickerSessions[m.sessionPickerIdx]
-				m.mode = ModeInput
-				m.sessionPickerSessions = nil
-				m.sessionPickerIdx = 0
-				m.statusBar.SetMode(ModeInput.String())
-				m.setInputFocus(FocusInput)
-				return m, m.cmdSessionSwitch(selected.Name)
+				return m, m.cmdSessionSwitch(selected.Name, requestID)
 			}
+		}
+
+		if m.mode == ModeModelPicker && len(m.modelPickerModels) > 0 {
+			switch msg.String() {
+			case "j", "down":
+				m.modelPickerIdx = (m.modelPickerIdx + 1) % len(m.modelPickerModels)
+				return m, nil
+			case "k", "up":
+				m.modelPickerIdx = (m.modelPickerIdx - 1 + len(m.modelPickerModels)) % len(m.modelPickerModels)
+				return m, nil
+			case "enter":
+				if m.codingRunActive || m.modelSelectionPending || m.sessionMutationPending || m.specialistRuns > 0 {
+					return m, func() tea.Msg { return ErrorMsg{Error: fmt.Errorf("model changes require an idle coding session")} }
+				}
+				m.modelSelectionPending = true
+				requestID := m.nextPickerRequestID()
+				return m, m.cmdModelSelect(m.modelPickerModels[m.modelPickerIdx].ID, requestID)
+			}
+		}
+
+		if m.mode == ModeSessionPicker || m.mode == ModeModelPicker {
+			return m, nil
 		}
 
 		if m.inputFocus == FocusToolActivity && m.toolActivity.HasTools() && !m.commandPalette.IsVisible() {
@@ -351,6 +425,17 @@ func (m *MaestroModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Insert command into the composer for the user to complete with args.
 		m.inputModel.SetValue(msg.Command)
 		m.setInputFocus(FocusInput)
+
+	case SpecialistResultMsg:
+		if m.specialistRuns > 0 {
+			m.specialistRuns--
+		}
+		m.progressModel.Hide()
+		if msg.Error != nil {
+			m.addMessage("system", fmt.Sprintf("Error: %v", msg.Error))
+		} else {
+			m.addMessage("assistant", msg.Content)
+		}
 
 	case ResponseMsg:
 		// Handle async response from backend
@@ -414,7 +499,19 @@ func (m *MaestroModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case SessionPickerMsg:
-		// Enter session picker mode
+		if msg.RequestID != m.pickerLoadID || m.commandPalette.IsVisible() || m.mode != ModeInput {
+			break
+		}
+		if msg.Error != nil {
+			m.addMessage("system", fmt.Sprintf("Error: %v", msg.Error))
+			break
+		}
+		if len(msg.Sessions) == 0 {
+			m.addMessage("assistant", "No sessions found.")
+			break
+		}
+		// Enter session picker mode.
+		m.commandPalette.Hide()
 		m.sessionPickerSessions = msg.Sessions
 		m.sessionPickerIdx = 0
 		// Find current session and select it
@@ -430,7 +527,78 @@ func (m *MaestroModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.inputModel.Blur()
 		m.renderMessages()
 
+	case ModelPickerMsg:
+		if msg.RequestID != m.pickerLoadID || m.commandPalette.IsVisible() || m.mode != ModeInput {
+			break
+		}
+		if msg.Error != nil {
+			m.addMessage("system", fmt.Sprintf("Error: %v", msg.Error))
+			break
+		}
+		if len(msg.Models) == 0 {
+			m.addMessage("system", "No switchable models are configured.")
+			break
+		}
+		m.commandPalette.Hide()
+		m.modelPickerModels = msg.Models
+		m.modelPickerIdx = 0
+		for i, option := range msg.Models {
+			if option.Current {
+				m.modelPickerIdx = i
+				break
+			}
+		}
+		m.mode = ModeModelPicker
+		m.statusBar.SetMode(ModeModelPicker.String())
+		m.setInputFocus(FocusInput)
+		m.inputModel.Blur()
+
+	case ModelSelectedMsg:
+		if msg.RequestID != m.pickerRequestID || !m.modelSelectionPending {
+			break
+		}
+		m.modelSelectionPending = false
+		if msg.Error != nil {
+			m.addMessage("system", fmt.Sprintf("Error: %v", msg.Error))
+			break
+		}
+		m.mode = ModeInput
+		m.modelPickerModels = nil
+		m.modelPickerIdx = 0
+		m.setInputFocus(FocusInput)
+		m.addMessage("assistant", fmt.Sprintf("Model changed to %s for the next run.", msg.ID))
+
+	case SessionMutationMsg:
+		if msg.RequestID != m.pickerRequestID || !m.sessionMutationPending {
+			break
+		}
+		m.sessionMutationPending = false
+		m.progressModel.Hide()
+		if msg.Error != nil {
+			m.addMessage("system", fmt.Sprintf("Error: %v", msg.Error))
+			break
+		}
+		m.mode = ModeInput
+		m.sessionPickerSessions = nil
+		m.sessionPickerIdx = 0
+		m.resetSessionUI()
+		action := "Switched to"
+		if msg.Created {
+			action = "Created and switched to"
+		}
+		m.addMessage("assistant", fmt.Sprintf("%s session: %s", action, msg.Name))
+
+	case ReviewFailedMsg:
+		if m.specialistRuns > 0 {
+			m.specialistRuns--
+		}
+		m.progressModel.Hide()
+		m.addMessage("system", fmt.Sprintf("Error: %v", msg.Error))
+
 	case ReviewResultMsg:
+		if m.specialistRuns > 0 {
+			m.specialistRuns--
+		}
 		// Store review results for inline display (Crush-style)
 		m.reviewResults = msg.Comments
 		m.reviewModel = NewEmbeddedReviewModel(msg.Comments, m.theme)
@@ -495,9 +663,13 @@ func (m *MaestroModel) View() tea.View {
 	// Always render input mode - review results are shown inline (Crush-style)
 	content := m.renderInputMode()
 
-	// Overlay command palette if visible
+	// Overlay the active picker without adding it to conversation history.
 	if m.commandPalette.IsVisible() {
 		content = m.overlayCommandPalette(content, m.commandPalette.View())
+	} else if m.mode == ModeSessionPicker {
+		content = m.overlayCommandPalette(content, m.renderSessionPicker())
+	} else if m.mode == ModeModelPicker {
+		content = m.overlayCommandPalette(content, m.renderModelPicker())
 	}
 
 	view.SetContent(content)
@@ -638,15 +810,23 @@ func (m *MaestroModel) renderInfoSection() string {
 		return prefix + valueStyle.Render(ansi.Truncate(value, remaining, "…"))
 	}
 
+	session := "default"
+	if m.backend != nil {
+		if current := strings.TrimSpace(m.backend.GetCurrentSession()); current != "" {
+			session = current
+		}
+	}
 	if m.width >= 100 {
-		columnWidth := max(1, (m.width-4)/2)
+		columnWidth := max(1, (m.width-8)/3)
 		workspaceLine := renderLine("workspace ", workspace, columnWidth)
 		modelLine := renderLine("model ", modelLabel, columnWidth)
-		return workspaceLine + "    " + modelLine
+		sessionLine := renderLine("session ", session, columnWidth)
+		return workspaceLine + "    " + modelLine + "    " + sessionLine
 	}
 	workspaceLine := renderLine("workspace ", workspace, lineWidth)
 	modelLine := renderLine("model     ", modelLabel, lineWidth)
-	return lipgloss.JoinVertical(lipgloss.Left, workspaceLine, modelLine)
+	sessionLine := renderLine("session   ", session, lineWidth)
+	return lipgloss.JoinVertical(lipgloss.Left, workspaceLine, modelLine, sessionLine)
 }
 
 func (m *MaestroModel) hasRailContent() bool {
@@ -703,6 +883,12 @@ func (m *MaestroModel) renderContextRail(width, height int) string {
 
 func (m *MaestroModel) configureStatusBar() {
 	switch {
+	case m.mode == ModeModelPicker:
+		m.statusBar.SetMode("MODELS")
+		m.statusBar.SetHints("↑↓ navigate", "enter select", "esc close")
+	case m.mode == ModeSessionPicker:
+		m.statusBar.SetMode("SESSIONS")
+		m.statusBar.SetHints("↑↓ navigate", "enter switch", "esc close")
 	case m.inputFocus == FocusToolActivity && m.toolActivity.HasTools():
 		m.statusBar.SetMode("TOOLS")
 		if m.codingRunActive {
@@ -713,9 +899,6 @@ func (m *MaestroModel) configureStatusBar() {
 	case m.codingRunActive:
 		m.statusBar.SetMode("RUNNING")
 		m.statusBar.SetHints("esc cancel", "ctrl+p commands", "ctrl+c quit")
-	case m.mode == ModeSessionPicker:
-		m.statusBar.SetMode("SESSIONS")
-		m.statusBar.SetHints("↑↓ navigate", "enter switch", "esc close")
 	case len(m.reviewResults) > 0 && m.inputFocus == FocusReviewList:
 		m.statusBar.SetMode("REVIEW")
 		m.statusBar.SetHints("↑↓ navigate", "enter detail", "tab input", "esc close", "ctrl+\\ rail")
@@ -724,11 +907,16 @@ func (m *MaestroModel) configureStatusBar() {
 		m.statusBar.SetHints("ctrl+p commands", "ctrl+c quit")
 	default:
 		m.statusBar.SetMode("INPUT")
-		if m.hasRailContent() {
-			m.statusBar.SetHints("ctrl+p commands", "ctrl+\\ rail", "/help", "ctrl+c quit")
-		} else {
-			m.statusBar.SetHints("ctrl+p commands", "/help", "ctrl+c quit")
+		_, canSwitchModel := m.backend.(modelSelectionProvider)
+		hints := []string{"ctrl+p commands"}
+		if canSwitchModel {
+			hints = append(hints, "ctrl+m models")
 		}
+		if m.hasRailContent() {
+			hints = append(hints, "ctrl+\\ rail")
+		}
+		hints = append(hints, "/help", "ctrl+c quit")
+		m.statusBar.SetHints(hints...)
 	}
 }
 
@@ -882,6 +1070,8 @@ func (m *MaestroModel) handleCommand(cmd string, args []string) tea.Cmd {
 		m.setInputFocus(FocusInput)
 		m.addMessage("assistant", "Conversation cleared.")
 		return nil
+	case "model":
+		return m.cmdModelList()
 	case "session":
 		if len(args) == 0 {
 			return func() tea.Msg {
@@ -890,19 +1080,26 @@ func (m *MaestroModel) handleCommand(cmd string, args []string) tea.Cmd {
 		}
 		switch args[0] {
 		case "new":
-			// Name is optional - will auto-generate if not provided
+			requestID, err := m.reserveSessionMutation()
+			if err != nil {
+				return func() tea.Msg { return ErrorMsg{Error: err} }
+			}
 			name := ""
 			if len(args) >= 2 {
 				name = args[1]
 			}
-			return m.cmdSessionNew(name)
+			return m.cmdSessionNew(name, requestID)
 		case "switch":
 			if len(args) < 2 {
 				return func() tea.Msg {
 					return ErrorMsg{Error: fmt.Errorf("usage: /session switch <name>")}
 				}
 			}
-			return m.cmdSessionSwitch(args[1])
+			requestID, err := m.reserveSessionMutation()
+			if err != nil {
+				return func() tea.Msg { return ErrorMsg{Error: err} }
+			}
+			return m.cmdSessionSwitch(args[1], requestID)
 		case "list":
 			return m.cmdSessionList()
 		default:
@@ -919,6 +1116,11 @@ func (m *MaestroModel) handleCommand(cmd string, args []string) tea.Cmd {
 
 // handleQuestion processes natural language as a workspace coding task.
 func (m *MaestroModel) handleQuestion(question string) (tea.Cmd, bool) {
+	if m.modelSelectionPending || m.sessionMutationPending {
+		return func() tea.Msg {
+			return ErrorMsg{Error: fmt.Errorf("wait for the pending model or session change before starting a run")}
+		}, false
+	}
 	if m.codingRunActive {
 		return func() tea.Msg {
 			return ErrorMsg{Error: fmt.Errorf("a coding run is already active; press Esc to cancel it")}
@@ -952,6 +1154,12 @@ func (m *MaestroModel) handleQuestion(question string) (tea.Cmd, bool) {
 
 func (m *MaestroModel) cmdHelp() tea.Cmd {
 	currentSession := "unknown"
+	modelCommand := ""
+	modelShortcut := ""
+	if _, ok := m.backend.(modelSelectionProvider); ok {
+		modelCommand = "  /model                 Choose the model for the next coding run\n"
+		modelShortcut = "  Ctrl+M                 Open model picker\n"
+	}
 	if m.backend != nil {
 		currentSession = m.backend.GetCurrentSession()
 	}
@@ -963,7 +1171,7 @@ func (m *MaestroModel) cmdHelp() tea.Cmd {
   /claude <prompt>       Send prompt to Claude CLI subagent
   /gemini <prompt>       Send prompt to Gemini CLI subagent
   /gemini search <q>     Search the web with Gemini
-  /session new [name]    Create a new session (auto-generates name if omitted)
+%s  /session new [name]    Create a new session (auto-generates name if omitted)
   /session switch <name> Switch to an existing session
   /session list          List all available sessions
   /clear                 Clear the conversation
@@ -974,12 +1182,12 @@ Current session: %s
 
 Keyboard shortcuts:
   Ctrl+P                 Open command palette
-  Enter                  Run the current prompt
+%s  Enter                  Run the current prompt
   Ctrl+J                 Insert a newline in the prompt
   Up/Down                Navigate suggestions or prompt history
   Tab                    Complete commands or cycle available transcript regions
   Esc                    Cancel an active coding run or close the current overlay
-  Ctrl+C                 Exit`, currentSession)
+  Ctrl+C                 Exit`, modelCommand, currentSession, modelShortcut)
 
 	return func() tea.Msg {
 		return ResponseMsg{Content: help}
@@ -993,6 +1201,9 @@ type ReviewResultMsg struct {
 }
 
 func (m *MaestroModel) cmdReview(prArg string) tea.Cmd {
+	if m.sessionMutationPending || m.modelSelectionPending {
+		return func() tea.Msg { return ErrorMsg{Error: fmt.Errorf("wait for the pending model or session change")} }
+	}
 	var prNumber int
 	if _, err := fmt.Sscanf(prArg, "%d", &prNumber); err != nil {
 		return func() tea.Msg {
@@ -1000,6 +1211,7 @@ func (m *MaestroModel) cmdReview(prArg string) tea.Cmd {
 		}
 	}
 
+	m.specialistRuns++
 	// Clear previous review results when starting a new review
 	m.reviewResults = nil
 	m.reviewModel = nil
@@ -1017,7 +1229,7 @@ func (m *MaestroModel) cmdReview(prArg string) tea.Cmd {
 			if prog != nil {
 				prog.Send(ProgressMsg{Status: ""}) // Clear progress
 			}
-			return ErrorMsg{Error: fmt.Errorf("backend not ready")}
+			return ReviewFailedMsg{Error: fmt.Errorf("backend not ready")}
 		}
 
 		// Create progress callback that sends updates to the TUI
@@ -1032,7 +1244,7 @@ func (m *MaestroModel) cmdReview(prArg string) tea.Cmd {
 			if prog != nil {
 				prog.Send(ProgressMsg{Status: ""}) // Clear progress
 			}
-			return ErrorMsg{Error: err}
+			return ReviewFailedMsg{Error: err}
 		}
 
 		// Clear progress on completion
@@ -1041,7 +1253,7 @@ func (m *MaestroModel) cmdReview(prArg string) tea.Cmd {
 		}
 
 		if len(comments) == 0 {
-			return ResponseMsg{Content: fmt.Sprintf("✓ No issues found in PR #%d", prNumber)}
+			return SpecialistResultMsg{Content: fmt.Sprintf("✓ No issues found in PR #%d", prNumber)}
 		}
 
 		// Return review results to display inline (Crush-style)
@@ -1055,6 +1267,10 @@ func (m *MaestroModel) cmdReview(prArg string) tea.Cmd {
 }
 
 func (m *MaestroModel) cmdAsk(question string) tea.Cmd {
+	if m.sessionMutationPending || m.modelSelectionPending {
+		return func() tea.Msg { return ErrorMsg{Error: fmt.Errorf("wait for the pending model or session change")} }
+	}
+	m.specialistRuns++
 	// Start progress display
 	startCmd := m.progressModel.Start("Thinking...")
 
@@ -1063,43 +1279,53 @@ func (m *MaestroModel) cmdAsk(question string) tea.Cmd {
 
 	askCmd := func() tea.Msg {
 		if m.backend == nil || !m.backend.IsReady() {
-			prog.Send(ProgressMsg{Status: ""}) // Clear progress
-			return ResponseMsg{Content: "Backend not ready. Please configure the agent."}
+			if prog != nil {
+				prog.Send(ProgressMsg{Status: ""})
+			}
+			return SpecialistResultMsg{Content: "Backend not ready. Please configure the agent."}
 		}
 
 		response, err := m.backend.AskQuestion(m.ctx, question)
-		prog.Send(ProgressMsg{Status: ""}) // Clear progress
-		if err != nil {
-			return ErrorMsg{Error: err}
+		if prog != nil {
+			prog.Send(ProgressMsg{Status: ""})
 		}
-		return ResponseMsg{Content: response}
+		return SpecialistResultMsg{Content: response, Error: err}
 	}
 
 	return tea.Batch(startCmd, askCmd)
 }
 
 func (m *MaestroModel) cmdClaude(prompt string) tea.Cmd {
+	if m.sessionMutationPending || m.modelSelectionPending {
+		return func() tea.Msg { return ErrorMsg{Error: fmt.Errorf("wait for the pending model or session change")} }
+	}
+	m.specialistRuns++
 	startCmd := m.progressModel.Start("Asking Claude...")
 	prog := m.program
 
 	claudeCmd := func() tea.Msg {
 		if m.backend == nil || !m.backend.IsReady() {
-			prog.Send(ProgressMsg{Status: ""})
-			return ResponseMsg{Content: "Backend not ready."}
+			if prog != nil {
+				prog.Send(ProgressMsg{Status: ""})
+			}
+			return SpecialistResultMsg{Content: "Backend not ready."}
 		}
 
 		response, err := m.backend.Claude(m.ctx, prompt)
-		prog.Send(ProgressMsg{Status: ""})
-		if err != nil {
-			return ErrorMsg{Error: err}
+		if prog != nil {
+			prog.Send(ProgressMsg{Status: ""})
 		}
-		return ResponseMsg{Content: response}
+		return SpecialistResultMsg{Content: response, Error: err}
 	}
 
 	return tea.Batch(startCmd, claudeCmd)
 }
 
 func (m *MaestroModel) cmdGemini(prompt string, taskType string) tea.Cmd {
+	if m.sessionMutationPending || m.modelSelectionPending {
+		return func() tea.Msg { return ErrorMsg{Error: fmt.Errorf("wait for the pending model or session change")} }
+	}
+	m.specialistRuns++
 	msg := "Asking Gemini..."
 	if taskType == "search" {
 		msg = "Searching with Gemini..."
@@ -1109,60 +1335,50 @@ func (m *MaestroModel) cmdGemini(prompt string, taskType string) tea.Cmd {
 
 	geminiCmd := func() tea.Msg {
 		if m.backend == nil || !m.backend.IsReady() {
-			prog.Send(ProgressMsg{Status: ""})
-			return ResponseMsg{Content: "Backend not ready."}
+			if prog != nil {
+				prog.Send(ProgressMsg{Status: ""})
+			}
+			return SpecialistResultMsg{Content: "Backend not ready."}
 		}
 
 		response, err := m.backend.Gemini(m.ctx, prompt, taskType)
-		prog.Send(ProgressMsg{Status: ""})
-		if err != nil {
-			return ErrorMsg{Error: err}
+		if prog != nil {
+			prog.Send(ProgressMsg{Status: ""})
 		}
-		return ResponseMsg{Content: response}
+		return SpecialistResultMsg{Content: response, Error: err}
 	}
 
 	return tea.Batch(startCmd, geminiCmd)
 }
 
-func (m *MaestroModel) cmdSessionNew(name string) tea.Cmd {
+func (m *MaestroModel) cmdSessionNew(name string, requestID uint64) tea.Cmd {
 	startCmd := m.progressModel.Start("Creating session...")
-	prog := m.program
 
 	createCmd := func() tea.Msg {
 		if m.backend == nil {
-			prog.Send(ProgressMsg{Status: ""})
-			return ErrorMsg{Error: fmt.Errorf("backend not ready")}
+			return SessionMutationMsg{RequestID: requestID, Error: fmt.Errorf("backend not ready")}
 		}
 
 		err := m.backend.CreateSession(m.ctx, name)
-		prog.Send(ProgressMsg{Status: ""})
 		if err != nil {
-			return ErrorMsg{Error: err}
+			return SessionMutationMsg{RequestID: requestID, Error: err}
 		}
-		// Get the actual session name (may have been auto-generated)
-		actualName := m.backend.GetCurrentSession()
-		return ResponseMsg{Content: fmt.Sprintf("Created and switched to session: %s", actualName)}
+		return SessionMutationMsg{RequestID: requestID, Name: m.backend.GetCurrentSession(), Created: true}
 	}
 
 	return tea.Batch(startCmd, createCmd)
 }
 
-func (m *MaestroModel) cmdSessionSwitch(name string) tea.Cmd {
+func (m *MaestroModel) cmdSessionSwitch(name string, requestID uint64) tea.Cmd {
 	startCmd := m.progressModel.Start("Switching session...")
-	prog := m.program
 
 	switchCmd := func() tea.Msg {
 		if m.backend == nil {
-			prog.Send(ProgressMsg{Status: ""})
-			return ErrorMsg{Error: fmt.Errorf("backend not ready")}
+			return SessionMutationMsg{RequestID: requestID, Name: name, Error: fmt.Errorf("backend not ready")}
 		}
 
 		err := m.backend.SwitchSession(m.ctx, name)
-		prog.Send(ProgressMsg{Status: ""})
-		if err != nil {
-			return ErrorMsg{Error: err}
-		}
-		return ResponseMsg{Content: fmt.Sprintf("Switched to session: %s", name)}
+		return SessionMutationMsg{RequestID: requestID, Name: name, Error: err}
 	}
 
 	return tea.Batch(startCmd, switchCmd)
@@ -1170,33 +1386,70 @@ func (m *MaestroModel) cmdSessionSwitch(name string) tea.Cmd {
 
 // SessionPickerMsg is sent when sessions are loaded for the picker.
 type SessionPickerMsg struct {
-	Sessions []SessionInfo
+	RequestID uint64
+	Sessions  []SessionInfo
+	Error     error
 }
 
 func (m *MaestroModel) cmdSessionList() tea.Cmd {
-	startCmd := m.progressModel.Start("Loading sessions...")
-	prog := m.program
+	m.pickerLoadID++
+	requestID := m.pickerLoadID
 
-	listCmd := func() tea.Msg {
+	return func() tea.Msg {
 		if m.backend == nil {
-			prog.Send(ProgressMsg{Status: ""})
-			return ErrorMsg{Error: fmt.Errorf("backend not ready")}
+			return SessionPickerMsg{RequestID: requestID, Error: fmt.Errorf("backend not ready")}
 		}
 
 		sessions, err := m.backend.ListSessions(m.ctx)
-		prog.Send(ProgressMsg{Status: ""})
-		if err != nil {
-			return ErrorMsg{Error: err}
-		}
-
-		if len(sessions) == 0 {
-			return ResponseMsg{Content: "No sessions found."}
-		}
-
-		return SessionPickerMsg{Sessions: sessions}
+		return SessionPickerMsg{RequestID: requestID, Sessions: sessions, Error: err}
 	}
+}
 
-	return tea.Batch(startCmd, listCmd)
+func (m *MaestroModel) cmdModelList() tea.Cmd {
+	m.pickerLoadID++
+	requestID := m.pickerLoadID
+	return func() tea.Msg {
+		provider, ok := m.backend.(modelSelectionProvider)
+		if !ok {
+			return ModelPickerMsg{RequestID: requestID, Error: fmt.Errorf("backend does not support model switching")}
+		}
+		models, err := provider.ListModels(m.ctx)
+		return ModelPickerMsg{RequestID: requestID, Models: models, Error: err}
+	}
+}
+
+func (m *MaestroModel) cmdModelSelect(id string, requestID uint64) tea.Cmd {
+	return func() tea.Msg {
+		provider, ok := m.backend.(modelSelectionProvider)
+		if !ok {
+			return ModelSelectedMsg{RequestID: requestID, ID: id, Error: fmt.Errorf("backend does not support model switching")}
+		}
+		err := provider.SetModel(m.ctx, id)
+		return ModelSelectedMsg{RequestID: requestID, ID: id, Error: err}
+	}
+}
+
+func (m *MaestroModel) nextPickerRequestID() uint64 {
+	m.pickerRequestID++
+	return m.pickerRequestID
+}
+
+func (m *MaestroModel) reserveSessionMutation() (uint64, error) {
+	if m.codingRunActive || m.sessionMutationPending || m.modelSelectionPending || m.specialistRuns > 0 {
+		return 0, fmt.Errorf("session changes require an idle coding session")
+	}
+	m.sessionMutationPending = true
+	return m.nextPickerRequestID(), nil
+}
+
+func (m *MaestroModel) resetSessionUI() {
+	m.messages = nil
+	m.toolActivity = NewToolActivityModel(m.theme)
+	m.toolActivityAnchor = 0
+	m.reviewResults = nil
+	m.reviewModel = nil
+	m.railVisible = false
+	m.setInputFocus(FocusInput)
 }
 
 // addMessage adds a message to the conversation.
@@ -1276,11 +1529,6 @@ func (m *MaestroModel) renderMessages() {
 		sb.WriteString(m.reviewModel.ViewString())
 	}
 
-	// Add session picker if in session picker mode
-	if m.mode == ModeSessionPicker && len(m.sessionPickerSessions) > 0 {
-		sb.WriteString(m.renderSessionPicker())
-	}
-
 	m.viewport.SetContent(sb.String())
 }
 
@@ -1299,7 +1547,9 @@ func (m *MaestroModel) renderSessionPicker() string {
 	sb.WriteString(header + hint + "\n\n")
 
 	// Session list
-	for i, session := range m.sessionPickerSessions {
+	start, end := pickerWindow(len(m.sessionPickerSessions), m.sessionPickerIdx, max(1, m.height-8))
+	for i := start; i < end; i++ {
+		session := m.sessionPickerSessions[i]
 		isSelected := i == m.sessionPickerIdx
 
 		// Selection indicator
@@ -1334,8 +1584,65 @@ func (m *MaestroModel) renderSessionPicker() string {
 
 		sb.WriteString(indicator + name + currentMarker + date + "\n")
 	}
+	if start > 0 || end < len(m.sessionPickerSessions) {
+		sb.WriteString(lipgloss.NewStyle().Foreground(m.theme.TextMuted).Render(
+			fmt.Sprintf("%d–%d of %d", start+1, end, len(m.sessionPickerSessions)),
+		))
+	}
 
-	return sb.String()
+	return m.renderPickerPanel(sb.String())
+}
+
+func (m *MaestroModel) renderModelPicker() string {
+	var lines []string
+	title := lipgloss.NewStyle().Foreground(m.theme.Accent).Bold(true).Render("Select model")
+	hint := lipgloss.NewStyle().Foreground(m.theme.TextMuted).Render(" (↑/↓ navigate, enter select, esc cancel)")
+	lines = append(lines, title+hint, "")
+	start, end := pickerWindow(len(m.modelPickerModels), m.modelPickerIdx, max(1, (m.height-8)/2))
+	for i := start; i < end; i++ {
+		option := m.modelPickerModels[i]
+		prefix := "  "
+		if i == m.modelPickerIdx {
+			prefix = lipgloss.NewStyle().Foreground(m.theme.Accent).Bold(true).Render("> ")
+		}
+		label := option.ID
+		if option.Current {
+			label += " (current)"
+		}
+		lines = append(lines, prefix+label)
+		if option.Description != "" {
+			lines = append(lines, "    "+lipgloss.NewStyle().Foreground(m.theme.TextMuted).Render(option.Description))
+		}
+	}
+	if start > 0 || end < len(m.modelPickerModels) {
+		lines = append(lines, lipgloss.NewStyle().Foreground(m.theme.TextMuted).Render(
+			fmt.Sprintf("%d–%d of %d", start+1, end, len(m.modelPickerModels)),
+		))
+	}
+	return m.renderPickerPanel(strings.Join(lines, "\n"))
+}
+
+func pickerWindow(total, selected, limit int) (int, int) {
+	if total <= 0 {
+		return 0, 0
+	}
+	limit = max(1, min(limit, total))
+	start := max(0, selected-limit+1)
+	return start, min(total, start+limit)
+}
+
+func (m *MaestroModel) renderPickerPanel(content string) string {
+	width := max(1, min(72, m.width-4))
+	lines := strings.Split(content, "\n")
+	for i := range lines {
+		lines[i] = ansi.Truncate(lines[i], max(1, width-4), "…")
+	}
+	return lipgloss.NewStyle().
+		Width(width).
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(m.theme.Border).
+		Padding(1, 2).
+		Render(strings.Join(lines, "\n"))
 }
 
 // getReviewCounts returns counts of review comments by severity.

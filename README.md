@@ -92,6 +92,7 @@ Maestro is an AI code review and repository analysis assistant built on top of `
 - **Readable Responses**: assistant output renders Markdown, links, inline code, and fenced code blocks with Maestro's dark/coral syntax palette and width-aware reflow.
 - **Durable Run Evidence**: coding runs retain turn boundaries, tool status, elapsed tool time, expandable result details, and the terminal run summary instead of replacing all activity with one spinner line. Tab focuses the activity transcript; arrows navigate and Enter expands.
 - **Prompt Editing and Discovery**: Enter runs a prompt, Ctrl+J inserts a newline, `/` opens inline command suggestions, and Ctrl+P opens the searchable command palette.
+- **Picker Overlays**: session selection no longer mutates the transcript. Backends that expose model options provide Ctrl+M and `/model`; selection is rejected during an active run and applies to the next run without silently restarting the session. Workspace, model, and session remain visible in the header.
 - **Cancellation**: Escape cancels the active coding run or closes the current overlay; narrow terminals progressively hide nonessential chrome and secondary shortcuts.
 - **Shared Runtime Wiring**: the same service layer backs both direct CLI review and interactive usage.
 - **Pre-v1 Terminal API Cleanup**: the unreachable experimental `terminal.Model`, modern/legacy launchers, split-pane, file-tree, todo, and Vim key-handler APIs were removed. External integrations should use `terminal.RunMaestro` or the still-supported standalone `terminal.RunReviewTUI`.

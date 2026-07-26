@@ -40,6 +40,12 @@ func builtinCommands() []Command {
 			Args:        []CommandArg{{Name: "prompt", Description: "Prompt text", Required: true}},
 		},
 		{
+			Name:        "model",
+			Aliases:     []string{"/model"},
+			Description: "Choose the model for the next run",
+			Category:    "Session",
+		},
+		{
 			Name:        "session new",
 			Aliases:     []string{"/session new"},
 			Description: "Create a session",
