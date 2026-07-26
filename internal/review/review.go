@@ -33,6 +33,11 @@ import (
 
 // Type aliases are defined in types_aliases.go - this file uses them
 
+var (
+	ErrReviewActive = errors.New("review agent already has an active run")
+	ErrReviewClosed = errors.New("review agent is shutting down")
+)
+
 // PRReviewAgent handles code review using dspy-go.
 type PRReviewAgent struct {
 	reviewProcessor  reviewChunkProcessor             // High-performance chunk processor
@@ -55,6 +60,13 @@ type PRReviewAgent struct {
 	currentTrajectory *ace.TrajectoryRecorder // Current review trajectory for learning
 	aceEnabled        bool                    // Whether ACE is enabled for this agent
 	sgrepHome         string
+
+	runMu        sync.Mutex
+	stateMu      sync.Mutex
+	lifecycleMu  sync.Mutex
+	runCancel    context.CancelFunc
+	runDone      chan struct{}
+	shuttingDown bool
 }
 
 type reviewPipelineResult struct {
@@ -95,6 +107,26 @@ type ThreadTracker struct {
 	InReplyToMyComment  bool                    // Whether this is a reply to our comment
 	IsResolved          bool                    // Whether the thread is resolved
 	ConversationHistory []types.PRReviewComment // Full history of the thread
+}
+
+func (a *PRReviewAgent) activeThreadCount() int {
+	a.stateMu.Lock()
+	defer a.stateMu.Unlock()
+	return len(a.activeThreads)
+}
+
+func cloneThreadTracker(thread *ThreadTracker) *ThreadTracker {
+	if thread == nil {
+		return nil
+	}
+	cloned := *thread
+	cloned.ReviewChunks = append([]types.ReviewChunk(nil), thread.ReviewChunks...)
+	cloned.ConversationHistory = append([]types.PRReviewComment(nil), thread.ConversationHistory...)
+	if thread.LastComment != nil {
+		comment := *thread.LastComment
+		cloned.LastComment = &comment
+	}
+	return &cloned
 }
 
 type ReviewMetadata struct {
@@ -631,6 +663,14 @@ func (a *PRReviewAgent) Close() error {
 	logger := logging.GetLogger()
 	ctx := context.Background()
 
+	a.lifecycleMu.Lock()
+	active := a.runDone != nil
+	a.shuttingDown = true
+	a.lifecycleMu.Unlock()
+	if active {
+		return fmt.Errorf("close review agent: active review has not quiesced")
+	}
+
 	// Stop background processes
 	a.stopper.Stop()
 
@@ -655,6 +695,24 @@ func (a *PRReviewAgent) ReviewPR(ctx context.Context, prNumber int, tasks []PRRe
 
 // ReviewPRWithChanges reviews a complete pull request with pre-fetched changes data.
 func (a *PRReviewAgent) ReviewPRWithChanges(ctx context.Context, prNumber int, tasks []PRReviewTask, console ConsoleInterface, preloadedChanges *PRChanges) ([]PRReviewComment, error) {
+	a.lifecycleMu.Lock()
+	if a.shuttingDown {
+		a.lifecycleMu.Unlock()
+		return nil, ErrReviewClosed
+	}
+	if !a.runMu.TryLock() {
+		a.lifecycleMu.Unlock()
+		return nil, ErrReviewActive
+	}
+	runCtx, runCancel := context.WithCancel(ctx)
+	runDone := make(chan struct{})
+	a.runCancel = runCancel
+	a.runDone = runDone
+	a.lifecycleMu.Unlock()
+	defer a.runMu.Unlock()
+	defer a.finishReviewRun(runDone, runCancel)
+	ctx = runCtx
+
 	logger := logging.GetLogger()
 	reviewStart := time.Now()
 	logger.Info(ctx, "🎬 Starting PR #%d review for %d files", prNumber, len(tasks))
@@ -703,7 +761,7 @@ func (a *PRReviewAgent) ReviewPRWithChanges(ctx context.Context, prNumber int, t
 	monitorCtx, cancel := context.WithCancel(ctx)
 	a.stopper.cancel = cancel
 
-	// Go 1.25: Use wg.Go() for automatic Add/Done management
+	// Go 1.25: Use wg.Go() for automatic Add/Done management.
 	a.stopper.Go(func() {
 		if err := a.monitorAndRespond(monitorCtx, prNumber, console); err != nil {
 			if !errors.Is(err, context.Canceled) {
@@ -711,6 +769,10 @@ func (a *PRReviewAgent) ReviewPRWithChanges(ctx context.Context, prNumber int, t
 			}
 		}
 	})
+	defer func() {
+		cancel()
+		a.stopper.wg.Wait()
+	}()
 
 	var (
 		myOpenThreads      []*ThreadTracker // Threads I started that need follow-up
@@ -718,8 +780,10 @@ func (a *PRReviewAgent) ReviewPRWithChanges(ctx context.Context, prNumber int, t
 		newThreadsByOthers []*ThreadTracker // New threads started by others
 	)
 	var allComments []PRReviewComment
+	a.stateMu.Lock()
 	logger.Debug(ctx, "🔍 Categorizing %d active threads", len(a.activeThreads))
-	for _, thread := range a.activeThreads {
+	for _, liveThread := range a.activeThreads {
+		thread := cloneThreadTracker(liveThread)
 		if thread.OriginalAuthor == a.githubTools.GetAuthenticatedUser(ctx) {
 			// This is a thread I started
 			if !thread.IsResolved {
@@ -734,6 +798,7 @@ func (a *PRReviewAgent) ReviewPRWithChanges(ctx context.Context, prNumber int, t
 			}
 		}
 	}
+	a.stateMu.Unlock()
 
 	for _, thread := range newThreadsByOthers {
 		console.Printf("Generating response to new thread %d (file: %s)\n",
@@ -770,6 +835,7 @@ func (a *PRReviewAgent) ReviewPRWithChanges(ctx context.Context, prNumber int, t
 		initialReviewDuration := time.Since(initialReviewStart)
 		logger.Info(ctx, "🎯 Initial review completed in %v", initialReviewDuration)
 		// Track new threads from initial review
+		a.stateMu.Lock()
 		for _, comment := range comments {
 			if comment.ThreadID != nil {
 
@@ -783,6 +849,7 @@ func (a *PRReviewAgent) ReviewPRWithChanges(ctx context.Context, prNumber int, t
 				}
 			}
 		}
+		a.stateMu.Unlock()
 		allComments = comments
 	}
 
@@ -796,7 +863,6 @@ func (a *PRReviewAgent) ReviewPRWithChanges(ctx context.Context, prNumber int, t
 			}
 		}
 	}
-	cancel()
 
 	totalReviewDuration := time.Since(reviewStart)
 	logger.Info(ctx, "🏁 PR #%d review completed in %v | Generated %d comments for %d files",
@@ -809,7 +875,7 @@ func (a *PRReviewAgent) ReviewPRWithChanges(ctx context.Context, prNumber int, t
 			"comment_count":   len(allComments),
 			"duration_ms":     totalReviewDuration.Milliseconds(),
 			"files_reviewed":  len(tasks),
-			"threads_created": len(a.activeThreads),
+			"threads_created": a.activeThreadCount(),
 		}, nil)
 
 		// Determine outcome based on review quality
@@ -827,29 +893,35 @@ func (a *PRReviewAgent) ReviewPRWithChanges(ctx context.Context, prNumber int, t
 	return allComments, nil
 }
 
+func (a *PRReviewAgent) finishReviewRun(done chan struct{}, cancel context.CancelFunc) {
+	cancel()
+	a.lifecycleMu.Lock()
+	if a.runDone == done {
+		a.runCancel = nil
+		a.runDone = nil
+	}
+	a.lifecycleMu.Unlock()
+	close(done)
+}
+
 func (a *PRReviewAgent) Stop(ctx context.Context) {
 	logger := logging.GetLogger()
-	a.stopper.stopOnce.Do(func() {
-		if a.stopper.cancel != nil {
-			a.stopper.cancel()
-		}
-		close(a.stopper.stop)
-
-		done := make(chan struct{})
-		go func() {
-			a.stopper.wg.Wait()
-			close(a.stopper.stopped)
-			close(done)
-		}()
-
-		// Wait with timeout
-		select {
-		case <-done:
-		case <-ctx.Done():
-			// Log timeout but continue
-			logger.Warn(ctx, "Warning: shutdown timed out")
-		}
-	})
+	a.lifecycleMu.Lock()
+	a.shuttingDown = true
+	cancel := a.runCancel
+	done := a.runDone
+	if cancel != nil {
+		cancel()
+	}
+	a.lifecycleMu.Unlock()
+	if done == nil {
+		return
+	}
+	select {
+	case <-done:
+	case <-ctx.Done():
+		logger.Warn(ctx, "Warning: shutdown timed out")
+	}
 }
 
 func (a *PRReviewAgent) performInitialReview(ctx context.Context, tasks []PRReviewTask, console ConsoleInterface, changes *PRChanges) ([]PRReviewComment, error) {
@@ -2181,6 +2253,7 @@ func (a *PRReviewAgent) processComment(ctx context.Context, comment *github.Pull
 
 	logger.Info(ctx, "Processing comment ID: %d, Parent ID: %d", commentID, parentID)
 
+	a.stateMu.Lock()
 	var threadStatus *ThreadTracker
 	var exists bool
 
@@ -2204,6 +2277,9 @@ func (a *PRReviewAgent) processComment(ctx context.Context, comment *github.Pull
 		a.activeThreads[commentID] = threadStatus
 		logger.Info(ctx, "Created new thread tracker for comment ID: %d", commentID)
 	}
+	threadStatus = cloneThreadTracker(threadStatus)
+	a.stateMu.Unlock()
+
 	if err := a.refreshThreadContent(ctx, threadStatus); err != nil {
 		logger.Error(ctx, "Failed to get file content: %v", err)
 		return
@@ -2251,11 +2327,13 @@ func (a *PRReviewAgent) processComment(ctx context.Context, comment *github.Pull
 	threadStatus.LastUpdate = time.Now()
 	threadStatus.ParentCommentID = parentID
 
-	// Update thread trackers
+	// Reconcile thread trackers after external repository and model work.
+	a.stateMu.Lock()
 	a.activeThreads[commentID] = threadStatus
 	if parentID != 0 {
 		a.activeThreads[parentID] = threadStatus
 	}
+	a.stateMu.Unlock()
 
 	// Post the response if needed
 	if response.ThreadID != nil {

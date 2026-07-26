@@ -27,6 +27,7 @@ type Config struct {
 	SystemPrompt string
 	MaxTurns     int
 	AllowBash    bool
+	ExtraTools   []core.Tool
 }
 
 type Session struct {
@@ -70,6 +71,14 @@ func NewSession(cfg Config) (*Session, error) {
 		}
 		if err := agent.RegisterTool(tool); err != nil {
 			return nil, fmt.Errorf("register coding tool %s: %w", tool.Name(), err)
+		}
+	}
+	for _, tool := range cfg.ExtraTools {
+		if tool == nil {
+			continue
+		}
+		if err := agent.RegisterTool(tool); err != nil {
+			return nil, fmt.Errorf("register extra coding tool %s: %w", tool.Name(), err)
 		}
 	}
 

@@ -1,11 +1,81 @@
 package review
 
 import (
+	"context"
+	"errors"
+	"os"
 	"strings"
 	"testing"
+	"time"
 
 	maestrotypes "github.com/XiaoConstantine/maestro/internal/types"
 )
+
+func TestReviewPRWithChangesRejectsOverlappingRun(t *testing.T) {
+	agent := &PRReviewAgent{}
+	agent.runMu.Lock()
+	defer agent.runMu.Unlock()
+
+	_, err := agent.ReviewPRWithChanges(context.Background(), 42, nil, nil, nil)
+	if !errors.Is(err, ErrReviewActive) {
+		t.Fatalf("ReviewPRWithChanges() error = %v, want ErrReviewActive", err)
+	}
+}
+
+func TestReviewPRWithChangesRejectsAfterShutdown(t *testing.T) {
+	agent := &PRReviewAgent{shuttingDown: true}
+	_, err := agent.ReviewPRWithChanges(context.Background(), 42, nil, nil, nil)
+	if !errors.Is(err, ErrReviewClosed) {
+		t.Fatalf("ReviewPRWithChanges() error = %v, want ErrReviewClosed", err)
+	}
+}
+
+func TestClosePreservesCloneWhileReviewIsActive(t *testing.T) {
+	clone := t.TempDir()
+	agent := &PRReviewAgent{clonedRepoPath: clone, runDone: make(chan struct{}), stopper: NewStopper()}
+	if err := agent.Close(); err == nil {
+		t.Fatal("Close() error = nil, want active-review error")
+	}
+	if _, err := os.Stat(clone); err != nil {
+		t.Fatalf("clone was removed while review active: %v", err)
+	}
+}
+
+func TestStopThenCloseCleansCloneAfterReviewQuiesces(t *testing.T) {
+	clone := t.TempDir()
+	runCtx, runCancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	agent := &PRReviewAgent{
+		clonedRepoPath: clone,
+		runCancel:      runCancel,
+		runDone:        done,
+		stopper:        NewStopper(),
+	}
+
+	stopReturned := make(chan struct{})
+	go func() {
+		agent.Stop(context.Background())
+		close(stopReturned)
+	}()
+	select {
+	case <-runCtx.Done():
+	case <-time.After(time.Second):
+		t.Fatal("Stop() did not cancel the active review")
+	}
+
+	agent.finishReviewRun(done, runCancel)
+	select {
+	case <-stopReturned:
+	case <-time.After(time.Second):
+		t.Fatal("Stop() did not observe review completion")
+	}
+	if err := agent.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	if _, err := os.Stat(clone); !os.IsNotExist(err) {
+		t.Fatalf("clone stat error = %v, want removed", err)
+	}
+}
 
 func TestPartitionReviewCommentsByChanges_PreservesFileLevelComments(t *testing.T) {
 	comments := []PRReviewComment{

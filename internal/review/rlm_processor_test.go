@@ -66,6 +66,21 @@ func TestReviewRLMProcessorMarksChunkErrorsUnknown(t *testing.T) {
 	}
 }
 
+func TestReviewRLMProcessorRecordsProvidedExecutionTrace(t *testing.T) {
+	manager := maestrobudget.NewBudgetManager(maestrobudget.DefaultConfig())
+	processor := &reviewRLMProcessor{budgetManager: manager, agent: &agentrlm.Agent{}}
+	trace := &agents.ExecutionTrace{TokenUsage: map[string]int64{
+		"prompt_tokens": 11, "completion_tokens": 7, "total_tokens": 18,
+	}}
+
+	processor.recordBudgetUsage(context.Background(), trace)
+
+	usage := manager.Status().ByAgent[reviewRLMArtifactRoute]
+	if usage.Calls != 1 || usage.TotalTokens != 18 {
+		t.Fatalf("recorded usage = %#v, want one call and 18 tokens", usage)
+	}
+}
+
 func TestPRReviewAgentSetBudgetManagerPropagatesToRLMProcessor(t *testing.T) {
 	processor := &reviewRLMProcessor{}
 	agent := &PRReviewAgent{reviewProcessor: processor}

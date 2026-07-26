@@ -136,15 +136,15 @@ func (p *reviewRLMProcessor) processChunk(ctx context.Context, chunk map[string]
 	filePath := strings.TrimSpace(stringFromReviewValue(chunk["file_path"]))
 	contextPayload := buildReviewRLMContext(chunk, taskContext)
 	query := buildReviewRLMQuery(p.overlay)
-	output, err := p.agent.Execute(ctx, map[string]interface{}{
+	execution, err := p.agent.ExecuteWithTrace(ctx, map[string]interface{}{
 		"context": contextPayload,
 		"query":   query,
 	})
+	p.recordBudgetUsage(ctx, execution.Trace)
 	if err != nil {
 		return nil, err
 	}
-	p.recordBudgetUsage(ctx)
-	rawAnswer := strings.TrimSpace(stringFromReviewValue(output["answer"]))
+	rawAnswer := strings.TrimSpace(stringFromReviewValue(execution.Output["answer"]))
 	issues, err := parseReviewRLMIssues(rawAnswer, filePath)
 	if err != nil {
 		return nil, fmt.Errorf("parse RLM review output: %w", err)
@@ -158,11 +158,10 @@ func (p *reviewRLMProcessor) processChunk(ctx context.Context, chunk map[string]
 	}, nil
 }
 
-func (p *reviewRLMProcessor) recordBudgetUsage(ctx context.Context) {
+func (p *reviewRLMProcessor) recordBudgetUsage(ctx context.Context, trace *agents.ExecutionTrace) {
 	if p == nil || p.agent == nil {
 		return
 	}
-	trace := p.agent.LastExecutionTrace()
 	delta := maestrobudget.UsageDeltaFromExecutionTrace(trace)
 	if delta.Empty() {
 		return

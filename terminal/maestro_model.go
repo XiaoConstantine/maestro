@@ -853,7 +853,9 @@ func (m *MaestroModel) cmdReview(prArg string) tea.Cmd {
 
 	reviewCmd := func() tea.Msg {
 		if m.backend == nil || !m.backend.IsReady() {
-			prog.Send(ProgressMsg{Status: ""}) // Clear progress
+			if prog != nil {
+				prog.Send(ProgressMsg{Status: ""}) // Clear progress
+			}
 			return ErrorMsg{Error: fmt.Errorf("backend not ready")}
 		}
 
@@ -866,12 +868,16 @@ func (m *MaestroModel) cmdReview(prArg string) tea.Cmd {
 
 		comments, err := m.backend.ReviewPR(m.ctx, prNumber, onProgress)
 		if err != nil {
-			prog.Send(ProgressMsg{Status: ""}) // Clear progress
+			if prog != nil {
+				prog.Send(ProgressMsg{Status: ""}) // Clear progress
+			}
 			return ErrorMsg{Error: err}
 		}
 
 		// Clear progress on completion
-		prog.Send(ProgressMsg{Status: ""})
+		if prog != nil {
+			prog.Send(ProgressMsg{Status: ""})
+		}
 
 		if len(comments) == 0 {
 			return ResponseMsg{Content: fmt.Sprintf("✓ No issues found in PR #%d", prNumber)}

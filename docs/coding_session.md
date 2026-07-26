@@ -30,6 +30,8 @@ A coding session registers these workspace-contained file tools by default:
 - `write`
 - `edit`
 
+When GitHub review services are configured, it also registers `review_pull_request` through dspy-go's `pkg/agents/subagent` adapter. `/review <PR>` and that delegated tool invoke the same specialized Maestro review pipeline; no second provider-native execution loop is introduced.
+
 File tools reject paths outside the authoritative workspace root. Shell execution is disabled by default because setting a working directory is not a sandbox: shell commands can otherwise access absolute paths, `$HOME`, and the network. Pass `--allow-coding-bash` to opt into unrestricted `bash` with the workspace as its initial working directory.
 
 The coding agent receives explicit provider/model/workspace instructions and evidence rules: after any `write` or `edit`, it must verify the mutation with tool evidence before calling `Finish`. Final answers should describe only mutations that were actually observed in the workspace trace.

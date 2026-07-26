@@ -8,6 +8,46 @@ import (
 	tea "charm.land/bubbletea/v2"
 )
 
+func TestReviewCommandDispatchesThroughBackend(t *testing.T) {
+	backend := &reviewRecordingBackend{NoOpBackend: NewNoOpBackend("owner", "repo")}
+	model := NewMaestroModel(&MaestroConfig{}, backend)
+	cmd := model.handleCommand("review", []string{"42"})
+	batch, ok := cmd().(tea.BatchMsg)
+	if !ok {
+		t.Fatalf("cmdReview() message = %T, want tea.BatchMsg", cmd())
+	}
+	var result ReviewResultMsg
+	for _, child := range batch {
+		if child == nil {
+			continue
+		}
+		if message, ok := child().(ReviewResultMsg); ok {
+			result = message
+		}
+	}
+	if backend.prNumber != 42 {
+		t.Fatalf("ReviewPR() prNumber = %d, want 42", backend.prNumber)
+	}
+	if result.PRNumber != 42 || len(result.Comments) != 1 || result.Comments[0].FilePath != "main.go" {
+		t.Fatalf("ReviewResultMsg = %#v", result)
+	}
+}
+
+type reviewRecordingBackend struct {
+	*NoOpBackend
+	prNumber int
+}
+
+func (*reviewRecordingBackend) IsReady() bool { return true }
+
+func (b *reviewRecordingBackend) ReviewPR(_ context.Context, prNumber int, onProgress func(string)) ([]ReviewComment, error) {
+	b.prNumber = prNumber
+	if onProgress != nil {
+		onProgress("reviewing")
+	}
+	return []ReviewComment{{FilePath: "main.go", LineNumber: 7, Content: "finding"}}, nil
+}
+
 func TestHandleQuestionRejectsSecondActiveCodingRun(t *testing.T) {
 	model := NewMaestroModel(&MaestroConfig{}, NewNoOpBackend("owner", "repo"))
 	first, accepted := model.handleQuestion("first task")

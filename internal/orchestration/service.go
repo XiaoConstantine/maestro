@@ -309,12 +309,28 @@ func (s *MaestroService) withBudgetMetadata(response *Response, err error) (*Res
 }
 
 func (s *MaestroService) handleReview(ctx context.Context, request Request) (*Response, error) {
+	child := newReviewExecutionAgent(s.executeReview, request.OnProgress)
+	output, err := child.Execute(ctx, map[string]any{"pr_number": request.PRNumber})
+	if err != nil {
+		return nil, err
+	}
+	comments, ok := output["comments"].([]types.PRReviewComment)
+	if !ok {
+		return nil, fmt.Errorf("review subagent returned invalid comments: %T", output["comments"])
+	}
+	return &Response{Type: RequestReview, Comments: comments}, nil
+}
+
+func (s *MaestroService) executeReview(ctx context.Context, prNumber int, onProgress func(string)) ([]types.PRReviewComment, error) {
 	agent, err := s.pool.GetReviewAgent(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get review agent: %w", err)
 	}
+	if s.githubTools == nil {
+		return nil, fmt.Errorf("github tools are not configured")
+	}
 
-	changes, err := s.githubTools.GetPullRequestChanges(ctx, request.PRNumber)
+	changes, err := s.githubTools.GetPullRequestChanges(ctx, prNumber)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get PR changes: %w", err)
 	}
@@ -328,16 +344,8 @@ func (s *MaestroService) handleReview(ctx context.Context, request Request) (*Re
 		})
 	}
 
-	progressConsole := &serviceProgressConsole{onProgress: request.OnProgress}
-	comments, err := agent.ReviewPRWithChanges(ctx, request.PRNumber, tasks, progressConsole, changes)
-	if err != nil {
-		return nil, err
-	}
-
-	return &Response{
-		Type:     RequestReview,
-		Comments: comments,
-	}, nil
+	progressConsole := &serviceProgressConsole{onProgress: onProgress}
+	return agent.ReviewPRWithChanges(ctx, prNumber, tasks, progressConsole, changes)
 }
 
 func (s *MaestroService) handleCoding(ctx context.Context, request Request) (*Response, error) {
@@ -415,6 +423,7 @@ Rules:
 - Do not claim a file was created, updated, or fixed unless the trace includes that mutation and a post-mutation verification step.
 - If verification fails or is incomplete, say so explicitly instead of claiming success.
 - Prefer the smallest correct change that solves the task.
+- Use review_pull_request only when the user explicitly asks to review a GitHub pull request.
 - /ask is a separate read-only QA flow; this session is for coding work in the workspace above.
 `
 
@@ -452,6 +461,14 @@ func (s *MaestroService) codingSessionFor(ctx context.Context, workspace string)
 		s.codingSessionID = ""
 	}
 	defaultLLM := core.GetDefaultLLM()
+	var extraTools []core.Tool
+	reviewTool, err := s.reviewSubagentTool()
+	if err != nil {
+		return nil, fmt.Errorf("create review subagent tool: %w", err)
+	}
+	if reviewTool != nil {
+		extraTools = append(extraTools, reviewTool)
+	}
 	session, err := maestrocoding.NewSession(maestrocoding.Config{
 		LLM:          defaultLLM,
 		Workspace:    workspace,
@@ -459,6 +476,7 @@ func (s *MaestroService) codingSessionFor(ctx context.Context, workspace string)
 		SessionStore: s.sessionStore,
 		SystemPrompt: buildCodingSystemPrompt(defaultLLM, workspace, s.config.Owner, s.config.Repo),
 		AllowBash:    s.config.AllowCodingBash,
+		ExtraTools:   extraTools,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("create coding session: %w", err)
