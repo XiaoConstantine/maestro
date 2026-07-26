@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 )
 
 func TestReviewCommandDispatchesThroughBackend(t *testing.T) {
@@ -149,6 +150,19 @@ func containsAll(haystack string, needles ...string) bool {
 	return true
 }
 
+func TestRenderInfoSectionFitsNarrowAndWidePanes(t *testing.T) {
+	backend := &cancelAwareBackend{NoOpBackend: NewNoOpBackend("owner", "repo")}
+	model := NewMaestroModel(&MaestroConfig{}, backend)
+	for _, width := range []int{8, 24, 100, 121} {
+		model.width = width
+		for _, line := range strings.Split(model.renderInfoSection(), "\n") {
+			if got := lipgloss.Width(line); got > width {
+				t.Fatalf("renderInfoSection() line width = %d, want <= %d", got, width)
+			}
+		}
+	}
+}
+
 func TestPlanInputModeLayoutDropsChromeOnShortPane(t *testing.T) {
 	layout := planInputModeLayout(
 		7,
@@ -191,6 +205,88 @@ func TestPlanInputModeLayoutDropsProgressBeforeStatus(t *testing.T) {
 	}
 	if layout.conversationHeight < 3 {
 		t.Fatalf("conversationHeight = %d, want at least 3", layout.conversationHeight)
+	}
+}
+
+func TestWindowSizeUpdatesCommandPalette(t *testing.T) {
+	model := NewMaestroModel(&MaestroConfig{}, NewNoOpBackend("owner", "repo"))
+	_, _ = model.Update(tea.WindowSizeMsg{Width: 72, Height: 24})
+
+	if model.commandPalette.width != 68 {
+		t.Fatalf("command palette width = %d, want 68", model.commandPalette.width)
+	}
+	if model.commandPalette.height != 15 {
+		t.Fatalf("command palette height = %d, want 15", model.commandPalette.height)
+	}
+}
+
+func TestConfigureStatusBarUsesRunContext(t *testing.T) {
+	model := NewMaestroModel(&MaestroConfig{}, NewNoOpBackend("owner", "repo"))
+	model.codingRunActive = true
+	model.configureStatusBar()
+
+	if model.statusBar.mode != "RUNNING" {
+		t.Fatalf("status mode = %q, want RUNNING", model.statusBar.mode)
+	}
+	if got := strings.Join(model.statusBar.hints, " "); !strings.Contains(got, "esc cancel") {
+		t.Fatalf("status hints = %q, want cancellation hint", got)
+	}
+}
+
+func TestCommandPaletteOverlayPreservesStyledContent(t *testing.T) {
+	model := NewMaestroModel(&MaestroConfig{}, NewNoOpBackend("owner", "repo"))
+	model.width = 30
+	background := "\x1b[31mbackground\x1b[0m\nsecond line\nthird line"
+	overlay := "\x1b[36mcommands\x1b[0m"
+
+	view := model.overlayCommandPalette(background, overlay)
+	if !containsAll(view, "commands", "background") {
+		t.Fatalf("overlay view = %q, want foreground and background", view)
+	}
+}
+
+func TestHiddenSuggestionsDoNotInterceptSubmit(t *testing.T) {
+	var command string
+	input := NewInputModel(ClaudeCodeTheme(), func(cmd string, _ []string) tea.Cmd {
+		command = cmd
+		return nil
+	}, nil)
+	input.SetSuggestionLimit(0)
+	input.SetValue("/help")
+	input.updateSuggestions()
+
+	updated, _ := input.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if command != "help" {
+		t.Fatalf("submitted command = %q, want help", command)
+	}
+	if got := updated.Value(); got != "" {
+		t.Fatalf("input value = %q, want cleared after submit", got)
+	}
+}
+
+func TestInputControlJInsertsNewline(t *testing.T) {
+	input := NewInputModel(ClaudeCodeTheme(), nil, nil)
+	input.SetValue("first")
+	updated, _ := input.Update(tea.KeyPressMsg{Code: 'j', Mod: tea.ModCtrl})
+	if got := updated.Value(); got != "first\n" {
+		t.Fatalf("input value = %q, want newline", got)
+	}
+}
+
+func TestSuggestionLimitForPane(t *testing.T) {
+	tests := []struct {
+		height int
+		want   int
+	}{
+		{height: 10, want: 0},
+		{height: 12, want: 2},
+		{height: 18, want: 4},
+		{height: 24, want: 6},
+	}
+	for _, tc := range tests {
+		if got := suggestionLimitForPane(tc.height); got != tc.want {
+			t.Fatalf("suggestionLimitForPane(%d) = %d, want %d", tc.height, got, tc.want)
+		}
 	}
 }
 

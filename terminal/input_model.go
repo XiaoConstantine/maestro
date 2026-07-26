@@ -1,11 +1,14 @@
 package terminal
 
 import (
+	"fmt"
 	"strings"
 
+	"charm.land/bubbles/v2/key"
 	"charm.land/bubbles/v2/textarea"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 )
 
 // InputCommandHandler is called when a slash command is entered.
@@ -36,21 +39,26 @@ type InputModel struct {
 	focused bool
 
 	// Command autocomplete
-	showSuggestions    bool
-	suggestions        []Command
-	selectedSuggestion int
-	allCommands        []Command // All available commands for autocomplete
+	showSuggestions       bool
+	suggestions           []Command
+	selectedSuggestion    int
+	maxVisibleSuggestions int
+	allCommands           []Command // All available commands for autocomplete
 }
 
 // NewInputModel creates a new input model.
 func NewInputModel(theme *Theme, onCommand InputCommandHandler, onQuestion InputQuestionHandler) *InputModel {
 	ta := textarea.New()
-	ta.Placeholder = "Ready for instructions"
+	ta.Placeholder = "Describe a coding task…"
 	ta.CharLimit = 4000
 	ta.SetWidth(80)
 	ta.SetHeight(3) // Allow multi-line input like Crush
 	ta.ShowLineNumbers = false
 	ta.Focus()
+	ta.KeyMap.InsertNewline = key.NewBinding(
+		key.WithKeys("ctrl+j"),
+		key.WithHelp("ctrl+j", "new line"),
+	)
 
 	// Style the textarea with v2 API
 	ta.SetStyles(textarea.Styles{
@@ -71,15 +79,16 @@ func NewInputModel(theme *Theme, onCommand InputCommandHandler, onQuestion Input
 	})
 
 	m := &InputModel{
-		textarea:     ta,
-		theme:        theme,
-		styles:       theme.CreateStyles(),
-		onCommand:    onCommand,
-		onQuestion:   onQuestion,
-		history:      []string{},
-		historyIndex: -1,
-		focused:      true,
-		allCommands:  getBuiltinCommands(),
+		textarea:              ta,
+		theme:                 theme,
+		styles:                theme.CreateStyles(),
+		onCommand:             onCommand,
+		onQuestion:            onQuestion,
+		history:               []string{},
+		historyIndex:          -1,
+		focused:               true,
+		maxVisibleSuggestions: 6,
+		allCommands:           getBuiltinCommands(),
 	}
 
 	// Set Crush-style prompt function
@@ -116,8 +125,8 @@ func (m *InputModel) Update(msg tea.Msg) (*InputModel, tea.Cmd) {
 	case tea.KeyPressMsg:
 		switch msg.String() {
 		case "tab":
-			// Autocomplete command if showing suggestions
-			if m.showSuggestions && len(m.suggestions) > 0 {
+			// Autocomplete command if showing suggestions.
+			if m.suggestionsActive() {
 				selected := m.suggestions[m.selectedSuggestion]
 				m.textarea.SetValue("/" + selected.Name + " ")
 				m.textarea.MoveToEnd()
@@ -128,8 +137,8 @@ func (m *InputModel) Update(msg tea.Msg) (*InputModel, tea.Cmd) {
 			}
 
 		case "enter":
-			// If showing suggestions, select the current one
-			if m.showSuggestions && len(m.suggestions) > 0 {
+			// If visible suggestions are showing, select the current one.
+			if m.suggestionsActive() {
 				selected := m.suggestions[m.selectedSuggestion]
 				m.textarea.SetValue("/" + selected.Name + " ")
 				m.textarea.MoveToEnd()
@@ -167,8 +176,8 @@ func (m *InputModel) Update(msg tea.Msg) (*InputModel, tea.Cmd) {
 			return m, questionCmd
 
 		case "up":
-			// Navigate suggestions if showing
-			if m.showSuggestions && len(m.suggestions) > 0 {
+			// Navigate suggestions if showing.
+			if m.suggestionsActive() {
 				m.selectedSuggestion--
 				if m.selectedSuggestion < 0 {
 					m.selectedSuggestion = len(m.suggestions) - 1
@@ -185,8 +194,8 @@ func (m *InputModel) Update(msg tea.Msg) (*InputModel, tea.Cmd) {
 			}
 
 		case "down":
-			// Navigate suggestions if showing
-			if m.showSuggestions && len(m.suggestions) > 0 {
+			// Navigate suggestions if showing.
+			if m.suggestionsActive() {
 				m.selectedSuggestion++
 				if m.selectedSuggestion >= len(m.suggestions) {
 					m.selectedSuggestion = 0
@@ -242,6 +251,10 @@ func (m *InputModel) Update(msg tea.Msg) (*InputModel, tea.Cmd) {
 	m.updateSuggestions()
 
 	return m, cmd
+}
+
+func (m *InputModel) suggestionsActive() bool {
+	return m.maxVisibleSuggestions > 0 && m.showSuggestions && len(m.suggestions) > 0
 }
 
 // updateSuggestions updates command suggestions based on current input.
@@ -306,20 +319,23 @@ func (m *InputModel) updateSuggestions() {
 
 // View renders the input with Crush-style appearance.
 func (m *InputModel) View() string {
-	// Container style - minimal padding like Crush
 	container := lipgloss.NewStyle().
-		Width(m.width).
-		Padding(1)
+		Width(max(1, m.width)).
+		Padding(0, 1)
 
-	inputView := m.textarea.View()
-
-	// Render suggestions if showing
-	if m.showSuggestions && len(m.suggestions) > 0 {
-		suggestionsView := m.renderSuggestions()
-		return container.Render(lipgloss.JoinVertical(lipgloss.Left, suggestionsView, inputView))
+	label := lipgloss.NewStyle().Foreground(m.theme.Accent).Bold(true).Render("TASK")
+	hint := lipgloss.NewStyle().Foreground(m.theme.TextMuted).Render("enter run  •  ctrl+j newline  •  / commands")
+	header := label
+	if m.width >= 48 {
+		header += "  " + hint
 	}
 
-	return container.Render(inputView)
+	parts := []string{header}
+	if m.showSuggestions && len(m.suggestions) > 0 && m.maxVisibleSuggestions > 0 {
+		parts = append(parts, m.renderSuggestions())
+	}
+	parts = append(parts, m.textarea.View())
+	return container.Render(lipgloss.JoinVertical(lipgloss.Left, parts...))
 }
 
 // renderSuggestions renders the command autocomplete suggestions.
@@ -339,7 +355,11 @@ func (m *InputModel) renderSuggestions() string {
 	descStyle := lipgloss.NewStyle().
 		Foreground(m.theme.TextMuted)
 
-	for i, cmd := range m.suggestions {
+	limit := max(1, m.maxVisibleSuggestions)
+	start := max(0, m.selectedSuggestion-limit+1)
+	end := min(len(m.suggestions), start+limit)
+	for i := start; i < end; i++ {
+		cmd := m.suggestions[i]
 		style := normalStyle
 		if i == m.selectedSuggestion {
 			style = selectedStyle
@@ -347,14 +367,21 @@ func (m *InputModel) renderSuggestions() string {
 
 		line := style.Render("/" + cmd.Name + " ")
 		line += descStyle.Render(cmd.Description)
-		lines = append(lines, line)
+		lines = append(lines, ansi.Truncate(line, max(1, m.width-4), "…"))
+	}
+	if hidden := len(m.suggestions) - (end - start); hidden > 0 {
+		lines = append(lines, descStyle.Render(fmt.Sprintf("  … %d more", hidden)))
 	}
 
 	// Add hint at bottom
 	hintStyle := lipgloss.NewStyle().
 		Foreground(m.theme.TextMuted).
 		PaddingLeft(2)
-	lines = append(lines, hintStyle.Render("↑↓ navigate • tab/enter select • esc cancel"))
+	lines = append(lines, ansi.Truncate(
+		hintStyle.Render("↑↓ navigate • tab/enter select • esc cancel"),
+		max(1, m.width-4),
+		"…",
+	))
 
 	return lipgloss.JoinVertical(lipgloss.Left, lines...)
 }
@@ -382,8 +409,13 @@ func (m *InputModel) promptFunc(info textarea.PromptInfo) string {
 func (m *InputModel) SetSize(width, height int) {
 	m.width = width
 	m.height = height
-	m.textarea.SetWidth(width - 4) // Account for prompt and padding
+	m.textarea.SetWidth(max(1, width-4)) // Account for prompt and padding
 	m.textarea.SetHeight(max(1, height))
+}
+
+// SetSuggestionLimit caps autocomplete rows so the editor remains visible.
+func (m *InputModel) SetSuggestionLimit(limit int) {
+	m.maxVisibleSuggestions = max(0, limit)
 }
 
 // Focus sets focus on the input.

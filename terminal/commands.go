@@ -8,6 +8,7 @@ import (
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 )
 
 // Command represents a command that can be executed.
@@ -170,16 +171,16 @@ func (cp *CommandPaletteModel) Init() tea.Cmd {
 func (cp *CommandPaletteModel) Update(msg tea.Msg) (CommandPaletteModel, tea.Cmd) {
 	var cmd tea.Cmd
 
+	if size, ok := msg.(tea.WindowSizeMsg); ok {
+		cp.width = max(1, min(80, size.Width-4))
+		cp.height = max(1, min(cp.maxHeight, size.Height-4))
+		cp.input.SetWidth(max(1, cp.width-4))
+	}
 	if !cp.visible {
 		return *cp, nil
 	}
 
 	switch msg := msg.(type) {
-	case tea.WindowSizeMsg:
-		cp.width = min(80, msg.Width-10)
-		cp.height = min(cp.maxHeight, msg.Height/2)
-		cp.input.SetWidth(cp.width - 4)
-
 	case tea.KeyPressMsg:
 		switch msg.String() {
 		case "esc", "ctrl+c":
@@ -250,6 +251,14 @@ func (cp *CommandPaletteModel) View() string {
 
 	var content strings.Builder
 
+	title := lipgloss.NewStyle().Foreground(cp.theme.Accent).Bold(true).Render("COMMANDS")
+	content.WriteString(title)
+	if cp.width >= 48 {
+		hint := lipgloss.NewStyle().Foreground(cp.theme.TextMuted).Render("  ↑↓ navigate  enter select  esc close")
+		content.WriteString(hint)
+	}
+	content.WriteString("\n")
+
 	// Input field
 	inputStyle := lipgloss.NewStyle().
 		Border(lipgloss.NormalBorder()).
@@ -268,22 +277,28 @@ func (cp *CommandPaletteModel) View() string {
 			BorderTop(false).
 			BorderForeground(cp.theme.Border).
 			Padding(0, 1).
-			Width(cp.width)
+			Width(max(1, cp.width-2))
 
 		var items []string
-		maxItems := min(10, len(cp.filteredCmds))
+		availableRows := max(1, cp.height-5)
+		maxItems := min(availableRows, len(cp.filteredCmds))
+		if len(cp.filteredCmds) > availableRows {
+			maxItems = max(1, availableRows-1) // Reserve one row for position.
+		}
+		start := max(0, cp.selected-maxItems+1)
+		end := min(len(cp.filteredCmds), start+maxItems)
 
-		for i := 0; i < maxItems; i++ {
+		for i := start; i < end; i++ {
 			cmd := cp.filteredCmds[i]
 			item := cp.renderCommandItem(cmd, i == cp.selected)
 			items = append(items, item)
 		}
 
-		if len(cp.filteredCmds) > maxItems {
-			more := lipgloss.NewStyle().Foreground(cp.theme.TextMuted).Render(
-				fmt.Sprintf("... and %d more", len(cp.filteredCmds)-maxItems),
+		if start > 0 || end < len(cp.filteredCmds) {
+			position := lipgloss.NewStyle().Foreground(cp.theme.TextMuted).Render(
+				fmt.Sprintf("%d–%d of %d", start+1, end, len(cp.filteredCmds)),
 			)
-			items = append(items, more)
+			items = append(items, position)
 		}
 
 		content.WriteString(listStyle.Render(strings.Join(items, "\n")))
@@ -336,24 +351,20 @@ func (cp *CommandPaletteModel) renderCommandItem(cmd Command, selected bool) str
 
 	line := fmt.Sprintf("%s %s%s%s", category, name, aliases, desc)
 
-	// Truncate if too long
-	maxWidth := cp.width - 4
-	if maxWidth < 3 {
-		maxWidth = 3
-	}
-	if len(line) > maxWidth {
-		if maxWidth >= 4 {
-			line = line[:maxWidth-3] + "..."
-		} else {
-			line = "..."
-		}
-	}
-
-	return line
+	// Truncate by terminal cell width without slicing ANSI escape sequences.
+	return ansi.Truncate(line, max(1, cp.width-4), "…")
 }
 
 // filterCommands filters commands based on input.
 func (cp *CommandPaletteModel) filterCommands(input string) {
+	defer func() {
+		if len(cp.filteredCmds) == 0 {
+			cp.selected = 0
+			return
+		}
+		cp.selected = min(max(0, cp.selected), len(cp.filteredCmds)-1)
+	}()
+
 	if input == "" {
 		cp.filteredCmds = cp.commands
 		return

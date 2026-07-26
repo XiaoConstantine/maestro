@@ -9,6 +9,7 @@ import (
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 )
 
 // MaestroModel is the root TUI model that manages all modes.
@@ -103,11 +104,9 @@ func NewMaestroModel(cfg *MaestroConfig, backend MaestroBackend) *MaestroModel {
 	// Create input model
 	m.inputModel = NewInputModel(theme, m.handleCommand, m.handleQuestion)
 
-	// Set up status bar
+	// Set up status bar. Workspace and model details are rendered in the header.
 	m.statusBar.SetMode("INPUT")
-	if cfg != nil {
-		m.statusBar.SetMessage(fmt.Sprintf("Repository: %s/%s", cfg.Owner, cfg.Repo))
-	}
+	m.statusBar.SetMessage("Ready")
 
 	// Register command handlers
 	m.registerCommands()
@@ -143,10 +142,16 @@ func (m *MaestroModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Forward to sub-models
 		if m.inputModel != nil {
 			m.inputModel.SetSize(m.width, inputTextareaHeightForPane(m.height))
+			m.inputModel.SetSuggestionLimit(suggestionLimitForPane(m.height))
 		}
 		if m.statusBar != nil {
 			newSB, cmd := m.statusBar.Update(msg)
 			m.statusBar = &newSB
+			cmds = append(cmds, cmd)
+		}
+		if m.commandPalette != nil {
+			newCP, cmd := m.commandPalette.Update(msg)
+			m.commandPalette = &newCP
 			cmds = append(cmds, cmd)
 		}
 
@@ -183,7 +188,8 @@ func (m *MaestroModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if m.backend != nil {
 					m.backend.CancelCodingTask()
 				}
-				m.progressModel.SetMessage("Canceling...")
+				m.progressModel.SetMessage("Canceling…")
+				m.statusBar.SetMessage("Waiting for the active run to stop")
 				return m, nil
 			}
 			if m.commandPalette.IsVisible() {
@@ -431,6 +437,7 @@ func (m *MaestroModel) View() tea.View {
 func (m *MaestroModel) renderInputMode() string {
 	if m.inputModel != nil {
 		m.inputModel.SetSize(m.width, inputTextareaHeightForPane(m.height))
+		m.inputModel.SetSuggestionLimit(suggestionLimitForPane(m.height))
 	}
 
 	// Determine if we should show full logo or compact
@@ -454,6 +461,7 @@ func (m *MaestroModel) renderInputMode() string {
 	inputBox := m.inputModel.View()
 
 	// Status bar
+	m.configureStatusBar()
 	statusView := m.statusBar.View()
 
 	layout := planInputModeLayout(
@@ -499,53 +507,70 @@ func (m *MaestroModel) renderInputMode() string {
 	return lipgloss.JoinVertical(lipgloss.Left, sections...)
 }
 
-// renderInfoSection renders the info area below the logo (path, model, etc.)
+// renderInfoSection renders the authoritative workspace and active model.
 func (m *MaestroModel) renderInfoSection() string {
-	pathStyle := lipgloss.NewStyle().
-		Foreground(m.theme.TextMuted).
-		PaddingLeft(2)
-
-	modelIconStyle := lipgloss.NewStyle().
-		Foreground(m.theme.TextMuted)
-
-	modelNameStyle := lipgloss.NewStyle().
-		Foreground(m.theme.TextPrimary)
-
-	// Authoritative workspace path
-	var pathLine string
 	workspace := ""
 	if provider, ok := m.backend.(workspaceInfoProvider); ok {
 		workspace = strings.TrimSpace(provider.GetWorkspace())
 	}
 	if workspace == "" {
-		cwd, _ := os.Getwd()
-		workspace = cwd
+		workspace, _ = os.Getwd()
 	}
-	if workspace != "" {
-		home, _ := os.UserHomeDir()
-		if home != "" && strings.HasPrefix(workspace, home) {
-			workspace = "~" + workspace[len(home):]
-		}
-		pathLine = pathStyle.Render(workspace)
+	if home, _ := os.UserHomeDir(); home != "" && strings.HasPrefix(workspace, home) {
+		workspace = "~" + workspace[len(home):]
 	}
 
-	// Model info line
 	modelLabel := "Maestro coding agent"
 	if provider, ok := m.backend.(modelInfoProvider); ok {
 		if info := strings.TrimSpace(provider.GetModelInfo()); info != "" {
 			modelLabel = info
 		}
 	}
-	modelLine := lipgloss.NewStyle().PaddingLeft(2).Render(
-		modelIconStyle.Render("◇ ") + modelNameStyle.Render(modelLabel),
-	)
 
-	return lipgloss.JoinVertical(lipgloss.Left,
-		pathLine,
-		"",
-		modelLine,
-		"",
-	)
+	labelStyle := lipgloss.NewStyle().Foreground(m.theme.TextMuted)
+	valueStyle := lipgloss.NewStyle().Foreground(m.theme.TextPrimary)
+	lineWidth := m.width
+	if lineWidth <= 0 {
+		lineWidth = 80
+	}
+	renderLine := func(name, value string, width int) string {
+		prefix := "  " + labelStyle.Render(name)
+		if lipgloss.Width(prefix) >= width {
+			return ansi.Truncate(prefix, width, "")
+		}
+		remaining := width - lipgloss.Width(prefix)
+		return prefix + valueStyle.Render(ansi.Truncate(value, remaining, "…"))
+	}
+
+	if m.width >= 100 {
+		columnWidth := max(1, (m.width-4)/2)
+		workspaceLine := renderLine("workspace ", workspace, columnWidth)
+		modelLine := renderLine("model ", modelLabel, columnWidth)
+		return workspaceLine + "    " + modelLine
+	}
+	workspaceLine := renderLine("workspace ", workspace, lineWidth)
+	modelLine := renderLine("model     ", modelLabel, lineWidth)
+	return lipgloss.JoinVertical(lipgloss.Left, workspaceLine, modelLine)
+}
+
+func (m *MaestroModel) configureStatusBar() {
+	switch {
+	case m.codingRunActive:
+		m.statusBar.SetMode("RUNNING")
+		m.statusBar.SetHints("esc cancel", "ctrl+p commands", "ctrl+c quit")
+	case m.mode == ModeSessionPicker:
+		m.statusBar.SetMode("SESSIONS")
+		m.statusBar.SetHints("↑↓ navigate", "enter switch", "esc close")
+	case len(m.reviewResults) > 0 && m.inputFocus == FocusReviewList:
+		m.statusBar.SetMode("REVIEW")
+		m.statusBar.SetHints("↑↓ navigate", "enter detail", "tab input", "esc close")
+	case m.progressModel.IsVisible():
+		m.statusBar.SetMode("WORKING")
+		m.statusBar.SetHints("ctrl+p commands", "ctrl+c quit")
+	default:
+		m.statusBar.SetMode("INPUT")
+		m.statusBar.SetHints("ctrl+p commands", "/help", "ctrl+c quit")
+	}
 }
 
 // updateLayout updates component sizes based on terminal dimensions.
@@ -617,6 +642,19 @@ func planInputModeLayout(totalHeight, logoHeight, infoHeight, progressHeight, in
 
 	layout.conversationHeight = max(1, totalHeight-reserved)
 	return layout
+}
+
+func suggestionLimitForPane(height int) int {
+	switch {
+	case height < 12:
+		return 0
+	case height < 16:
+		return 2
+	case height < 22:
+		return 4
+	default:
+		return 6
+	}
 }
 
 func inputTextareaHeightForPane(totalHeight int) int {
@@ -761,6 +799,7 @@ func (m *MaestroModel) handleQuestion(question string) (tea.Cmd, bool) {
 	}
 	m.addMessage("user", question)
 	m.codingRunActive = true
+	m.statusBar.SetMessage("Coding in the active workspace")
 	runCtx, cancel := context.WithCancel(m.ctx)
 	m.codingCancel = cancel
 
@@ -810,11 +849,12 @@ Current session: %s
 
 Keyboard shortcuts:
   Ctrl+P                 Open command palette
-  Ctrl+C                 Exit
-  Up/Down                Scroll conversation
-  i                      Enter insert mode
-  Enter                  Submit input (insert mode)
-  Esc                    Cancel the active coding run`, currentSession)
+  Enter                  Run the current prompt
+  Ctrl+J                 Insert a newline in the prompt
+  Up/Down                Navigate suggestions or prompt history
+  Tab                    Switch between review results and input
+  Esc                    Cancel an active coding run or close the current overlay
+  Ctrl+C                 Exit`, currentSession)
 
 	return func() tea.Msg {
 		return ResponseMsg{Content: help}
@@ -1593,43 +1633,21 @@ func wrapTextSimple(text string, width int) []string {
 	return lines
 }
 
-// overlayCommandPalette overlays the command palette on the background.
+// overlayCommandPalette composes the palette without slicing ANSI escape sequences.
 func (m *MaestroModel) overlayCommandPalette(background, overlay string) string {
-	bgLines := strings.Split(background, "\n")
-	overlayLines := strings.Split(overlay, "\n")
+	backgroundHeight := sectionHeight(background)
+	overlayHeight := sectionHeight(overlay)
+	overlayWidth := lipgloss.Width(overlay)
+	startX := max(0, (m.width-overlayWidth)/2)
+	startY := max(0, (backgroundHeight-overlayHeight)/2)
 
-	// Center vertically
-	startY := (len(bgLines) - len(overlayLines)) / 2
-	if startY < 0 {
-		startY = 0
-	}
-
-	// Center horizontally
-	overlayWidth := 0
-	for _, line := range overlayLines {
-		if w := lipgloss.Width(line); w > overlayWidth {
-			overlayWidth = w
-		}
-	}
-	startX := (m.width - overlayWidth) / 2
-	if startX < 0 {
-		startX = 0
-	}
-
-	// Overlay
-	for i, overlayLine := range overlayLines {
-		if startY+i < len(bgLines) {
-			bgLine := bgLines[startY+i]
-			// Simple replacement - could be improved with proper width handling
-			padded := strings.Repeat(" ", startX) + overlayLine
-			if len(padded) < len(bgLine) {
-				padded += bgLine[len(padded):]
-			}
-			bgLines[startY+i] = padded
-		}
-	}
-
-	return strings.Join(bgLines, "\n")
+	canvas := lipgloss.NewCanvas(max(1, m.width), max(1, backgroundHeight))
+	layers := lipgloss.NewCompositor(
+		lipgloss.NewLayer(background),
+		lipgloss.NewLayer(overlay).X(startX).Y(startY).Z(1),
+	)
+	canvas.Compose(layers)
+	return canvas.Render()
 }
 
 // ResponseMsg is sent when an async operation completes successfully.

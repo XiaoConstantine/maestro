@@ -36,7 +36,7 @@ File tools reject paths outside the authoritative workspace root. Shell executio
 
 The coding agent receives explicit provider/model/workspace instructions and evidence rules: after any `write` or `edit`, it must verify the mutation with tool evidence before calling `Finish`. Final answers should describe only mutations that were actually observed in the workspace trace.
 
-One run may mutate a session at a time. Overlapping prompts are rejected. Press **Esc** to cancel the active coding run. Run, turn, and tool lifecycle events update the TUI progress display. Output and accounting use the operation-scoped `ExecutionTrace` returned by `ExecuteWithTrace`, avoiding races against a mutable last-trace accessor.
+One run may mutate a session at a time. Overlapping prompts are rejected. Press **Esc** to cancel the active coding run. Run, turn, and tool lifecycle events update the TUI progress display. The contextual status bar keeps cancellation and navigation actions visible without overwhelming narrow terminals. Output and accounting use the operation-scoped `ExecutionTrace` returned by `ExecuteWithTrace`, avoiding races against a mutable last-trace accessor.
 
 The active Maestro session name selects the native session id, so switching or creating a session selects separate persisted coding history.
 
@@ -57,7 +57,17 @@ Enter a task such as:
 Inspect the failing tests, implement the smallest fix, and run the focused tests.
 ```
 
-In interactive mode, the workspace is the current working directory you launched Maestro from. The header path, coding tools, and any file-tree view should all refer to that same root.
+In interactive mode, the workspace is the current working directory you launched Maestro from. The responsive header labels that workspace and the active provider/model; coding tools and any file-tree view should all refer to the same root.
+
+Prompt controls:
+
+- **Enter** runs the current task.
+- **Ctrl+J** inserts a newline without submitting.
+- **/** displays matching slash commands inline.
+- **Ctrl+P** opens the searchable command palette.
+- **Up/Down** navigates command suggestions or prompt history.
+- **Tab** switches focus between inline review results and the prompt.
+- **Esc** cancels an active coding run or closes the current picker/detail view.
 
 For a non-interactive smoke test:
 

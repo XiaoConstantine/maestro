@@ -7,6 +7,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 )
 
 // ToolStatus represents the status of a running tool.
@@ -28,6 +29,7 @@ type StatusBarModel struct {
 	tools    []ToolStatus
 	message  string // Status message
 	showHelp bool
+	hints    []string
 	styles   *ComponentStyles
 	theme    *Theme
 }
@@ -70,40 +72,54 @@ func (sb *StatusBarModel) View() string {
 	return sb.renderDefaultBar()
 }
 
-// renderDefaultBar renders the Crush-style help hints bar.
+// renderDefaultBar renders status on the left and context-sensitive hints on the right.
 func (sb *StatusBarModel) renderDefaultBar() string {
-	// Crush-style: show keyboard shortcuts at bottom
-	// Like: "ctrl+p commands • ctrl+l models • ctrl+j newline • ctrl+c quit • ctrl+g more"
-
-	hints := sb.getCrushStyleHints()
-	hintStyle := lipgloss.NewStyle().
-		Foreground(sb.theme.TextMuted)
-
-	separator := lipgloss.NewStyle().
-		Foreground(sb.theme.TextMuted).
-		Render(" • ")
-
-	var parts []string
-	for _, hint := range hints {
-		parts = append(parts, hintStyle.Render(hint))
+	mode := lipgloss.NewStyle().Foreground(sb.theme.Accent).Bold(true).Render(sb.mode)
+	left := mode
+	if sb.message != "" {
+		left += "  " + lipgloss.NewStyle().Foreground(sb.theme.TextSecondary).Render(sb.message)
 	}
 
-	content := strings.Join(parts, separator)
+	hints := sb.hints
+	if len(hints) == 0 {
+		hints = sb.getDefaultHints()
+	}
+	if len(hints) > 0 {
+		firstHintWidth := lipgloss.Width(hints[0])
+		modeWidth := lipgloss.Width(mode)
+		if firstHintWidth+modeWidth+1 <= sb.width {
+			left = ansi.Truncate(left, sb.width-firstHintWidth-1, "…")
+		}
+	}
+	right := sb.fitHints(hints, max(0, sb.width-lipgloss.Width(left)-1))
+	if right == "" {
+		return ansi.Truncate(left, sb.width, "…")
+	}
 
-	// Center the content
-	contentWidth := lipgloss.Width(content)
-	leftPad := max(0, (sb.width-contentWidth)/2)
-
-	return strings.Repeat(" ", leftPad) + content
+	gap := max(1, sb.width-lipgloss.Width(left)-lipgloss.Width(right))
+	return ansi.Truncate(left+strings.Repeat(" ", gap)+right, sb.width, "")
 }
 
-// getCrushStyleHints returns keyboard shortcut hints like Crush.
-func (sb *StatusBarModel) getCrushStyleHints() []string {
-	return []string{
-		"ctrl+p commands",
-		"/help for help",
-		"ctrl+c quit",
+func (sb *StatusBarModel) fitHints(hints []string, available int) string {
+	if available <= 0 {
+		return ""
 	}
+	separator := lipgloss.NewStyle().Foreground(sb.theme.TextMuted).Render(" • ")
+	style := lipgloss.NewStyle().Foreground(sb.theme.TextMuted)
+	parts := make([]string, 0, len(hints))
+	for _, hint := range hints {
+		rendered := style.Render(hint)
+		candidate := strings.Join(append(parts, rendered), separator)
+		if lipgloss.Width(candidate) > available {
+			break
+		}
+		parts = append(parts, rendered)
+	}
+	return strings.Join(parts, separator)
+}
+
+func (sb *StatusBarModel) getDefaultHints() []string {
+	return []string{"ctrl+p commands", "/help", "ctrl+c quit"}
 }
 
 // Public methods for external updates
@@ -121,6 +137,11 @@ func (sb *StatusBarModel) SetBranch(branch string) {
 // SetMessage sets a status message.
 func (sb *StatusBarModel) SetMessage(message string) {
 	sb.message = message
+}
+
+// SetHints replaces the keyboard hints with context-specific actions.
+func (sb *StatusBarModel) SetHints(hints ...string) {
+	sb.hints = append(sb.hints[:0], hints...)
 }
 
 // AddTool adds a tool status.
