@@ -38,7 +38,7 @@ type StatusBarModel struct {
 func NewStatusBar(theme *Theme) *StatusBarModel {
 	return &StatusBarModel{
 		height:   1,
-		mode:     "NORMAL",
+		mode:     "",
 		branch:   "main",
 		tools:    []ToolStatus{},
 		styles:   theme.CreateComponentStyles(),
@@ -77,7 +77,12 @@ func (sb *StatusBarModel) renderDefaultBar() string {
 	mode := lipgloss.NewStyle().Foreground(sb.theme.Accent).Bold(true).Render(sb.mode)
 	left := mode
 	if sb.message != "" {
-		left += "  " + lipgloss.NewStyle().Foreground(sb.theme.TextSecondary).Render(sb.message)
+		message := lipgloss.NewStyle().Foreground(sb.theme.TextSecondary).Render(sb.message)
+		if left == "" {
+			left = message
+		} else {
+			left += "  " + message
+		}
 	}
 
 	hints := sb.hints

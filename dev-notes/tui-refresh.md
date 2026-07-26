@@ -17,6 +17,7 @@ The focused UX pass preserves Maestro's existing dark/coral visual language whil
 - a searchable, correctly sized command palette
 - bounded inline command suggestions
 - explicit prompt controls, including Ctrl+J for multiline input
+- quiet idle chrome: the composer and status bar omit redundant `TASK` and `INPUT` labels while retaining meaningful active-state labels
 - safer rendering at narrow terminal widths
 
 ## Why

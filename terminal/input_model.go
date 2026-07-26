@@ -313,21 +313,22 @@ func (m *InputModel) View() string {
 		Width(max(1, m.width)).
 		Padding(0, 1)
 
-	label := lipgloss.NewStyle().Foreground(m.theme.Accent).Bold(true).Render("TASK")
-	hint := lipgloss.NewStyle().Foreground(m.theme.TextMuted).Render("enter run  •  ctrl+j newline  •  / commands")
-	header := label
+	muted := lipgloss.NewStyle().Foreground(m.theme.TextMuted)
+	headerParts := make([]string, 0, 2)
 	if m.width >= 48 {
-		header += "  " + hint
+		headerParts = append(headerParts, muted.Render("enter run  •  ctrl+j newline  •  / commands"))
 	}
 	if lines := strings.Count(m.textarea.Value(), "\n") + 1; lines > 1 {
-		meta := lipgloss.NewStyle().Foreground(m.theme.TextMuted).Render(
-			fmt.Sprintf("  %d lines · %d chars", lines, utf8.RuneCountInString(m.textarea.Value())),
-		)
-		header += meta
+		headerParts = append(headerParts, muted.Render(
+			fmt.Sprintf("%d lines · %d chars", lines, utf8.RuneCountInString(m.textarea.Value())),
+		))
 	}
-	header = ansi.Truncate(header, max(1, m.width-4), "…")
 
-	parts := []string{header}
+	parts := make([]string, 0, 3)
+	if len(headerParts) > 0 {
+		header := ansi.Truncate(strings.Join(headerParts, "  "), max(1, m.width-4), "…")
+		parts = append(parts, header)
+	}
 	if m.showSuggestions && len(m.suggestions) > 0 && m.maxVisibleSuggestions > 0 {
 		parts = append(parts, m.renderSuggestions())
 	}

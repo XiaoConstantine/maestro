@@ -161,7 +161,7 @@ func NewMaestroModel(cfg *MaestroConfig, backend MaestroBackend) *MaestroModel {
 	}
 
 	// Set up status bar. Workspace and model details are rendered in the header.
-	m.statusBar.SetMode("INPUT")
+	m.statusBar.SetMode("")
 	m.statusBar.SetMessage("Ready")
 
 	// Add welcome message
@@ -271,7 +271,7 @@ func (m *MaestroModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.sessionPickerIdx = 0
 				m.modelPickerModels = nil
 				m.modelPickerIdx = 0
-				m.statusBar.SetMode(ModeInput.String())
+				m.statusBar.SetMode("")
 				m.setInputFocus(FocusInput)
 				return m, nil
 			}
@@ -911,7 +911,7 @@ func (m *MaestroModel) configureStatusBar() {
 		m.statusBar.SetMode("WORKING")
 		m.statusBar.SetHints("ctrl+p commands", "ctrl+c quit")
 	default:
-		m.statusBar.SetMode("INPUT")
+		m.statusBar.SetMode("")
 		_, canSwitchModel := m.backend.(modelSelectionProvider)
 		hints := []string{"ctrl+p commands"}
 		if canSwitchModel {

@@ -424,6 +424,19 @@ func TestWindowSizeUpdatesCommandPalette(t *testing.T) {
 	}
 }
 
+func TestIdleComposerOmitsRedundantModeLabels(t *testing.T) {
+	model := NewMaestroModel(&MaestroConfig{}, NewNoOpBackend("owner", "repo"))
+	_, _ = model.Update(tea.WindowSizeMsg{Width: 72, Height: 24})
+	model.configureStatusBar()
+
+	if composer := ansi.Strip(model.inputModel.View()); strings.Contains(composer, "TASK") {
+		t.Fatalf("idle composer retained TASK label: %q", composer)
+	}
+	if status := ansi.Strip(model.statusBar.View()); strings.Contains(status, "INPUT") {
+		t.Fatalf("idle status retained INPUT label: %q", status)
+	}
+}
+
 func TestConfigureStatusBarUsesRunContext(t *testing.T) {
 	model := NewMaestroModel(&MaestroConfig{}, NewNoOpBackend("owner", "repo"))
 	model.codingRunActive = true
