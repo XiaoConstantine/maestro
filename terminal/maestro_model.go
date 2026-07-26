@@ -19,8 +19,11 @@ type MaestroModel struct {
 	mode MaestroMode
 
 	// Sub-models
-	inputModel    *InputModel
-	progressModel *ProgressModel
+	inputModel            *InputModel
+	progressModel         *ProgressModel
+	toolActivity          *ToolActivityModel
+	toolActivityAnchor    int
+	toolActivityStartLine int
 
 	// Shared components
 	statusBar      *StatusBarModel
@@ -75,6 +78,10 @@ type CodingResultMsg struct {
 	Error   error
 }
 
+type CodingEventMsg struct {
+	Event CodingEvent
+}
+
 // NewMaestroModel creates a new root TUI model.
 func NewMaestroModel(cfg *MaestroConfig, backend MaestroBackend) *MaestroModel {
 	theme := ClaudeCodeTheme()
@@ -90,6 +97,7 @@ func NewMaestroModel(cfg *MaestroConfig, backend MaestroBackend) *MaestroModel {
 		statusBar:      NewStatusBar(theme),
 		commandPalette: NewCommandPalette(theme),
 		progressModel:  NewProgressModel(theme),
+		toolActivity:   NewToolActivityModel(theme),
 		theme:          theme,
 		styles:         styles,
 		messages:       []Message{},
@@ -197,7 +205,7 @@ func (m *MaestroModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.sessionPickerSessions = nil
 				m.sessionPickerIdx = 0
 				m.statusBar.SetMode(ModeInput.String())
-				m.inputModel.Focus() // Re-focus input after exiting picker
+				m.setInputFocus(FocusInput)
 				return m, nil
 			}
 			// Close review detail view
@@ -206,19 +214,25 @@ func (m *MaestroModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.renderMessages()
 				return m, nil
 			}
+			if m.inputFocus == FocusToolActivity {
+				m.setInputFocus(FocusInput)
+				m.renderMessages()
+				return m, nil
+			}
 			// Clear review results
 			if len(m.reviewResults) > 0 {
 				m.reviewResults = nil
 				m.selectedReviewIdx = 0
-				m.inputFocus = FocusInput
-				m.inputModel.Focus()
+				m.setInputFocus(FocusInput)
 				m.renderMessages()
 				return m, nil
 			}
 
 		case "tab":
-			// Cycle focus between review list and input (Crush-style)
-			if len(m.reviewResults) > 0 && !m.commandPalette.IsVisible() {
+			if m.inputFocus == FocusInput && m.inputModel.HasActiveSuggestions() {
+				break
+			}
+			if (len(m.reviewResults) > 0 || m.toolActivity.HasTools()) && !m.commandPalette.IsVisible() {
 				m.changeFocus()
 				m.renderMessages()
 				return m, nil
@@ -249,8 +263,31 @@ func (m *MaestroModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.sessionPickerSessions = nil
 				m.sessionPickerIdx = 0
 				m.statusBar.SetMode(ModeInput.String())
-				m.inputModel.Focus() // Re-focus input after exiting picker
+				m.setInputFocus(FocusInput)
 				return m, m.cmdSessionSwitch(selected.Name)
+			}
+		}
+
+		if m.inputFocus == FocusToolActivity && m.toolActivity.HasTools() && !m.commandPalette.IsVisible() {
+			switch msg.String() {
+			case "j", "down":
+				m.toolActivity.Move(1)
+				m.renderMessages()
+				m.ensureToolSelectionVisible()
+				return m, nil
+			case "k", "up":
+				m.toolActivity.Move(-1)
+				m.renderMessages()
+				m.ensureToolSelectionVisible()
+				return m, nil
+			case "enter", " ":
+				m.toolActivity.ToggleSelected()
+				m.renderMessages()
+				return m, nil
+			case "esc":
+				m.setInputFocus(FocusInput)
+				m.renderMessages()
+				return m, nil
 			}
 		}
 
@@ -308,9 +345,9 @@ func (m *MaestroModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.handleCommand(msg.Command, msg.Args)
 
 	case InsertCommandMsg:
-		// Insert command into input field for user to complete with args
+		// Insert command into the composer for the user to complete with args.
 		m.inputModel.SetValue(msg.Command)
-		m.inputModel.Focus()
+		m.setInputFocus(FocusInput)
 
 	case ResponseMsg:
 		// Handle async response from backend
@@ -318,7 +355,40 @@ func (m *MaestroModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.statusBar.SetMessage("")
 		m.progressModel.Hide() // Ensure progress is hidden when response arrives
 
+	case CodingEventMsg:
+		followTail := m.viewport.AtBottom()
+		if !m.toolActivity.Apply(msg.Event) {
+			break
+		}
+		if msg.Event.Kind == "run" && msg.Event.Status == "started" {
+			m.toolActivityAnchor = len(m.messages)
+		}
+		if msg.Event.Kind == "run" && msg.Event.Status != "started" {
+			m.progressModel.Hide()
+		} else {
+			status := msg.Event.Detail
+			if status == "" {
+				status = msg.Event.Status
+			}
+			if !m.progressModel.IsVisible() {
+				cmds = append(cmds, m.progressModel.Start(status))
+			} else {
+				m.progressModel.SetMessage(status)
+			}
+			if msg.Event.Tool != "" {
+				m.progressModel.SetDetail(msg.Event.Tool)
+			}
+		}
+		m.renderMessages()
+		if m.inputFocus == FocusToolActivity {
+			m.ensureToolSelectionVisible()
+		} else if followTail {
+			m.viewport.GotoBottom()
+		}
+
 	case CodingResultMsg:
+		followTail := m.viewport.AtBottom()
+		previousOffset := m.viewport.YOffset()
 		if m.codingCancel != nil {
 			m.codingCancel()
 			m.codingCancel = nil
@@ -330,6 +400,11 @@ func (m *MaestroModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.addMessage("system", fmt.Sprintf("Error: %v", msg.Error))
 		} else {
 			m.addMessage("assistant", msg.Content)
+		}
+		if m.inputFocus == FocusToolActivity {
+			m.ensureToolSelectionVisible()
+		} else if !followTail {
+			m.viewport.SetYOffset(previousOffset)
 		}
 
 	case SessionPickerMsg:
@@ -344,6 +419,7 @@ func (m *MaestroModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		m.mode = ModeSessionPicker
+		m.setInputFocus(FocusInput)
 		m.statusBar.SetMode(ModeSessionPicker.String())
 		m.inputModel.Blur()
 		m.renderMessages()
@@ -358,8 +434,7 @@ func (m *MaestroModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.reviewFileExpanded = make(map[string]bool) // Reset expanded state
 		m.initReviewFileExpanded()
 		// Focus on review list when results arrive
-		m.inputFocus = FocusReviewList
-		m.inputModel.Blur()
+		m.setInputFocus(FocusReviewList)
 		// Add a summary message
 		counts := m.getReviewCounts()
 		summary := fmt.Sprintf("Review complete: %d comments", counts["total"])
@@ -547,6 +622,13 @@ func (m *MaestroModel) renderInfoSection() string {
 
 func (m *MaestroModel) configureStatusBar() {
 	switch {
+	case m.inputFocus == FocusToolActivity && m.toolActivity.HasTools():
+		m.statusBar.SetMode("TOOLS")
+		if m.codingRunActive {
+			m.statusBar.SetHints("↑↓ navigate", "enter expand", "tab next", "esc cancel")
+		} else {
+			m.statusBar.SetHints("↑↓ navigate", "enter expand", "tab next", "esc input")
+		}
 	case m.codingRunActive:
 		m.statusBar.SetMode("RUNNING")
 		m.statusBar.SetHints("esc cancel", "ctrl+p commands", "ctrl+c quit")
@@ -725,6 +807,9 @@ func (m *MaestroModel) handleCommand(cmd string, args []string) tea.Cmd {
 		return tea.Quit
 	case "clear":
 		m.messages = []Message{}
+		m.toolActivity = NewToolActivityModel(m.theme)
+		m.toolActivityAnchor = 0
+		m.setInputFocus(FocusInput)
 		m.addMessage("assistant", "Conversation cleared.")
 		return nil
 	case "session":
@@ -783,11 +868,9 @@ func (m *MaestroModel) handleQuestion(question string) (tea.Cmd, bool) {
 			return CodingResultMsg{Error: fmt.Errorf("backend not ready; configure the agent")}
 		}
 		response, err := m.backend.RunCodingTask(runCtx, question, func(event CodingEvent) {
-			status := event.Detail
-			if status == "" {
-				status = event.Status
+			if prog != nil {
+				prog.Send(CodingEventMsg{Event: event})
 			}
-			prog.Send(ProgressMsg{Status: status, Detail: event.Tool})
 		})
 		return CodingResultMsg{Content: response, Error: err}
 	}
@@ -824,7 +907,7 @@ Keyboard shortcuts:
   Enter                  Run the current prompt
   Ctrl+J                 Insert a newline in the prompt
   Up/Down                Navigate suggestions or prompt history
-  Tab                    Switch between review results and input
+  Tab                    Complete commands or cycle available transcript regions
   Esc                    Cancel an active coding run or close the current overlay
   Ctrl+C                 Exit`, currentSession)
 
@@ -854,7 +937,7 @@ func (m *MaestroModel) cmdReview(prArg string) tea.Cmd {
 	m.selectedCommentIdx = 0
 	m.reviewFileExpanded = nil
 	m.showReviewDetail = false
-	m.inputFocus = FocusInput
+	m.setInputFocus(FocusInput)
 	m.renderMessages()
 
 	// Start progress display
@@ -1102,6 +1185,23 @@ func (m *MaestroModel) renderMessages() {
 			sb.WriteString(icon + content)
 		}
 
+		sb.WriteString("\n\n")
+		if m.toolActivity.HasEntries() && m.toolActivityAnchor == i+1 {
+			m.toolActivityStartLine = lipgloss.Height(sb.String()) - 1
+			sb.WriteString(m.toolActivity.View(
+				max(1, m.viewport.Width()),
+				m.inputFocus == FocusToolActivity,
+			))
+			sb.WriteString("\n\n")
+		}
+	}
+
+	if m.toolActivity.HasEntries() && (m.toolActivityAnchor <= 0 || m.toolActivityAnchor > len(m.messages)) {
+		m.toolActivityStartLine = lipgloss.Height(sb.String()) - 1
+		sb.WriteString(m.toolActivity.View(
+			max(1, m.viewport.Width()),
+			m.inputFocus == FocusToolActivity,
+		))
 		sb.WriteString("\n\n")
 	}
 
@@ -1459,16 +1559,38 @@ func (m *MaestroModel) getReviewCounts() map[string]int {
 	return counts
 }
 
-// changeFocus cycles focus between review list and input (Crush-style).
+// changeFocus cycles through the composer and available transcript regions.
 func (m *MaestroModel) changeFocus() {
-	switch m.inputFocus {
-	case FocusReviewList:
-		m.inputFocus = FocusInput
+	order := []InputFocus{FocusInput}
+	if m.toolActivity.HasTools() {
+		order = append(order, FocusToolActivity)
+	}
+	if len(m.reviewResults) > 0 {
+		order = append(order, FocusReviewList)
+	}
+	current := 0
+	for i, focus := range order {
+		if focus == m.inputFocus {
+			current = i
+			break
+		}
+	}
+	m.setInputFocus(order[(current+1)%len(order)])
+}
+
+func (m *MaestroModel) setInputFocus(focus InputFocus) {
+	m.inputFocus = focus
+	m.toolActivity.SetFocused(focus == FocusToolActivity)
+	if focus == FocusInput {
 		m.inputModel.Focus()
-	case FocusInput:
-		m.inputFocus = FocusReviewList
+	} else {
 		m.inputModel.Blur()
 	}
+}
+
+func (m *MaestroModel) ensureToolSelectionVisible() {
+	line := m.toolActivityStartLine + m.toolActivity.SelectedLine(max(1, m.viewport.Width()))
+	m.viewport.EnsureVisible(line, 0, 0)
 }
 
 // initReviewFileExpanded initializes the expanded state for all file groups.

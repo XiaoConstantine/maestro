@@ -19,6 +19,8 @@ const (
 	FocusInput InputFocus = iota
 	// FocusReviewList means inline review results have focus.
 	FocusReviewList
+	// FocusToolActivity means the current run's tool transcript has focus.
+	FocusToolActivity
 )
 
 // String returns a human-readable mode name.

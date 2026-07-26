@@ -706,23 +706,38 @@ func contentBlocksText(blocks []core.ContentBlock) string {
 func mapCodingEvent(event agents.ExecutionEvent) (terminal.CodingEvent, bool) {
 	switch payload := event.Payload.(type) {
 	case agents.RunStartedEvent:
-		return terminal.CodingEvent{Kind: "run", Status: "started", Detail: payload.Task}, true
+		return terminal.CodingEvent{
+			Kind: "run", RunID: payload.RunID, Status: "started", Detail: payload.Task,
+			MaxTurns: payload.MaxTurns, At: event.Timestamp,
+		}, true
 	case agents.TurnStartedEvent:
-		return terminal.CodingEvent{Kind: "turn", Status: "started", Detail: fmt.Sprintf("Turn %d/%d", payload.Turn, payload.MaxTurns)}, true
+		return terminal.CodingEvent{
+			Kind: "turn", RunID: payload.RunID, Status: "started", Detail: fmt.Sprintf("Turn %d/%d", payload.Turn, payload.MaxTurns),
+			Turn: payload.Turn, MaxTurns: payload.MaxTurns, At: event.Timestamp,
+		}, true
 	case agents.ToolExecutionStartedEvent:
 		detail := fmt.Sprintf("Running %s", payload.Call.Name)
 		if path := codingPath(payload.Call.Arguments); path != "" {
 			detail = fmt.Sprintf("Running %s %s", payload.Call.Name, path)
 		}
-		return terminal.CodingEvent{Kind: "tool", Tool: payload.Call.Name, Status: "started", Detail: detail}, true
+		return terminal.CodingEvent{
+			Kind: "tool", RunID: payload.RunID, Tool: payload.Call.Name, Status: "started", Detail: detail,
+			Turn: payload.Turn, ToolIndex: payload.ToolIndex, At: event.Timestamp,
+		}, true
 	case agents.ToolCallFinishedEvent:
 		detail := codingToolDetail(payload.Result)
 		if detail == "" {
 			detail = fmt.Sprintf("%s %s", payload.Call.Name, payload.Status)
 		}
-		return terminal.CodingEvent{Kind: "tool", Tool: payload.Call.Name, Status: string(payload.Status), Detail: detail}, true
+		return terminal.CodingEvent{
+			Kind: "tool", RunID: payload.RunID, Tool: payload.Call.Name, Status: string(payload.Status), Outcome: string(payload.Outcome), Detail: detail,
+			Turn: payload.Turn, ToolIndex: payload.ToolIndex, At: event.Timestamp,
+		}, true
 	case agents.RunFinishedEvent:
-		return terminal.CodingEvent{Kind: "run", Status: string(payload.Status), Detail: payload.Diagnostic}, true
+		return terminal.CodingEvent{
+			Kind: "run", RunID: payload.RunID, Status: string(payload.Status), Detail: payload.Diagnostic,
+			Turn: payload.Turns, ToolCalls: payload.ToolCalls, At: event.Timestamp,
+		}, true
 	default:
 		return terminal.CodingEvent{}, false
 	}

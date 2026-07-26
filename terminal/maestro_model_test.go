@@ -2,6 +2,7 @@ package terminal
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -267,6 +268,40 @@ func TestHiddenSuggestionsDoNotInterceptSubmit(t *testing.T) {
 	}
 	if got := updated.Value(); got != "" {
 		t.Fatalf("input value = %q, want cleared after submit", got)
+	}
+}
+
+func TestTabCompletesSuggestionBeforeCyclingToolFocus(t *testing.T) {
+	model := NewMaestroModel(&MaestroConfig{}, NewNoOpBackend("owner", "repo"))
+	model.toolActivity.Apply(CodingEvent{Kind: "tool", Tool: "read", Status: "completed", Detail: "README.md"})
+	model.inputModel.SetValue("/se")
+	model.inputModel.updateSuggestions()
+
+	_, _ = model.Update(tea.KeyPressMsg{Code: tea.KeyTab})
+	if model.inputFocus != FocusInput {
+		t.Fatalf("focus = %v, want input", model.inputFocus)
+	}
+	if got := model.inputModel.Value(); !strings.HasPrefix(got, "/session") {
+		t.Fatalf("completed input = %q, want session command", got)
+	}
+}
+
+func TestCodingResultPreservesScrolledViewport(t *testing.T) {
+	model := NewMaestroModel(&MaestroConfig{}, NewNoOpBackend("owner", "repo"))
+	model.viewport.SetHeight(5)
+	model.messages = nil
+	for i := 0; i < 20; i++ {
+		model.messages = append(model.messages, Message{Role: "user", Content: fmt.Sprintf("message %d", i)})
+	}
+	model.renderMessages()
+	model.viewport.SetYOffset(2)
+	if model.viewport.AtBottom() {
+		t.Fatal("test viewport unexpectedly at bottom")
+	}
+
+	_, _ = model.Update(CodingResultMsg{Content: "final answer"})
+	if got := model.viewport.YOffset(); got != 2 {
+		t.Fatalf("viewport offset = %d, want 2", got)
 	}
 }
 

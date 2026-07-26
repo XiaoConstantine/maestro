@@ -4,27 +4,32 @@ import (
 	"context"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/XiaoConstantine/dspy-go/pkg/agents"
 	"github.com/XiaoConstantine/dspy-go/pkg/core"
 )
 
 func TestMapCodingEventMapsToolLifecycle(t *testing.T) {
-	event, ok := mapCodingEvent(agents.ExecutionEvent{Payload: agents.ToolExecutionStartedEvent{
+	at := time.Now()
+	event, ok := mapCodingEvent(agents.ExecutionEvent{Timestamp: at, Payload: agents.ToolExecutionStartedEvent{
+		RunID: "run-1", Turn: 2, ToolIndex: 3,
 		Call: core.ToolCall{Name: "edit", Arguments: map[string]any{"path": "main.go"}},
 	}})
 	if !ok {
 		t.Fatal("mapCodingEvent() ok = false")
 	}
-	if event.Kind != "tool" || event.Tool != "edit" || event.Status != "started" || event.Detail != "Running edit main.go" {
+	if event.Kind != "tool" || event.Tool != "edit" || event.Status != "started" || event.Detail != "Running edit main.go" ||
+		event.RunID != "run-1" || event.Turn != 2 || event.ToolIndex != 3 || !event.At.Equal(at) {
 		t.Fatalf("event = %#v, want started edit tool with path detail", event)
 	}
 }
 
 func TestMapCodingEventMapsToolResultDetails(t *testing.T) {
 	event, ok := mapCodingEvent(agents.ExecutionEvent{Payload: agents.ToolCallFinishedEvent{
-		Call:   core.ToolCall{Name: "write"},
-		Status: agents.OperationStatusCompleted,
+		Call:    core.ToolCall{Name: "write"},
+		Status:  agents.OperationStatusCompleted,
+		Outcome: agents.ToolCallOutcomeExecuted,
 		Result: &agents.Message{ToolResult: &agents.MessageToolResult{
 			Content:        []core.ContentBlock{core.NewTextBlock("model-visible output")},
 			DisplayContent: []core.ContentBlock{core.NewTextBlock("wrote 12 bytes to who_are_you.txt")},
@@ -34,8 +39,8 @@ func TestMapCodingEventMapsToolResultDetails(t *testing.T) {
 	if !ok {
 		t.Fatal("mapCodingEvent() ok = false")
 	}
-	if event.Detail != "who_are_you.txt — wrote 12 bytes to who_are_you.txt" {
-		t.Fatalf("event.Detail = %q", event.Detail)
+	if event.Detail != "who_are_you.txt — wrote 12 bytes to who_are_you.txt" || event.Outcome != "executed" {
+		t.Fatalf("event = %#v", event)
 	}
 }
 
@@ -71,6 +76,20 @@ func TestMapCodingEventPreservesExplicitlyEmptyDisplayContent(t *testing.T) {
 	}
 	if event.Detail != "secret.txt" {
 		t.Fatalf("event.Detail = %q, want only path when display content is intentionally empty", event.Detail)
+	}
+}
+
+func TestMapCodingEventPreservesRunSummary(t *testing.T) {
+	at := time.Now()
+	event, ok := mapCodingEvent(agents.ExecutionEvent{Timestamp: at, Payload: agents.RunFinishedEvent{
+		RunID: "run-1", Status: agents.RunStatusCompleted, Turns: 3, ToolCalls: 5,
+	}})
+	if !ok {
+		t.Fatal("mapCodingEvent() ok = false")
+	}
+	if event.Kind != "run" || event.Status != "completed" || event.RunID != "run-1" ||
+		event.Turn != 3 || event.ToolCalls != 5 || !event.At.Equal(at) {
+		t.Fatalf("event = %#v, want complete run summary", event)
 	}
 }
 

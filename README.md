@@ -88,6 +88,7 @@ Maestro is an AI code review and repository analysis assistant built on top of `
 - **Slash-Command Workflow**: `/ask`, `/review`, session, and subagent commands remain explicit specialist paths. `/review` invokes the specialized review pipeline through a dspy-go `agents.Agent` adapter, and coding sessions can delegate explicit PR-review requests through the same `review_pull_request` subagent tool.
 - **Responsive Agent Context**: the header identifies the authoritative workspace and active model, while the status bar adapts its shortcuts to coding, review, and session-selection modes.
 - **Readable Responses**: assistant output renders Markdown, links, inline code, and fenced code blocks with Maestro's dark/coral syntax palette and width-aware reflow.
+- **Durable Run Evidence**: coding runs retain turn boundaries, tool status, elapsed tool time, expandable result details, and the terminal run summary instead of replacing all activity with one spinner line. Tab focuses the activity transcript; arrows navigate and Enter expands.
 - **Prompt Editing and Discovery**: Enter runs a prompt, Ctrl+J inserts a newline, `/` opens inline command suggestions, and Ctrl+P opens the searchable command palette.
 - **Cancellation**: Escape cancels the active coding run or closes the current overlay; narrow terminals progressively hide nonessential chrome and secondary shortcuts.
 - **Shared Runtime Wiring**: the same service layer backs both direct CLI review and interactive usage.

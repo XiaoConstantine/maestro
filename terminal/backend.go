@@ -1,6 +1,9 @@
 package terminal
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 // MaestroBackend defines the interface for backend operations.
 // This allows the TUI to interact with the agent without direct dependencies.
@@ -45,10 +48,17 @@ type MaestroBackend interface {
 
 // SessionInfo contains metadata about a session.
 type CodingEvent struct {
-	Kind   string
-	Tool   string
-	Status string
-	Detail string
+	Kind      string
+	RunID     string
+	Tool      string
+	Status    string
+	Outcome   string
+	Detail    string
+	Turn      int
+	MaxTurns  int
+	ToolIndex int
+	ToolCalls int
+	At        time.Time
 }
 
 type SessionInfo struct {

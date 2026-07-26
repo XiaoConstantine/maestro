@@ -242,6 +242,10 @@ func (m *InputModel) suggestionsActive() bool {
 	return m.maxVisibleSuggestions > 0 && m.showSuggestions && len(m.suggestions) > 0
 }
 
+func (m *InputModel) HasActiveSuggestions() bool {
+	return m.suggestionsActive()
+}
+
 // updateSuggestions updates command suggestions based on current input.
 func (m *InputModel) updateSuggestions() {
 	value := m.textarea.Value()
