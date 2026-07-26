@@ -36,7 +36,7 @@ File tools reject paths outside the authoritative workspace root. Shell executio
 
 The coding agent receives explicit provider/model/workspace instructions and evidence rules: after any `write` or `edit`, it must verify the mutation with tool evidence before calling `Finish`. Final answers should describe only mutations that were actually observed in the workspace trace.
 
-One run may mutate a session at a time. Overlapping prompts are rejected. Press **Esc** to cancel the active coding run. Run, turn, and tool lifecycle events update the current-step spinner and a durable activity block anchored between the submitted task and final response. The block retains turn boundaries, matched tool start/finish state, elapsed tool time, and final turn/tool counts after completion. Tab focuses available transcript regions; while tool activity is focused, Up/Down navigates and Enter or Space expands the selected result detail. Assistant responses render as width-aware Markdown with Maestro-themed code highlighting; rendered blocks are cached by width bucket so progress ticks and small resizes do not repeatedly parse unchanged messages. The contextual status bar keeps cancellation and navigation actions visible without overwhelming narrow terminals. Output and accounting use the operation-scoped `ExecutionTrace` returned by `ExecuteWithTrace`, avoiding races against a mutable last-trace accessor.
+One run may mutate a session at a time. Overlapping prompts are rejected. Press **Esc** to cancel the active coding run. Run, turn, and tool lifecycle events update the current-step spinner and a durable activity block anchored between the submitted task and final response. The block retains turn boundaries, matched tool start/finish state, elapsed tool time, and final turn/tool counts after completion. On panes at least 80 columns wide, active tool/review context can occupy a right rail; narrower panes keep the activity inline. Once shown, the rail request survives responsive narrowing and can be dismissed or restored with **Ctrl+\\** without losing evidence. Tab focuses available transcript regions; while tool activity is focused, Up/Down navigates and Enter or Space expands the selected result detail. Assistant responses render as width-aware Markdown with Maestro-themed code highlighting; rendered blocks are cached by width bucket so progress ticks and small resizes do not repeatedly parse unchanged messages. The contextual status bar keeps cancellation and navigation actions visible without overwhelming narrow terminals. Output and accounting use the operation-scoped `ExecutionTrace` returned by `ExecuteWithTrace`, avoiding races against a mutable last-trace accessor.
 
 The active Maestro session name selects the native session id, so switching or creating a session selects separate persisted coding history.
 
@@ -62,11 +62,12 @@ In interactive mode, the workspace is the current working directory you launched
 Prompt controls:
 
 - **Enter** runs the current task.
-- **Ctrl+J** inserts a newline without submitting.
+- **Ctrl+J** inserts a newline without submitting. The composer grows to at most 30% of terminal height or 10 rows and displays multiline size metadata.
 - **/** displays matching slash commands inline.
 - **Ctrl+P** opens the searchable command palette.
 - **Up/Down** navigates command suggestions or prompt history.
 - **Tab** accepts a visible command suggestion first; otherwise it cycles the composer and available tool/review transcript regions.
+- **Ctrl+\\** toggles the responsive context rail when run or review context exists.
 - **Esc** cancels an active coding run or closes the current picker/detail view.
 
 For a non-interactive smoke test:

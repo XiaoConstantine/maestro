@@ -19,11 +19,12 @@ type MaestroModel struct {
 	mode MaestroMode
 
 	// Sub-models
-	inputModel            *InputModel
-	progressModel         *ProgressModel
-	toolActivity          *ToolActivityModel
-	toolActivityAnchor    int
-	toolActivityStartLine int
+	inputModel                *InputModel
+	progressModel             *ProgressModel
+	toolActivity              *ToolActivityModel
+	toolActivityAnchor        int
+	toolActivityStartLine     int
+	toolActivityRailStartLine int
 
 	// Shared components
 	statusBar      *StatusBarModel
@@ -34,8 +35,13 @@ type MaestroModel struct {
 	styles *Styles
 
 	// Conversation state
-	messages []Message
-	viewport viewport.Model
+	messages                []Message
+	viewport                viewport.Model
+	railViewport            viewport.Model
+	railVisible             bool
+	railActive              bool
+	railFollowTail          bool
+	restoreConversationTail bool
 
 	// Inline review results (Crush-style - results shown in conversation)
 	reviewResults      []ReviewComment
@@ -91,6 +97,10 @@ func NewMaestroModel(cfg *MaestroConfig, backend MaestroBackend) *MaestroModel {
 	vp.SetWidth(80)
 	vp.SetHeight(20)
 	vp.KeyMap = viewport.KeyMap{}
+	rail := viewport.New()
+	rail.SetWidth(24)
+	rail.SetHeight(20)
+	rail.KeyMap = viewport.KeyMap{}
 
 	m := &MaestroModel{
 		mode:           ModeInput,
@@ -102,6 +112,8 @@ func NewMaestroModel(cfg *MaestroConfig, backend MaestroBackend) *MaestroModel {
 		styles:         styles,
 		messages:       []Message{},
 		viewport:       vp,
+		railViewport:   rail,
+		railFollowTail: true,
 		backend:        backend,
 		config:         cfg,
 		ctx:            context.Background(),
@@ -135,16 +147,14 @@ func (m *MaestroModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
+		m.restoreConversationTail = m.restoreConversationTail || m.viewport.AtBottom()
 		m.width = msg.Width
 		m.height = msg.Height
 		m.ready = true
 
-		// Update component sizes
-		m.updateLayout()
-
 		// Forward to sub-models
 		if m.inputModel != nil {
-			m.inputModel.SetSize(m.width, inputTextareaHeightForPane(m.height))
+			m.inputModel.SetSize(m.width, composerHeightForPane(m.height, m.inputModel.Value()))
 			m.inputModel.SetSuggestionLimit(suggestionLimitForPane(m.height))
 		}
 		if m.statusBar != nil {
@@ -159,12 +169,18 @@ func (m *MaestroModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case tea.MouseWheelMsg:
-		// Handle mouse wheel scrolling in the viewport
+		target := &m.viewport
+		if m.inputFocus == FocusToolActivity && m.contextRailActive() {
+			target = &m.railViewport
+		}
 		switch msg.Button {
 		case tea.MouseWheelUp:
-			m.viewport.ScrollUp(3)
+			target.ScrollUp(3)
 		case tea.MouseWheelDown:
-			m.viewport.ScrollDown(3)
+			target.ScrollDown(3)
+		}
+		if target == &m.railViewport {
+			m.railFollowTail = m.railViewport.AtBottom()
 		}
 
 	case tea.KeyPressMsg:
@@ -179,6 +195,14 @@ func (m *MaestroModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.commandPalette.Hide()
 			} else {
 				m.commandPalette.Show()
+			}
+			return m, nil
+
+		case "ctrl+\\":
+			if m.hasRailContent() {
+				m.restoreConversationTail = m.restoreConversationTail || m.viewport.AtBottom()
+				m.railVisible = !m.railVisible
+				m.renderMessages()
 			}
 			return m, nil
 
@@ -223,6 +247,9 @@ func (m *MaestroModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if len(m.reviewResults) > 0 {
 				m.reviewResults = nil
 				m.selectedReviewIdx = 0
+				if !m.toolActivity.HasEntries() {
+					m.railVisible = false
+				}
 				m.setInputFocus(FocusInput)
 				m.renderMessages()
 				return m, nil
@@ -362,6 +389,9 @@ func (m *MaestroModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if msg.Event.Kind == "run" && msg.Event.Status == "started" {
 			m.toolActivityAnchor = len(m.messages)
+			m.restoreConversationTail = m.restoreConversationTail || m.viewport.AtBottom()
+			m.railFollowTail = true
+			m.railVisible = true
 		}
 		if msg.Event.Kind == "run" && msg.Event.Status != "started" {
 			m.progressModel.Hide()
@@ -380,9 +410,9 @@ func (m *MaestroModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		m.renderMessages()
-		if m.inputFocus == FocusToolActivity {
+		if m.inputFocus == FocusToolActivity && (!m.contextRailActive() || m.railFollowTail) {
 			m.ensureToolSelectionVisible()
-		} else if followTail {
+		} else if m.inputFocus != FocusToolActivity && followTail {
 			m.viewport.GotoBottom()
 		}
 
@@ -401,9 +431,9 @@ func (m *MaestroModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.addMessage("assistant", msg.Content)
 		}
-		if m.inputFocus == FocusToolActivity {
+		if m.inputFocus == FocusToolActivity && (!m.contextRailActive() || m.railFollowTail) {
 			m.ensureToolSelectionVisible()
-		} else if !followTail {
+		} else if m.inputFocus != FocusToolActivity && !followTail {
 			m.viewport.SetYOffset(previousOffset)
 		}
 
@@ -433,6 +463,8 @@ func (m *MaestroModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.showReviewDetail = false
 		m.reviewFileExpanded = make(map[string]bool) // Reset expanded state
 		m.initReviewFileExpanded()
+		m.restoreConversationTail = m.restoreConversationTail || m.viewport.AtBottom()
+		m.railVisible = true
 		// Focus on review list when results arrive
 		m.setInputFocus(FocusReviewList)
 		// Add a summary message
@@ -503,7 +535,7 @@ func (m *MaestroModel) View() tea.View {
 // renderInputMode renders the default input mode view with Crush-style layout.
 func (m *MaestroModel) renderInputMode() string {
 	if m.inputModel != nil {
-		m.inputModel.SetSize(m.width, inputTextareaHeightForPane(m.height))
+		m.inputModel.SetSize(m.width, composerHeightForPane(m.height, m.inputModel.Value()))
 		m.inputModel.SetSuggestionLimit(suggestionLimitForPane(m.height))
 	}
 
@@ -540,16 +572,41 @@ func (m *MaestroModel) renderInputMode() string {
 		sectionHeight(statusView),
 	)
 
-	// Conversation viewport
-	m.viewport.SetWidth(max(1, m.width-4))
+	contentPlan := planContentLayout(m.width, layout.conversationHeight, m.railVisible && m.hasRailContent())
+	conversationWidth := max(1, contentPlan.conversationWidth-4)
+	layoutChanged := m.viewport.Width() != conversationWidth ||
+		m.viewport.Height() != layout.conversationHeight ||
+		m.railActive != contentPlan.showRail
+	followTail := m.restoreConversationTail || m.viewport.AtBottom()
+	m.restoreConversationTail = false
+	m.viewport.SetWidth(conversationWidth)
 	m.viewport.SetHeight(layout.conversationHeight)
 	m.renderMessages()
+	if contentPlan.showRail {
+		m.updateRailViewport(contentPlan.railWidth, layout.conversationHeight)
+	}
+	railTransition := m.railActive != contentPlan.showRail
+	if layoutChanged && m.inputFocus == FocusToolActivity &&
+		(!contentPlan.showRail || railTransition || m.railFollowTail) {
+		m.ensureToolSelectionVisible()
+	} else if layoutChanged && m.inputFocus != FocusToolActivity && followTail {
+		m.viewport.GotoBottom()
+	}
+	m.railActive = contentPlan.showRail
 
 	conversationBox := lipgloss.NewStyle().
-		Width(m.width).
+		Width(contentPlan.conversationWidth).
 		Height(layout.conversationHeight).
 		Padding(0, 2).
 		Render(m.viewport.View())
+	conversationRow := conversationBox
+	if contentPlan.showRail {
+		conversationRow = lipgloss.JoinHorizontal(
+			lipgloss.Top,
+			conversationBox,
+			m.renderContextRail(contentPlan.railWidth, layout.conversationHeight),
+		)
+	}
 
 	// Combine all sections
 	sections := make([]string, 0, 5)
@@ -559,7 +616,7 @@ func (m *MaestroModel) renderInputMode() string {
 	if layout.showInfo {
 		sections = append(sections, infoSection)
 	}
-	sections = append(sections, conversationBox)
+	sections = append(sections, conversationRow)
 
 	// Add progress section if visible
 	if layout.showProgress && progressSection != "" {
@@ -620,14 +677,66 @@ func (m *MaestroModel) renderInfoSection() string {
 	return lipgloss.JoinVertical(lipgloss.Left, workspaceLine, modelLine)
 }
 
+func (m *MaestroModel) hasRailContent() bool {
+	return m.toolActivity.HasEntries() || len(m.reviewResults) > 0
+}
+
+func (m *MaestroModel) contextRailActive() bool {
+	return planContentLayout(m.width, max(1, m.viewport.Height()), m.railVisible && m.hasRailContent()).showRail
+}
+
+func (m *MaestroModel) updateRailViewport(width, height int) {
+	followTail := m.railFollowTail
+	if m.inputFocus != FocusToolActivity {
+		followTail = followTail || m.railViewport.AtBottom()
+	}
+	innerWidth := max(1, width-2)
+	sections := make([]string, 0, 4)
+	if len(m.reviewResults) > 0 {
+		counts := m.getReviewCounts()
+		sections = append(sections,
+			lipgloss.NewStyle().Foreground(m.theme.Secondary).Bold(true).Render("REVIEW"),
+			lipgloss.NewStyle().Foreground(m.theme.TextSecondary).Render(
+				fmt.Sprintf("%d findings · %d critical · %d high", counts["total"], counts["critical"], counts["high"]),
+			),
+		)
+	}
+	if m.toolActivity.HasEntries() {
+		if len(sections) > 0 {
+			sections = append(sections, "")
+		}
+		sections = append(sections, lipgloss.NewStyle().Foreground(m.theme.Accent).Bold(true).Render("ACTIVITY"))
+		m.toolActivityRailStartLine = len(sections)
+		sections = append(sections, m.toolActivity.View(innerWidth, m.inputFocus == FocusToolActivity))
+	}
+	m.railViewport.SetWidth(innerWidth)
+	m.railViewport.SetHeight(max(1, height))
+	m.railViewport.SetContent(strings.Join(sections, "\n"))
+	if followTail && m.inputFocus != FocusToolActivity {
+		m.railViewport.GotoBottom()
+		m.railFollowTail = m.railViewport.AtBottom()
+	}
+}
+
+func (m *MaestroModel) renderContextRail(width, height int) string {
+	return lipgloss.NewStyle().
+		Width(width).
+		Height(height).
+		BorderLeft(true).
+		BorderStyle(lipgloss.NormalBorder()).
+		BorderForeground(m.theme.Border).
+		PaddingLeft(1).
+		Render(m.railViewport.View())
+}
+
 func (m *MaestroModel) configureStatusBar() {
 	switch {
 	case m.inputFocus == FocusToolActivity && m.toolActivity.HasTools():
 		m.statusBar.SetMode("TOOLS")
 		if m.codingRunActive {
-			m.statusBar.SetHints("↑↓ navigate", "enter expand", "tab next", "esc cancel")
+			m.statusBar.SetHints("↑↓ navigate", "enter expand", "tab next", "esc cancel", "ctrl+\\ rail")
 		} else {
-			m.statusBar.SetHints("↑↓ navigate", "enter expand", "tab next", "esc input")
+			m.statusBar.SetHints("↑↓ navigate", "enter expand", "tab next", "esc input", "ctrl+\\ rail")
 		}
 	case m.codingRunActive:
 		m.statusBar.SetMode("RUNNING")
@@ -637,30 +746,18 @@ func (m *MaestroModel) configureStatusBar() {
 		m.statusBar.SetHints("↑↓ navigate", "enter switch", "esc close")
 	case len(m.reviewResults) > 0 && m.inputFocus == FocusReviewList:
 		m.statusBar.SetMode("REVIEW")
-		m.statusBar.SetHints("↑↓ navigate", "enter detail", "tab input", "esc close")
+		m.statusBar.SetHints("↑↓ navigate", "enter detail", "tab input", "esc close", "ctrl+\\ rail")
 	case m.progressModel.IsVisible():
 		m.statusBar.SetMode("WORKING")
 		m.statusBar.SetHints("ctrl+p commands", "ctrl+c quit")
 	default:
 		m.statusBar.SetMode("INPUT")
-		m.statusBar.SetHints("ctrl+p commands", "/help", "ctrl+c quit")
+		if m.hasRailContent() {
+			m.statusBar.SetHints("ctrl+p commands", "ctrl+\\ rail", "/help", "ctrl+c quit")
+		} else {
+			m.statusBar.SetHints("ctrl+p commands", "/help", "ctrl+c quit")
+		}
 	}
-}
-
-// updateLayout updates component sizes based on terminal dimensions.
-func (m *MaestroModel) updateLayout() {
-	if m.width <= 0 || m.height <= 0 {
-		return
-	}
-
-	// Update viewport
-	statusHeight := 1
-	inputHeight := 3
-	headerHeight := 1
-	conversationHeight := m.height - statusHeight - inputHeight - headerHeight - 1
-
-	m.viewport.SetWidth(m.width - 2)
-	m.viewport.SetHeight(max(5, conversationHeight))
 }
 
 type inputModeLayout struct {
@@ -809,6 +906,7 @@ func (m *MaestroModel) handleCommand(cmd string, args []string) tea.Cmd {
 		m.messages = []Message{}
 		m.toolActivity = NewToolActivityModel(m.theme)
 		m.toolActivityAnchor = 0
+		m.railVisible = false
 		m.setInputFocus(FocusInput)
 		m.addMessage("assistant", "Conversation cleared.")
 		return nil
@@ -1186,7 +1284,7 @@ func (m *MaestroModel) renderMessages() {
 		}
 
 		sb.WriteString("\n\n")
-		if m.toolActivity.HasEntries() && m.toolActivityAnchor == i+1 {
+		if m.toolActivity.HasEntries() && !m.contextRailActive() && m.toolActivityAnchor == i+1 {
 			m.toolActivityStartLine = lipgloss.Height(sb.String()) - 1
 			sb.WriteString(m.toolActivity.View(
 				max(1, m.viewport.Width()),
@@ -1196,7 +1294,7 @@ func (m *MaestroModel) renderMessages() {
 		}
 	}
 
-	if m.toolActivity.HasEntries() && (m.toolActivityAnchor <= 0 || m.toolActivityAnchor > len(m.messages)) {
+	if m.toolActivity.HasEntries() && !m.contextRailActive() && (m.toolActivityAnchor <= 0 || m.toolActivityAnchor > len(m.messages)) {
 		m.toolActivityStartLine = lipgloss.Height(sb.String()) - 1
 		sb.WriteString(m.toolActivity.View(
 			max(1, m.viewport.Width()),
@@ -1275,7 +1373,7 @@ func (m *MaestroModel) renderSessionPicker() string {
 // renderInlineReview renders review comments inline in the conversation.
 func (m *MaestroModel) renderInlineReview() string {
 	var sb strings.Builder
-	contentWidth := m.width - 6
+	contentWidth := max(1, m.viewport.Width())
 
 	// Show focus indicator header when review list is focused
 	if m.inputFocus == FocusReviewList {
@@ -1338,7 +1436,7 @@ func (m *MaestroModel) renderInlineReview() string {
 		hint = lipgloss.NewStyle().Foreground(m.theme.TextMuted).
 			Render("tab focus review list")
 	}
-	sb.WriteString(hint)
+	sb.WriteString(ansi.Truncate(hint, contentWidth, "…"))
 
 	return sb.String()
 }
@@ -1581,6 +1679,10 @@ func (m *MaestroModel) changeFocus() {
 func (m *MaestroModel) setInputFocus(focus InputFocus) {
 	m.inputFocus = focus
 	m.toolActivity.SetFocused(focus == FocusToolActivity)
+	if focus == FocusToolActivity {
+		m.railFollowTail = false
+		m.ensureToolSelectionVisible()
+	}
 	if focus == FocusInput {
 		m.inputModel.Focus()
 	} else {
@@ -1589,6 +1691,11 @@ func (m *MaestroModel) setInputFocus(focus InputFocus) {
 }
 
 func (m *MaestroModel) ensureToolSelectionVisible() {
+	if m.contextRailActive() {
+		line := m.toolActivityRailStartLine + m.toolActivity.SelectedLine(max(1, m.railViewport.Width()))
+		m.railViewport.EnsureVisible(line, 0, 0)
+		return
+	}
 	line := m.toolActivityStartLine + m.toolActivity.SelectedLine(max(1, m.viewport.Width()))
 	m.viewport.EnsureVisible(line, 0, 0)
 }

@@ -3,6 +3,7 @@ package terminal
 import (
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	"charm.land/bubbles/v2/key"
 	"charm.land/bubbles/v2/textarea"
@@ -318,6 +319,13 @@ func (m *InputModel) View() string {
 	if m.width >= 48 {
 		header += "  " + hint
 	}
+	if lines := strings.Count(m.textarea.Value(), "\n") + 1; lines > 1 {
+		meta := lipgloss.NewStyle().Foreground(m.theme.TextMuted).Render(
+			fmt.Sprintf("  %d lines · %d chars", lines, utf8.RuneCountInString(m.textarea.Value())),
+		)
+		header += meta
+	}
+	header = ansi.Truncate(header, max(1, m.width-4), "…")
 
 	parts := []string{header}
 	if m.showSuggestions && len(m.suggestions) > 0 && m.maxVisibleSuggestions > 0 {
