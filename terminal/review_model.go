@@ -49,10 +49,8 @@ type ReviewModel struct {
 	fileGroups     []FileGroup
 	filteredGroups []FileGroup
 
-	selectedIdx     int // Global index in flattened list
-	selectedFileIdx int // Currently selected file group index
-	selectedInFile  int // Index within current file group
-	filterMode      FilterMode
+	selectedIdx int // Index in the flattened visible-item projection.
+	filterMode  FilterMode
 
 	listViewport   viewport.Model
 	detailViewport viewport.Model
@@ -66,6 +64,8 @@ type ReviewModel struct {
 
 	showDetail  bool
 	confirmPost bool
+	embedded    bool
+	focused     bool
 
 	onPost func([]ReviewComment) error
 	onQuit func()
@@ -102,8 +102,17 @@ type ReviewStyles struct {
 	StatusInfo  lipgloss.Style
 }
 
-// NewReviewModel creates a new review TUI model with Crush-style layout.
+// NewReviewModel creates a standalone review component.
 func NewReviewModel(comments []ReviewComment, theme *Theme) *ReviewModel {
+	return newReviewModel(comments, theme, false)
+}
+
+// NewEmbeddedReviewModel creates a review component hosted by MaestroModel.
+func NewEmbeddedReviewModel(comments []ReviewComment, theme *Theme) *ReviewModel {
+	return newReviewModel(comments, theme, true)
+}
+
+func newReviewModel(comments []ReviewComment, theme *Theme, embedded bool) *ReviewModel {
 	styles := createCrushReviewStyles(theme)
 
 	listVP := viewport.New()
@@ -126,6 +135,8 @@ func NewReviewModel(comments []ReviewComment, theme *Theme) *ReviewModel {
 		theme:          theme,
 		styles:         styles,
 		showDetail:     false,
+		embedded:       embedded,
+		focused:        !embedded,
 	}
 
 	m.filteredGroups = m.fileGroups
@@ -253,6 +264,9 @@ func (m *ReviewModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		switch msg.String() {
 		case "q", "ctrl+c":
+			if m.embedded {
+				return m, nil
+			}
 			if m.onQuit != nil {
 				m.onQuit()
 			}
@@ -291,13 +305,15 @@ func (m *ReviewModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.setFilter(FilterNone)
 
 		case "p":
-			m.confirmPost = true
+			if m.onPost != nil {
+				m.confirmPost = true
+			}
 
 		case "g":
 			m.selectedIdx = 0
 
 		case "G":
-			m.selectedIdx = m.getTotalComments() - 1
+			m.selectedIdx = m.getTotalVisibleItems() - 1
 			if m.selectedIdx < 0 {
 				m.selectedIdx = 0
 			}
@@ -326,6 +342,9 @@ func (m *ReviewModel) handleConfirmPost(msg tea.KeyPressMsg) (tea.Model, tea.Cmd
 				return m, nil
 			}
 		}
+		if m.embedded {
+			return m, nil
+		}
 		return m, tea.Quit
 	case "n", "N", "esc":
 		m.confirmPost = false
@@ -338,12 +357,12 @@ func (m *ReviewModel) updateViewportSizes() {
 		return
 	}
 
-	contentHeight := m.height - 6 // Header + filter + status
+	contentHeight := max(1, m.height-6) // Header + filter + status
 
 	if m.showDetail {
 		// Split view: 40% list, 60% detail
-		listWidth := m.width * 2 / 5
-		detailWidth := m.width - listWidth - 2
+		listWidth := max(1, m.width*2/5)
+		detailWidth := max(1, m.width-listWidth-2)
 
 		m.listViewport.SetWidth(listWidth)
 		m.listViewport.SetHeight(contentHeight)
@@ -352,7 +371,7 @@ func (m *ReviewModel) updateViewportSizes() {
 		m.detailViewport.SetHeight(contentHeight)
 	} else {
 		// Full width list
-		m.listViewport.SetWidth(m.width - 4)
+		m.listViewport.SetWidth(max(1, m.width-4))
 		m.listViewport.SetHeight(contentHeight)
 	}
 }
@@ -362,63 +381,49 @@ func (m *ReviewModel) moveDown() {
 	if m.selectedIdx < total-1 {
 		m.selectedIdx++
 	}
-	m.updateFileIndexFromSelected()
 }
 
 func (m *ReviewModel) moveUp() {
 	if m.selectedIdx > 0 {
 		m.selectedIdx--
 	}
-	m.updateFileIndexFromSelected()
 }
 
-func (m *ReviewModel) updateFileIndexFromSelected() {
-	idx := 0
-	for i, g := range m.filteredGroups {
-		if !g.Expanded {
-			if idx == m.selectedIdx {
-				m.selectedFileIdx = i
-				m.selectedInFile = -1
-				return
+func (m *ReviewModel) selectedPosition() (fileIndex, commentIndex int) {
+	index := 0
+	for fileIndex, group := range m.filteredGroups {
+		if !group.Expanded {
+			if index == m.selectedIdx {
+				return fileIndex, -1
 			}
-			idx++
-		} else {
-			for j := range g.Comments {
-				if idx == m.selectedIdx {
-					m.selectedFileIdx = i
-					m.selectedInFile = j
-					return
-				}
-				idx++
+			index++
+			continue
+		}
+		for commentIndex := range group.Comments {
+			if index == m.selectedIdx {
+				return fileIndex, commentIndex
 			}
+			index++
 		}
 	}
+	return -1, -1
 }
 
 func (m *ReviewModel) toggleCurrentFileGroup() {
-	if m.selectedFileIdx >= 0 && m.selectedFileIdx < len(m.filteredGroups) {
-		m.filteredGroups[m.selectedFileIdx].Expanded = !m.filteredGroups[m.selectedFileIdx].Expanded
-		m.recalculateSelectedIdx()
+	selectedFile, _ := m.selectedPosition()
+	if selectedFile < 0 || selectedFile >= len(m.filteredGroups) {
+		return
 	}
-}
-
-func (m *ReviewModel) recalculateSelectedIdx() {
-	idx := 0
-	for i, g := range m.filteredGroups {
-		if i == m.selectedFileIdx {
-			if !g.Expanded || m.selectedInFile < 0 {
-				m.selectedIdx = idx
-			} else {
-				m.selectedIdx = idx + m.selectedInFile
-			}
-			return
-		}
-		if g.Expanded {
-			idx += len(g.Comments)
+	start := 0
+	for i := 0; i < selectedFile; i++ {
+		if m.filteredGroups[i].Expanded {
+			start += len(m.filteredGroups[i].Comments)
 		} else {
-			idx++
+			start++
 		}
 	}
+	m.filteredGroups[selectedFile].Expanded = !m.filteredGroups[selectedFile].Expanded
+	m.selectedIdx = start
 }
 
 func (m *ReviewModel) getTotalComments() int {
@@ -532,7 +537,7 @@ func (m *ReviewModel) ViewString() string {
 	}
 
 	if m.confirmPost {
-		return m.renderConfirmPost()
+		return m.boundView(m.renderConfirmPost())
 	}
 
 	var parts []string
@@ -551,12 +556,12 @@ func (m *ReviewModel) ViewString() string {
 		listContent := m.renderList()
 		detailContent := m.renderDetail()
 
-		listWidth := m.width * 2 / 5
-		detailWidth := m.width - listWidth - 3
+		listWidth := max(1, m.width*2/5)
+		detailWidth := max(1, m.width-listWidth-3)
 
 		listPane := lipgloss.NewStyle().
 			Width(listWidth).
-			Height(m.height - 6).
+			Height(max(1, m.height-6)).
 			Render(listContent)
 
 		separator := lipgloss.NewStyle().
@@ -565,7 +570,7 @@ func (m *ReviewModel) ViewString() string {
 
 		detailPane := lipgloss.NewStyle().
 			Width(detailWidth).
-			Height(m.height - 6).
+			Height(max(1, m.height-6)).
 			PaddingLeft(1).
 			Render(detailContent)
 
@@ -580,7 +585,15 @@ func (m *ReviewModel) ViewString() string {
 	parts = append(parts, "")
 	parts = append(parts, m.renderStatusBar())
 
-	return lipgloss.JoinVertical(lipgloss.Left, parts...)
+	return m.boundView(lipgloss.JoinVertical(lipgloss.Left, parts...))
+}
+
+func (m *ReviewModel) boundView(rendered string) string {
+	lines := strings.Split(rendered, "\n")
+	for i := range lines {
+		lines[i] = ansi.Truncate(lines[i], max(1, m.width), "…")
+	}
+	return strings.Join(lines, "\n")
 }
 
 func (m *ReviewModel) renderHeader() string {
@@ -596,22 +609,22 @@ func (m *ReviewModel) renderHeader() string {
 
 	if counts["critical"] > 0 {
 		countStr += fmt.Sprintf(" • %s %d critical",
-			m.styles.SeverityCritical.Render("●"),
+			m.getSeverityIcon("critical"),
 			counts["critical"])
 	}
 	if counts["high"] > 0 {
 		countStr += fmt.Sprintf(" • %s %d high",
-			m.styles.SeverityCritical.Render("●"),
+			m.getSeverityIcon("high"),
 			counts["high"])
 	}
 	if counts["medium"] > 0 {
 		countStr += fmt.Sprintf(" • %s %d medium",
-			m.styles.SeverityWarning.Render("●"),
+			m.getSeverityIcon("medium"),
 			counts["medium"])
 	}
 	if counts["low"] > 0 {
 		countStr += fmt.Sprintf(" • %s %d low",
-			m.styles.SeveritySuggestion.Render("●"),
+			m.getSeverityIcon("low"),
 			counts["low"])
 	}
 
@@ -662,10 +675,11 @@ func (m *ReviewModel) renderFilterTabs() string {
 func (m *ReviewModel) renderList() string {
 	var lines []string
 	currentIdx := 0
-	contentWidth := m.listViewport.Width() - 2
+	contentWidth := max(1, m.listViewport.Width()-2)
 
+	selectedFile, selectedComment := m.selectedPosition()
 	for fileIdx, group := range m.filteredGroups {
-		isFileSelected := fileIdx == m.selectedFileIdx && m.selectedInFile < 0
+		isFileSelected := m.focused && fileIdx == selectedFile && selectedComment < 0
 
 		// Expand/collapse arrow
 		var arrow string
@@ -709,7 +723,7 @@ func (m *ReviewModel) renderList() string {
 
 		// Comments under this file
 		for i, comment := range group.Comments {
-			isSelected := currentIdx == m.selectedIdx
+			isSelected := m.focused && currentIdx == m.selectedIdx
 			line := m.renderCommentLine(comment, isSelected, contentWidth)
 			lines = append(lines, "  "+line) // Indent under file
 			currentIdx++
@@ -856,11 +870,13 @@ func (m *ReviewModel) renderDetail() string {
 
 func (m *ReviewModel) renderStatusBar() string {
 	// Crush-style hints at bottom
-	hints := []string{
-		"j/k navigate",
-		"enter view details",
-		"tab focus input",
-		"esc close",
+	hints := []string{"j/k navigate", "enter detail", "space collapse", "0-4 filter"}
+	if m.embedded && !m.focused {
+		hints = []string{"tab focus review"}
+	} else if m.embedded {
+		hints = append(hints, "tab next", "esc close")
+	} else {
+		hints = append(hints, "p post", "q quit")
 	}
 
 	hintStr := strings.Join(hints, " • ")
@@ -885,19 +901,19 @@ func (m *ReviewModel) renderConfirmPost() string {
 
 	if counts["critical"] > 0 {
 		lines = append(lines, fmt.Sprintf("  %s Critical: %d",
-			m.styles.SeverityCritical.Render("●"), counts["critical"]))
+			m.getSeverityIcon("critical"), counts["critical"]))
 	}
 	if counts["high"] > 0 {
 		lines = append(lines, fmt.Sprintf("  %s High: %d",
-			m.styles.SeverityCritical.Render("●"), counts["high"]))
+			m.getSeverityIcon("high"), counts["high"]))
 	}
 	if counts["medium"] > 0 {
 		lines = append(lines, fmt.Sprintf("  %s Medium: %d",
-			m.styles.SeverityWarning.Render("●"), counts["medium"]))
+			m.getSeverityIcon("medium"), counts["medium"]))
 	}
 	if counts["low"] > 0 {
 		lines = append(lines, fmt.Sprintf("  %s Low: %d",
-			m.styles.SeveritySuggestion.Render("●"), counts["low"]))
+			m.getSeverityIcon("low"), counts["low"]))
 	}
 
 	lines = append(lines, "")
@@ -918,15 +934,15 @@ func (m *ReviewModel) renderConfirmPost() string {
 func (m *ReviewModel) getSeverityIcon(severity string) string {
 	switch normalizedReviewSeverity(severity) {
 	case "critical":
-		return m.styles.SeverityCritical.Render("●")
+		return m.styles.SeverityCritical.Render("✖")
 	case "high":
 		return m.styles.SeverityCritical.Render("●")
 	case "medium":
-		return m.styles.SeverityWarning.Render("●")
+		return m.styles.SeverityWarning.Render("◆")
 	case "low":
-		return m.styles.SeveritySuggestion.Render("●")
+		return m.styles.SeveritySuggestion.Render("○")
 	default:
-		return m.styles.StatusMuted.Render("○")
+		return m.styles.StatusMuted.Render("·")
 	}
 }
 
@@ -972,15 +988,23 @@ func (m *ReviewModel) SetOnQuit(fn func()) {
 	m.onQuit = fn
 }
 
-// SetSize sets the dimensions and marks the model as ready.
+// SetFocused controls selection highlighting and embedded navigation hints.
+func (m *ReviewModel) SetFocused(focused bool) {
+	m.focused = focused
+}
+
+// SetSize sets bounded component dimensions and marks it ready.
 func (m *ReviewModel) SetSize(width, height int) {
-	m.width = width
-	m.height = height
+	m.width = max(1, width)
+	m.height = max(1, height)
 	m.ready = true
 	m.updateViewportSizes()
 }
 
 func truncatePath(path string, maxLen int) string {
+	if maxLen <= 0 {
+		return ""
+	}
 	if len(path) <= maxLen {
 		return path
 	}

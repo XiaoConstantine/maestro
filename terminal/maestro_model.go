@@ -44,13 +44,9 @@ type MaestroModel struct {
 	restoreConversationTail bool
 
 	// Inline review results (Crush-style - results shown in conversation)
-	reviewResults      []ReviewComment
-	selectedReviewIdx  int
-	showReviewDetail   bool
-	inputFocus         InputFocus
-	reviewFileExpanded map[string]bool // Track expanded/collapsed file groups
-	selectedFileIdx    int             // Currently selected file group index
-	selectedCommentIdx int             // Index within current file group (-1 if file header selected)
+	reviewResults []ReviewComment
+	reviewModel   *ReviewModel
+	inputFocus    InputFocus
 
 	// Session picker state
 	sessionPickerSessions []SessionInfo
@@ -232,9 +228,10 @@ func (m *MaestroModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.setInputFocus(FocusInput)
 				return m, nil
 			}
-			// Close review detail view
-			if m.showReviewDetail {
-				m.showReviewDetail = false
+			// Close review detail view before dismissing all review results.
+			if m.reviewModel != nil && m.reviewModel.showDetail {
+				m.reviewModel.showDetail = false
+				m.reviewModel.updateViewportSizes()
 				m.renderMessages()
 				return m, nil
 			}
@@ -246,7 +243,7 @@ func (m *MaestroModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Clear review results
 			if len(m.reviewResults) > 0 {
 				m.reviewResults = nil
-				m.selectedReviewIdx = 0
+				m.reviewModel = nil
 				if !m.toolActivity.HasEntries() {
 					m.railVisible = false
 				}
@@ -318,32 +315,11 @@ func (m *MaestroModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
-		// Handle review navigation when results are visible AND review pane is focused
-		if len(m.reviewResults) > 0 && m.inputFocus == FocusReviewList && !m.commandPalette.IsVisible() {
-			switch msg.String() {
-			case "j", "down":
-				m.moveReviewDown()
-				m.renderMessages()
-				return m, nil
-			case "k", "up":
-				m.moveReviewUp()
-				m.renderMessages()
-				return m, nil
-			case " ":
-				m.toggleCurrentFileExpand()
-				m.renderMessages()
-				return m, nil
-			case "enter", "l", "right":
-				m.showReviewDetail = !m.showReviewDetail
-				m.renderMessages()
-				return m, nil
-			case "h", "left":
-				if m.showReviewDetail {
-					m.showReviewDetail = false
-					m.renderMessages()
-				}
-				return m, nil
-			}
+		if m.reviewModel != nil && m.inputFocus == FocusReviewList && !m.commandPalette.IsVisible() {
+			updated, cmd := m.reviewModel.Update(msg)
+			m.reviewModel = updated.(*ReviewModel)
+			m.renderMessages()
+			return m, cmd
 		}
 
 		// Route to command palette if visible
@@ -457,12 +433,8 @@ func (m *MaestroModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case ReviewResultMsg:
 		// Store review results for inline display (Crush-style)
 		m.reviewResults = msg.Comments
-		m.selectedReviewIdx = 0
-		m.selectedFileIdx = 0
-		m.selectedCommentIdx = 0
-		m.showReviewDetail = false
-		m.reviewFileExpanded = make(map[string]bool) // Reset expanded state
-		m.initReviewFileExpanded()
+		m.reviewModel = NewEmbeddedReviewModel(msg.Comments, m.theme)
+		m.reviewModel.SetSize(max(1, m.viewport.Width()), max(6, m.viewport.Height()))
 		m.restoreConversationTail = m.restoreConversationTail || m.viewport.AtBottom()
 		m.railVisible = true
 		// Focus on review list when results arrive
@@ -1030,11 +1002,7 @@ func (m *MaestroModel) cmdReview(prArg string) tea.Cmd {
 
 	// Clear previous review results when starting a new review
 	m.reviewResults = nil
-	m.selectedReviewIdx = 0
-	m.selectedFileIdx = 0
-	m.selectedCommentIdx = 0
-	m.reviewFileExpanded = nil
-	m.showReviewDetail = false
+	m.reviewModel = nil
 	m.setInputFocus(FocusInput)
 	m.renderMessages()
 
@@ -1303,9 +1271,9 @@ func (m *MaestroModel) renderMessages() {
 		sb.WriteString("\n\n")
 	}
 
-	// Add inline review results (Crush-style)
-	if len(m.reviewResults) > 0 {
-		sb.WriteString(m.renderInlineReview())
+	if m.reviewModel != nil {
+		m.reviewModel.SetSize(max(1, m.viewport.Width()), max(6, m.viewport.Height()))
+		sb.WriteString(m.reviewModel.ViewString())
 	}
 
 	// Add session picker if in session picker mode
@@ -1370,274 +1338,6 @@ func (m *MaestroModel) renderSessionPicker() string {
 	return sb.String()
 }
 
-// renderInlineReview renders review comments inline in the conversation.
-func (m *MaestroModel) renderInlineReview() string {
-	var sb strings.Builder
-	contentWidth := max(1, m.viewport.Width())
-
-	// Show focus indicator header when review list is focused
-	if m.inputFocus == FocusReviewList {
-		focusIndicator := lipgloss.NewStyle().
-			Foreground(m.theme.Accent).
-			Bold(true).
-			Render("▌")
-		title := lipgloss.NewStyle().
-			Foreground(m.theme.TextPrimary).
-			Bold(true).
-			Render(" Review Comments")
-		sb.WriteString(focusIndicator + title + "\n\n")
-	}
-
-	// Group by file
-	fileGroups := groupCommentsByFile(m.reviewResults)
-
-	// Render in two columns if showing detail, otherwise full width list
-	if m.showReviewDetail && m.getSelectedReviewComment() != nil {
-		// Split layout: 40% list, 60% detail
-		listWidth := contentWidth * 2 / 5
-		detailWidth := contentWidth - listWidth - 3
-
-		listContent := m.renderReviewList(listWidth, fileGroups)
-		detailContent := m.renderReviewDetail(detailWidth)
-
-		// Join horizontally
-		listLines := strings.Split(listContent, "\n")
-		detailLines := strings.Split(detailContent, "\n")
-
-		maxLines := max(len(listLines), len(detailLines))
-		separator := lipgloss.NewStyle().Foreground(m.theme.Border).Render("│")
-
-		for i := 0; i < maxLines; i++ {
-			listLine := ""
-			detailLine := ""
-			if i < len(listLines) {
-				listLine = listLines[i]
-			}
-			if i < len(detailLines) {
-				detailLine = detailLines[i]
-			}
-
-			// Pad list line to width
-			listLine = padRight(listLine, listWidth)
-			sb.WriteString(listLine + " " + separator + " " + detailLine + "\n")
-		}
-	} else {
-		// Full width list
-		sb.WriteString(m.renderReviewList(contentWidth, fileGroups))
-	}
-
-	// Navigation hint with focus indicator
-	sb.WriteString("\n")
-	var hint string
-	if m.inputFocus == FocusReviewList {
-		hint = lipgloss.NewStyle().Foreground(m.theme.TextMuted).
-			Render("j/k navigate • space expand/collapse • enter view details • tab focus input • esc close")
-	} else {
-		hint = lipgloss.NewStyle().Foreground(m.theme.TextMuted).
-			Render("tab focus review list")
-	}
-	sb.WriteString(ansi.Truncate(hint, contentWidth, "…"))
-
-	return sb.String()
-}
-
-// renderReviewList renders the list of review comments.
-func (m *MaestroModel) renderReviewList(width int, fileGroups []FileGroup) string {
-	m.initReviewFileExpanded()
-	var lines []string
-	currentIdx := 0
-	isFocused := m.inputFocus == FocusReviewList
-
-	for fileIdx, group := range fileGroups {
-		isExpanded := m.isFileExpanded(group.Path)
-		isFileSelected := isFocused && fileIdx == m.selectedFileIdx && m.selectedCommentIdx < 0
-
-		// Expand/collapse arrow (using simpler characters for compatibility)
-		var arrow string
-		if isExpanded {
-			arrow = "[-] "
-		} else {
-			arrow = "[+] "
-		}
-
-		// File header with separator line
-		fileName := truncatePath(group.Path, width-15)
-		countStr := fmt.Sprintf("(%d)", len(group.Comments))
-
-		var header string
-		if isFileSelected {
-			header = lipgloss.NewStyle().
-				Background(lipgloss.Color("#3A3C55")).
-				Foreground(m.theme.TextPrimary).
-				Bold(true).
-				Render(arrow + fileName + " " + countStr)
-		} else {
-			header = lipgloss.NewStyle().Foreground(m.theme.TextMuted).
-				Render(arrow + fileName + " " + countStr)
-		}
-
-		lineWidth := width - lipgloss.Width(header) - 1
-		if lineWidth > 0 {
-			header = header + " " + lipgloss.NewStyle().Foreground(m.theme.Border).
-				Render(strings.Repeat("─", lineWidth))
-		}
-		lines = append(lines, header)
-
-		if !isExpanded {
-			currentIdx++
-			lines = append(lines, "")
-			continue
-		}
-
-		// Comments
-		for _, comment := range group.Comments {
-			isSelected := isFocused && currentIdx == m.selectedReviewIdx
-			line := m.renderCommentLine(comment, isSelected, width-2)
-			lines = append(lines, "  "+line)
-			currentIdx++
-		}
-		lines = append(lines, "")
-	}
-
-	return strings.Join(lines, "\n")
-}
-
-// renderCommentLine renders a single comment line.
-func (m *MaestroModel) renderCommentLine(comment ReviewComment, selected bool, maxWidth int) string {
-	// Severity icon
-	icon := m.getSeverityIcon(comment.Severity)
-
-	// Line number
-	lineNum := lipgloss.NewStyle().Foreground(m.theme.TextMuted).
-		Render(fmt.Sprintf("L%d", comment.LineNumber))
-
-	// Category
-	category := ""
-	if comment.Category != "" {
-		category = lipgloss.NewStyle().
-			Foreground(m.theme.TextMuted).
-			Background(m.theme.Surface).
-			Padding(0, 1).
-			Render(comment.Category)
-	}
-
-	// Content preview
-	previewWidth := maxWidth - 20
-	if category != "" {
-		previewWidth -= lipgloss.Width(category) + 1
-	}
-	if previewWidth < 5 {
-		previewWidth = 5
-	}
-
-	preview := comment.Content
-	if len(preview) > previewWidth && previewWidth > 1 {
-		preview = preview[:previewWidth-1] + "…"
-	}
-
-	// Build line parts
-	parts := []string{icon, lineNum}
-	if category != "" {
-		parts = append(parts, category)
-	}
-
-	// Style content based on selection
-	if selected {
-		// Highlight style for selected comment
-		highlightStyle := lipgloss.NewStyle().
-			Background(lipgloss.Color("#3A3C55")).
-			Foreground(m.theme.TextPrimary).
-			Bold(true)
-
-		preview = highlightStyle.Render(preview)
-		parts = append(parts, preview)
-		line := strings.Join(parts, " ")
-
-		// Selection indicator with accent color
-		indicator := lipgloss.NewStyle().
-			Foreground(m.theme.Accent).
-			Bold(true).
-			Render("▸ ")
-		return indicator + highlightStyle.Render(line)
-	}
-
-	preview = lipgloss.NewStyle().Foreground(m.theme.TextSecondary).Render(preview)
-	parts = append(parts, preview)
-	line := strings.Join(parts, " ")
-	return "  " + line
-}
-
-// getSelectedReviewComment returns the currently selected review comment.
-func (m *MaestroModel) getSelectedReviewComment() *ReviewComment {
-	fileGroups := groupCommentsByFile(m.reviewResults)
-	if m.selectedFileIdx < 0 || m.selectedFileIdx >= len(fileGroups) {
-		return nil
-	}
-	group := fileGroups[m.selectedFileIdx]
-	if m.selectedCommentIdx < 0 || m.selectedCommentIdx >= len(group.Comments) {
-		return nil
-	}
-	return &group.Comments[m.selectedCommentIdx]
-}
-
-// renderReviewDetail renders the detail view for the selected comment.
-func (m *MaestroModel) renderReviewDetail(width int) string {
-	comment := m.getSelectedReviewComment()
-	if comment == nil {
-		return lipgloss.NewStyle().Foreground(m.theme.TextMuted).Render("Select a comment to view details")
-	}
-	var lines []string
-
-	// Header
-	header := fmt.Sprintf("%s:%d", truncatePath(comment.FilePath, width-10), comment.LineNumber)
-	lines = append(lines, lipgloss.NewStyle().Foreground(m.theme.TextPrimary).Bold(true).Render(header))
-	lines = append(lines, "")
-
-	// Severity
-	severityLine := m.getSeverityIcon(comment.Severity) + " " +
-		lipgloss.NewStyle().Foreground(m.theme.TextSecondary).Render(comment.Severity)
-	if comment.Category != "" {
-		severityLine += " • " + lipgloss.NewStyle().Foreground(m.theme.TextMuted).Render(comment.Category)
-	}
-	lines = append(lines, severityLine)
-	lines = append(lines, "")
-
-	// Issue
-	lines = append(lines, lipgloss.NewStyle().Foreground(m.theme.TextMuted).Render("Issue"))
-	issueLines := wrapTextSimple(comment.Content, width)
-	for _, l := range issueLines {
-		lines = append(lines, lipgloss.NewStyle().Foreground(m.theme.TextSecondary).Render(l))
-	}
-
-	// Suggestion
-	if comment.Suggestion != "" {
-		lines = append(lines, "")
-		lines = append(lines, lipgloss.NewStyle().Foreground(m.theme.TextMuted).Render("Suggestion"))
-		suggLines := wrapTextSimple(comment.Suggestion, width)
-		for _, l := range suggLines {
-			lines = append(lines, lipgloss.NewStyle().Foreground(m.theme.StatusHighlight).Render(l))
-		}
-	}
-
-	return strings.Join(lines, "\n")
-}
-
-// getSeverityIcon returns a colored icon for the severity level.
-func (m *MaestroModel) getSeverityIcon(severity string) string {
-	switch normalizedReviewSeverity(severity) {
-	case "critical":
-		return lipgloss.NewStyle().Foreground(lipgloss.Color("#FF6B6B")).Render("●")
-	case "high":
-		return lipgloss.NewStyle().Foreground(lipgloss.Color("#FF6B6B")).Render("●")
-	case "medium":
-		return lipgloss.NewStyle().Foreground(lipgloss.Color("#FFD93D")).Render("●")
-	case "low":
-		return lipgloss.NewStyle().Foreground(m.theme.StatusHighlight).Render("●")
-	default:
-		return lipgloss.NewStyle().Foreground(m.theme.TextMuted).Render("○")
-	}
-}
-
 // getReviewCounts returns counts of review comments by severity.
 func (m *MaestroModel) getReviewCounts() map[string]int {
 	counts := map[string]int{"total": 0, "critical": 0, "high": 0, "medium": 0, "low": 0}
@@ -1679,6 +1379,9 @@ func (m *MaestroModel) changeFocus() {
 func (m *MaestroModel) setInputFocus(focus InputFocus) {
 	m.inputFocus = focus
 	m.toolActivity.SetFocused(focus == FocusToolActivity)
+	if m.reviewModel != nil {
+		m.reviewModel.SetFocused(focus == FocusReviewList)
+	}
 	if focus == FocusToolActivity {
 		m.railFollowTail = false
 		m.ensureToolSelectionVisible()
@@ -1698,131 +1401,6 @@ func (m *MaestroModel) ensureToolSelectionVisible() {
 	}
 	line := m.toolActivityStartLine + m.toolActivity.SelectedLine(max(1, m.viewport.Width()))
 	m.viewport.EnsureVisible(line, 0, 0)
-}
-
-// initReviewFileExpanded initializes the expanded state for all file groups.
-func (m *MaestroModel) initReviewFileExpanded() {
-	if m.reviewFileExpanded == nil {
-		m.reviewFileExpanded = make(map[string]bool)
-	}
-	fileGroups := groupCommentsByFile(m.reviewResults)
-	for _, g := range fileGroups {
-		if _, exists := m.reviewFileExpanded[g.Path]; !exists {
-			m.reviewFileExpanded[g.Path] = true // Default expanded
-		}
-	}
-}
-
-// isFileExpanded returns whether a file group is expanded.
-func (m *MaestroModel) isFileExpanded(path string) bool {
-	if m.reviewFileExpanded == nil {
-		return true
-	}
-	expanded, exists := m.reviewFileExpanded[path]
-	return !exists || expanded
-}
-
-// toggleCurrentFileExpand toggles the expand/collapse state of the current file group.
-func (m *MaestroModel) toggleCurrentFileExpand() {
-	m.initReviewFileExpanded()
-	fileGroups := groupCommentsByFile(m.reviewResults)
-	if m.selectedFileIdx >= 0 && m.selectedFileIdx < len(fileGroups) {
-		path := fileGroups[m.selectedFileIdx].Path
-		m.reviewFileExpanded[path] = !m.isFileExpanded(path)
-	}
-}
-
-// getTotalVisibleReviewItems returns the total number of visible items in review list.
-func (m *MaestroModel) getTotalVisibleReviewItems() int {
-	m.initReviewFileExpanded()
-	fileGroups := groupCommentsByFile(m.reviewResults)
-	total := 0
-	for _, g := range fileGroups {
-		if m.isFileExpanded(g.Path) {
-			total += len(g.Comments)
-		} else {
-			total++ // Collapsed file header counts as one item
-		}
-	}
-	return total
-}
-
-// moveReviewDown moves selection down in the review list.
-func (m *MaestroModel) moveReviewDown() {
-	total := m.getTotalVisibleReviewItems()
-	if m.selectedReviewIdx < total-1 {
-		m.selectedReviewIdx++
-	}
-	m.updateFileIndexFromReviewIdx()
-}
-
-// moveReviewUp moves selection up in the review list.
-func (m *MaestroModel) moveReviewUp() {
-	if m.selectedReviewIdx > 0 {
-		m.selectedReviewIdx--
-	}
-	m.updateFileIndexFromReviewIdx()
-}
-
-// updateFileIndexFromReviewIdx updates selectedFileIdx and selectedCommentIdx from selectedReviewIdx.
-func (m *MaestroModel) updateFileIndexFromReviewIdx() {
-	m.initReviewFileExpanded()
-	fileGroups := groupCommentsByFile(m.reviewResults)
-	idx := 0
-	for i, g := range fileGroups {
-		if !m.isFileExpanded(g.Path) {
-			if idx == m.selectedReviewIdx {
-				m.selectedFileIdx = i
-				m.selectedCommentIdx = -1
-				return
-			}
-			idx++
-		} else {
-			for j := range g.Comments {
-				if idx == m.selectedReviewIdx {
-					m.selectedFileIdx = i
-					m.selectedCommentIdx = j
-					return
-				}
-				idx++
-			}
-		}
-	}
-}
-
-func padRight(s string, width int) string {
-	w := lipgloss.Width(s)
-	if w >= width {
-		return s
-	}
-	return s + strings.Repeat(" ", width-w)
-}
-
-func wrapTextSimple(text string, width int) []string {
-	if width <= 0 || len(text) <= width {
-		return []string{text}
-	}
-
-	var lines []string
-	words := strings.Fields(text)
-	var line strings.Builder
-
-	for _, word := range words {
-		if line.Len()+len(word)+1 > width {
-			if line.Len() > 0 {
-				lines = append(lines, line.String())
-				line.Reset()
-			}
-		}
-		if line.Len() > 0 {
-			line.WriteString(" ")
-		}
-		line.WriteString(word)
-	}
-	if line.Len() > 0 {
-		lines = append(lines, line.String())
-	}
-	return lines
 }
 
 // overlayCommandPalette composes the palette without slicing ANSI escape sequences.

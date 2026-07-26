@@ -152,10 +152,10 @@ func TestReviewRenderingUsesConversationWidthWithRail(t *testing.T) {
 		model.height = 24
 		model.railVisible = true
 		model.reviewResults = []ReviewComment{{FilePath: "very/long/path/to/main.go", Content: strings.Repeat("finding ", 20)}}
-		model.showReviewDetail = true
-		model.initReviewFileExpanded()
+		model.reviewModel = NewEmbeddedReviewModel(model.reviewResults, model.theme)
+		model.reviewModel.showDetail = true
 		_ = model.renderInputMode()
-		for _, line := range strings.Split(model.renderInlineReview(), "\n") {
+		for _, line := range strings.Split(model.reviewModel.ViewString(), "\n") {
 			if got := lipgloss.Width(line); got > model.viewport.Width() {
 				t.Fatalf("width %d review line = %d, conversation = %d", width, got, model.viewport.Width())
 			}
