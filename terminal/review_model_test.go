@@ -1,6 +1,7 @@
 package terminal
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -151,6 +152,73 @@ func TestReviewSelectionUsesOneFlattenedIndex(t *testing.T) {
 	file, comment := model.selectedPosition()
 	if file != 1 || comment != -1 || model.selectedIdx != 1 || model.filteredGroups[1].Expanded {
 		t.Fatalf("collapsed selection = file:%d comment:%d index:%d expanded:%v", file, comment, model.selectedIdx, model.filteredGroups[1].Expanded)
+	}
+}
+
+func TestReviewSelectionStaysVisibleInLongList(t *testing.T) {
+	comments := make([]ReviewComment, 30)
+	for i := range comments {
+		comments[i] = ReviewComment{FilePath: "large.go", LineNumber: i + 1, Content: fmt.Sprintf("finding %d", i)}
+	}
+	model := NewReviewModel(comments, ClaudeCodeTheme())
+	model.SetFocused(true)
+	model.SetSize(60, 10)
+	_, _ = model.Update(tea.KeyPressMsg{Code: 'G'})
+	view := ansi.Strip(model.ViewString())
+
+	if model.listViewport.YOffset() == 0 || !strings.Contains(view, "finding 29") {
+		t.Fatalf("bottom selection is not visible: offset=%d view=%q", model.listViewport.YOffset(), view)
+	}
+}
+
+func TestReviewMultilinePreviewKeepsSelectionMapping(t *testing.T) {
+	comments := make([]ReviewComment, 20)
+	for i := range comments {
+		comments[i] = ReviewComment{FilePath: "large.go", Content: fmt.Sprintf("finding %d\nextra line", i)}
+	}
+	model := NewReviewModel(comments, ClaudeCodeTheme())
+	model.SetFocused(true)
+	model.SetSize(50, 9)
+	_, _ = model.Update(tea.KeyPressMsg{Code: 'G'})
+	view := ansi.Strip(model.ViewString())
+	if !strings.Contains(view, "finding 19") || strings.Contains(view, "extra line") {
+		t.Fatalf("multiline preview did not stay on one mapped row: %q", view)
+	}
+}
+
+func TestReviewDetailSupportsIndependentScrolling(t *testing.T) {
+	model := NewReviewModel([]ReviewComment{
+		{FilePath: "large.go", Content: strings.Repeat("long detail content ", 80)},
+		{FilePath: "other.go", Content: "second finding"},
+	}, ClaudeCodeTheme())
+	model.SetSize(60, 10)
+	_, _ = model.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	_ = model.ViewString() // Populate viewport content before scrolling it.
+	_, _ = model.Update(tea.KeyPressMsg{Code: 'd', Mod: tea.ModCtrl})
+
+	if model.detailViewport.YOffset() == 0 {
+		t.Fatal("detail viewport did not scroll independently")
+	}
+	if model.listViewport.YOffset() != 0 {
+		t.Fatalf("detail scrolling moved list offset to %d", model.listViewport.YOffset())
+	}
+	_, _ = model.Update(tea.KeyPressMsg{Code: 'G'})
+	if model.detailViewport.YOffset() != 0 {
+		t.Fatalf("selection change retained detail offset %d", model.detailViewport.YOffset())
+	}
+}
+
+func TestReviewClosingDetailRestoresListWidth(t *testing.T) {
+	model := NewReviewModel([]ReviewComment{{FilePath: "a.go", Content: "finding"}}, ClaudeCodeTheme())
+	model.SetSize(80, 15)
+	fullWidth := model.listViewport.Width()
+	_, _ = model.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if model.listViewport.Width() >= fullWidth {
+		t.Fatal("entering detail did not split list width")
+	}
+	_, _ = model.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+	if model.listViewport.Width() != fullWidth {
+		t.Fatalf("closing detail list width = %d, want %d", model.listViewport.Width(), fullWidth)
 	}
 }
 

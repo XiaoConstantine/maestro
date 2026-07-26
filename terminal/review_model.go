@@ -280,10 +280,13 @@ func (m *ReviewModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case "enter", "l", "right":
 			m.showDetail = true
+			m.updateViewportSizes()
+			m.detailViewport.GotoTop()
 
 		case "h", "left", "esc":
 			if m.showDetail {
 				m.showDetail = false
+				m.updateViewportSizes()
 			}
 
 		case "tab", " ":
@@ -310,22 +313,27 @@ func (m *ReviewModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 		case "g":
-			m.selectedIdx = 0
+			m.selectIndex(0)
 
 		case "G":
-			m.selectedIdx = m.getTotalVisibleItems() - 1
-			if m.selectedIdx < 0 {
-				m.selectedIdx = 0
+			m.selectIndex(m.getTotalVisibleItems() - 1)
+
+		case "ctrl+d", "pgdown":
+			if m.showDetail {
+				m.detailViewport.HalfPageDown()
+			} else {
+				for i := 0; i < 10; i++ {
+					m.moveDown()
+				}
 			}
 
-		case "ctrl+d":
-			for i := 0; i < 10; i++ {
-				m.moveDown()
-			}
-
-		case "ctrl+u":
-			for i := 0; i < 10; i++ {
-				m.moveUp()
+		case "ctrl+u", "pgup":
+			if m.showDetail {
+				m.detailViewport.HalfPageUp()
+			} else {
+				for i := 0; i < 10; i++ {
+					m.moveUp()
+				}
 			}
 		}
 	}
@@ -362,7 +370,7 @@ func (m *ReviewModel) updateViewportSizes() {
 	if m.showDetail {
 		// Split view: 40% list, 60% detail
 		listWidth := max(1, m.width*2/5)
-		detailWidth := max(1, m.width-listWidth-2)
+		detailWidth := max(1, m.width-listWidth-3)
 
 		m.listViewport.SetWidth(listWidth)
 		m.listViewport.SetHeight(contentHeight)
@@ -377,15 +385,18 @@ func (m *ReviewModel) updateViewportSizes() {
 }
 
 func (m *ReviewModel) moveDown() {
-	total := m.getTotalVisibleItems()
-	if m.selectedIdx < total-1 {
-		m.selectedIdx++
-	}
+	m.selectIndex(min(m.selectedIdx+1, m.getTotalVisibleItems()-1))
 }
 
 func (m *ReviewModel) moveUp() {
-	if m.selectedIdx > 0 {
-		m.selectedIdx--
+	m.selectIndex(max(0, m.selectedIdx-1))
+}
+
+func (m *ReviewModel) selectIndex(index int) {
+	index = max(0, min(index, m.getTotalVisibleItems()-1))
+	if index != m.selectedIdx {
+		m.selectedIdx = index
+		m.detailViewport.GotoTop()
 	}
 }
 
@@ -423,7 +434,8 @@ func (m *ReviewModel) toggleCurrentFileGroup() {
 		}
 	}
 	m.filteredGroups[selectedFile].Expanded = !m.filteredGroups[selectedFile].Expanded
-	m.selectedIdx = start
+	m.selectIndex(start)
+	m.detailViewport.GotoTop()
 }
 
 func (m *ReviewModel) getTotalComments() int {
@@ -449,7 +461,8 @@ func (m *ReviewModel) getTotalVisibleItems() int {
 func (m *ReviewModel) setFilter(mode FilterMode) {
 	m.filterMode = mode
 	m.applyFilter()
-	m.selectedIdx = 0
+	m.selectIndex(0)
+	m.detailViewport.GotoTop()
 }
 
 func (m *ReviewModel) applyFilter() {
@@ -522,6 +535,57 @@ func (m *ReviewModel) getSelectedComment() *ReviewComment {
 	return nil
 }
 
+func (m *ReviewModel) syncViewports() {
+	m.listViewport.SetContent(m.renderList())
+	m.ensureSelectionVisible()
+	if m.showDetail {
+		m.detailViewport.SetContent(m.renderDetail())
+	}
+}
+
+func (m *ReviewModel) ensureSelectionVisible() {
+	line := m.selectedListLine()
+	if line < 0 {
+		return
+	}
+	top := m.listViewport.YOffset()
+	height := max(1, m.listViewport.Height())
+	switch {
+	case line < top:
+		m.listViewport.SetYOffset(line)
+	case line >= top+height:
+		m.listViewport.SetYOffset(line - height + 1)
+	}
+}
+
+func (m *ReviewModel) selectedListLine() int {
+	line, item := 0, 0
+	for _, group := range m.filteredGroups {
+		if !group.Expanded {
+			if item == m.selectedIdx {
+				return line
+			}
+			item++
+			line += 2 // File header and inter-file spacing.
+			continue
+		}
+
+		line++ // Expanded file header.
+		for comment := range group.Comments {
+			if item == m.selectedIdx {
+				return line
+			}
+			item++
+			line++
+			if comment < len(group.Comments)-1 {
+				line++ // Inter-comment spacing.
+			}
+		}
+		line++ // Inter-file spacing.
+	}
+	return -1
+}
+
 // View renders the review TUI.
 func (m *ReviewModel) View() tea.View {
 	var view tea.View
@@ -540,6 +604,7 @@ func (m *ReviewModel) ViewString() string {
 		return m.boundView(m.renderConfirmPost())
 	}
 
+	m.syncViewports()
 	var parts []string
 
 	// Header with title and counts
@@ -553,8 +618,8 @@ func (m *ReviewModel) ViewString() string {
 	// Main content
 	if m.showDetail {
 		// Split view
-		listContent := m.renderList()
-		detailContent := m.renderDetail()
+		listContent := m.listViewport.View()
+		detailContent := m.detailViewport.View()
 
 		listWidth := max(1, m.width*2/5)
 		detailWidth := max(1, m.width-listWidth-3)
@@ -578,7 +643,7 @@ func (m *ReviewModel) ViewString() string {
 		parts = append(parts, content)
 	} else {
 		// Full list view
-		parts = append(parts, m.renderList())
+		parts = append(parts, m.listViewport.View())
 	}
 
 	// Status bar
@@ -763,7 +828,7 @@ func (m *ReviewModel) renderCommentLine(comment ReviewComment, selected bool, ma
 		contentWidth -= lipgloss.Width(category) + 1
 	}
 
-	preview := ansi.Truncate(comment.Content, contentWidth, "…")
+	preview := ansi.Truncate(firstLine(comment.Content), contentWidth, "…")
 
 	// Style based on selection
 	if selected {
@@ -867,6 +932,9 @@ func (m *ReviewModel) renderDetail() string {
 func (m *ReviewModel) renderStatusBar() string {
 	// Crush-style hints at bottom
 	hints := []string{"j/k navigate", "enter detail", "space collapse", "0-4 filter"}
+	if m.showDetail {
+		hints = []string{"j/k select", "ctrl+d/u scroll detail", "esc list", "0-4 filter"}
+	}
 	if m.embedded && !m.focused {
 		hints = []string{"tab focus review"}
 	} else if m.embedded {
