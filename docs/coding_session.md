@@ -36,7 +36,7 @@ File tools reject paths outside the authoritative workspace root. Shell executio
 
 The coding agent receives explicit provider/model/workspace instructions and evidence rules: after any `write` or `edit`, it must verify the mutation with tool evidence before calling `Finish`. Final answers should describe only mutations that were actually observed in the workspace trace.
 
-One run may mutate a session at a time. Overlapping prompts are rejected. Press **Esc** to cancel the active coding run. Run, turn, and tool lifecycle events update the TUI progress display. The contextual status bar keeps cancellation and navigation actions visible without overwhelming narrow terminals. Output and accounting use the operation-scoped `ExecutionTrace` returned by `ExecuteWithTrace`, avoiding races against a mutable last-trace accessor.
+One run may mutate a session at a time. Overlapping prompts are rejected. Press **Esc** to cancel the active coding run. Run, turn, and tool lifecycle events update the TUI progress display. Assistant responses render as width-aware Markdown with Maestro-themed code highlighting; rendered blocks are cached by width bucket so progress ticks and small resizes do not repeatedly parse unchanged messages. The contextual status bar keeps cancellation and navigation actions visible without overwhelming narrow terminals. Output and accounting use the operation-scoped `ExecutionTrace` returned by `ExecuteWithTrace`, avoiding races against a mutable last-trace accessor.
 
 The active Maestro session name selects the native session id, so switching or creating a session selects separate persisted coding history.
 

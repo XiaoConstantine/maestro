@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
@@ -1052,8 +1053,9 @@ func (m *MaestroModel) cmdSessionList() tea.Cmd {
 // addMessage adds a message to the conversation.
 func (m *MaestroModel) addMessage(role, content string) {
 	m.messages = append(m.messages, Message{
-		Role:    role,
-		Content: content,
+		Role:      role,
+		Content:   content,
+		Timestamp: time.Now(),
 	})
 	m.renderMessages()
 	m.viewport.GotoBottom()
@@ -1063,7 +1065,8 @@ func (m *MaestroModel) addMessage(role, content string) {
 func (m *MaestroModel) renderMessages() {
 	var sb strings.Builder
 
-	for _, msg := range m.messages {
+	for i := range m.messages {
+		msg := &m.messages[i]
 		switch msg.Role {
 		case "user":
 			// User messages: cyan accent with "you >" prefix
@@ -1080,13 +1083,11 @@ func (m *MaestroModel) renderMessages() {
 			sb.WriteString(prefix + arrow + content)
 
 		case "assistant":
-			// Assistant messages: clean with subtle icon
 			icon := lipgloss.NewStyle().
 				Foreground(m.theme.Accent).
 				Render("◉ ")
-			content := lipgloss.NewStyle().
-				Foreground(m.theme.TextPrimary).
-				Render(msg.Content)
+			contentWidth := max(1, m.viewport.Width()-lipgloss.Width(icon))
+			content := m.renderAssistantMessage(msg, contentWidth)
 			sb.WriteString(icon + content)
 
 		case "system":
