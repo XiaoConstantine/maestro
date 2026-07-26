@@ -88,28 +88,13 @@ func NewInputModel(theme *Theme, onCommand InputCommandHandler, onQuestion Input
 		historyIndex:          -1,
 		focused:               true,
 		maxVisibleSuggestions: 6,
-		allCommands:           getBuiltinCommands(),
+		allCommands:           builtinCommands(),
 	}
 
 	// Set Crush-style prompt function
 	ta.SetPromptFunc(4, m.promptFunc)
 
 	return m
-}
-
-// getBuiltinCommands returns the list of builtin commands for autocomplete.
-func getBuiltinCommands() []Command {
-	return []Command{
-		{Name: "help", Description: "Show available commands", Category: "Help"},
-		{Name: "review", Description: "Review a pull request", Category: "GitHub"},
-		{Name: "ask", Description: "Ask a question about the repository", Category: "Maestro"},
-		{Name: "claude", Description: "Send prompt to Claude Sonnet 4.5", Category: "Subagent"},
-		{Name: "gemini", Description: "Send prompt to Gemini 3 Pro", Category: "Subagent"},
-		{Name: "session", Description: "Manage sessions (new/switch/list)", Category: "Session"},
-		{Name: "clear", Description: "Clear the conversation", Category: "System"},
-		{Name: "exit", Description: "Exit Maestro", Category: "System"},
-		{Name: "quit", Description: "Exit Maestro", Category: "System"},
-	}
 }
 
 // Init initializes the input model.

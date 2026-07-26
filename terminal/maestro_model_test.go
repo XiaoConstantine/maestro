@@ -9,6 +9,12 @@ import (
 	"charm.land/lipgloss/v2"
 )
 
+func TestSessionPickerModeRetainsHistoricalValue(t *testing.T) {
+	if ModeSessionPicker != MaestroMode(3) {
+		t.Fatalf("ModeSessionPicker = %d, want historical value 3", ModeSessionPicker)
+	}
+}
+
 func TestReviewCommandDispatchesThroughBackend(t *testing.T) {
 	backend := &reviewRecordingBackend{NoOpBackend: NewNoOpBackend("owner", "repo")}
 	model := NewMaestroModel(&MaestroConfig{}, backend)

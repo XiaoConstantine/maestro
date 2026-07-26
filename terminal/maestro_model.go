@@ -19,13 +19,11 @@ type MaestroModel struct {
 
 	// Sub-models
 	inputModel    *InputModel
-	reviewModel   *ReviewModel
 	progressModel *ProgressModel
 
 	// Shared components
 	statusBar      *StatusBarModel
 	commandPalette *CommandPaletteModel
-	keyHandler     *KeyHandler
 
 	// Theming
 	theme  *Theme
@@ -90,7 +88,6 @@ func NewMaestroModel(cfg *MaestroConfig, backend MaestroBackend) *MaestroModel {
 		mode:           ModeInput,
 		statusBar:      NewStatusBar(theme),
 		commandPalette: NewCommandPalette(theme),
-		keyHandler:     NewKeyHandler(),
 		progressModel:  NewProgressModel(theme),
 		theme:          theme,
 		styles:         styles,
@@ -107,9 +104,6 @@ func NewMaestroModel(cfg *MaestroConfig, backend MaestroBackend) *MaestroModel {
 	// Set up status bar. Workspace and model details are rendered in the header.
 	m.statusBar.SetMode("INPUT")
 	m.statusBar.SetMessage("Ready")
-
-	// Register command handlers
-	m.registerCommands()
 
 	// Add welcome message
 	m.addMessage("assistant", "Welcome to Maestro! Enter a coding task, or use /ask for read-only repository questions.")
@@ -299,9 +293,6 @@ func (m *MaestroModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		newInput, cmd := m.inputModel.Update(msg)
 		m.inputModel = newInput
 		cmds = append(cmds, cmd)
-
-	case ModeTransition:
-		m.handleModeTransition(msg)
 
 	case CommandResultMsg:
 		// Handle command execution result
@@ -677,26 +668,6 @@ func sectionHeight(section string) int {
 		return 0
 	}
 	return lipgloss.Height(section)
-}
-
-// handleModeTransition handles mode transitions.
-func (m *MaestroModel) handleModeTransition(transition ModeTransition) {
-	m.mode = transition.To
-	m.statusBar.SetMode(transition.To.String())
-
-	switch transition.To {
-	case ModeReview:
-		if data, ok := transition.Data.(ReviewModeData); ok {
-			m.reviewModel = NewReviewModel(data.Comments, m.theme)
-			m.reviewModel.SetOnPost(data.OnPost)
-			// Initialize the review model with current window size
-			m.reviewModel.SetSize(m.width, m.height)
-		}
-
-	case ModeInput:
-		// Clean up review model when returning to input
-		m.reviewModel = nil
-	}
 }
 
 // handleCommand processes a slash command.
@@ -1076,15 +1047,6 @@ func (m *MaestroModel) cmdSessionList() tea.Cmd {
 	}
 
 	return tea.Batch(startCmd, listCmd)
-}
-
-// registerCommands sets up command palette commands.
-func (m *MaestroModel) registerCommands() {
-	// Commands are already registered in NewCommandPalette
-	// Add handlers here
-	m.commandPalette.SetHandler("help", func(args map[string]string) (string, error) {
-		return "Use /help in the input for command list", nil
-	})
 }
 
 // addMessage adds a message to the conversation.

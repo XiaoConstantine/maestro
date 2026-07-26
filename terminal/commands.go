@@ -17,7 +17,6 @@ type Command struct {
 	Aliases     []string
 	Description string
 	Category    string
-	Handler     CommandHandler
 	Args        []CommandArg
 }
 
@@ -28,9 +27,6 @@ type CommandArg struct {
 	Required    bool
 	Default     string
 }
-
-// CommandHandler is a function that executes a command.
-type CommandHandler func(args map[string]string) (string, error)
 
 // CommandPaletteModel manages the command palette.
 type CommandPaletteModel struct {
@@ -66,100 +62,10 @@ func NewCommandPalette(theme *Theme) *CommandPaletteModel {
 		historyIdx: -1,
 	}
 
-	cp.registerDefaultCommands()
+	for _, command := range builtinCommands() {
+		cp.RegisterCommand(command)
+	}
 	return cp
-}
-
-// registerDefaultCommands registers the default set of commands.
-func (cp *CommandPaletteModel) registerDefaultCommands() {
-	// Maestro core/help/system
-	cp.RegisterCommand(Command{
-		Name:        "help",
-		Aliases:     []string{"/help", "h", "?"},
-		Description: "Show available commands",
-		Category:    "Help",
-	})
-	cp.RegisterCommand(Command{
-		Name:        "exit",
-		Aliases:     []string{"/exit", "quit", "/quit"},
-		Description: "Exit the application",
-		Category:    "System",
-	})
-
-	// PR review and questions
-	cp.RegisterCommand(Command{
-		Name:        "review",
-		Aliases:     []string{"/review"},
-		Description: "Review a specific pull request",
-		Category:    "GitHub",
-		Args: []CommandArg{
-			{Name: "pr", Description: "PR number", Required: true},
-		},
-	})
-	cp.RegisterCommand(Command{
-		Name:        "ask",
-		Aliases:     []string{"/ask"},
-		Description: "Ask a question about the repository",
-		Category:    "Maestro",
-		Args: []CommandArg{
-			{Name: "question", Description: "Question text", Required: true},
-		},
-	})
-
-	// Subagents
-	cp.RegisterCommand(Command{
-		Name:        "claude",
-		Aliases:     []string{"/claude"},
-		Description: "Send prompt to Claude Sonnet 4.5",
-		Category:    "Subagent",
-		Args: []CommandArg{
-			{Name: "prompt", Description: "Prompt text", Required: true},
-		},
-	})
-	cp.RegisterCommand(Command{
-		Name:        "gemini",
-		Aliases:     []string{"/gemini"},
-		Description: "Send prompt to Gemini 3 Pro",
-		Category:    "Subagent",
-		Args: []CommandArg{
-			{Name: "prompt", Description: "Prompt text", Required: true},
-		},
-	})
-	// Tools management as multi-word commands (to match `tools setup|status`)
-	cp.RegisterCommand(Command{
-		Name:        "tools setup",
-		Aliases:     []string{"/tools setup"},
-		Description: "Setup CLI tools",
-		Category:    "Tools",
-	})
-	cp.RegisterCommand(Command{
-		Name:        "tools status",
-		Aliases:     []string{"/tools status"},
-		Description: "Show CLI tool status",
-		Category:    "Tools",
-	})
-
-	// Session management
-	cp.RegisterCommand(Command{
-		Name:        "session new",
-		Aliases:     []string{"/session new"},
-		Description: "Create a new session (auto-generates name if not provided)",
-		Category:    "Session",
-		Args:        []CommandArg{{Name: "name", Description: "Session name (optional)", Required: false}},
-	})
-	cp.RegisterCommand(Command{
-		Name:        "session switch",
-		Aliases:     []string{"/session switch"},
-		Description: "Switch to an existing session",
-		Category:    "Session",
-		Args:        []CommandArg{{Name: "name", Description: "Session name", Required: true}},
-	})
-	cp.RegisterCommand(Command{
-		Name:        "session list",
-		Aliases:     []string{"/session list"},
-		Description: "List all available sessions",
-		Category:    "Session",
-	})
 }
 
 // Init initializes the command palette.
@@ -563,16 +469,6 @@ func (cp *CommandPaletteModel) IsVisible() bool {
 // RegisterCommand registers a new command.
 func (cp *CommandPaletteModel) RegisterCommand(cmd Command) {
 	cp.commands = append(cp.commands, cmd)
-}
-
-// SetHandler sets the handler for a command.
-func (cp *CommandPaletteModel) SetHandler(name string, handler CommandHandler) {
-	for i := range cp.commands {
-		if cp.commands[i].Name == name {
-			cp.commands[i].Handler = handler
-			break
-		}
-	}
 }
 
 // CommandResultMsg is sent when a command completes.

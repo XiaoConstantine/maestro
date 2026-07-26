@@ -90,6 +90,7 @@ Maestro is an AI code review and repository analysis assistant built on top of `
 - **Prompt Editing and Discovery**: Enter runs a prompt, Ctrl+J inserts a newline, `/` opens inline command suggestions, and Ctrl+P opens the searchable command palette.
 - **Cancellation**: Escape cancels the active coding run or closes the current overlay; narrow terminals progressively hide nonessential chrome and secondary shortcuts.
 - **Shared Runtime Wiring**: the same service layer backs both direct CLI review and interactive usage.
+- **Pre-v1 Terminal API Cleanup**: the unreachable experimental `terminal.Model`, modern/legacy launchers, split-pane, file-tree, todo, and Vim key-handler APIs were removed. External integrations should use `terminal.RunMaestro` or the still-supported standalone `terminal.RunReviewTUI`.
 
 ### **Semantic Code Search (Sgrep)**
 - **Search Tooling**: Maestro has an sgrep-backed search path and test coverage around its runtime environment wiring.

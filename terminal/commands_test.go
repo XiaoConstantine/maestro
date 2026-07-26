@@ -8,6 +8,19 @@ import (
 	"charm.land/lipgloss/v2"
 )
 
+func TestBuiltinCommandsSharedByComposerAndPalette(t *testing.T) {
+	input := NewInputModel(ClaudeCodeTheme(), nil, nil)
+	palette := NewCommandPalette(ClaudeCodeTheme())
+	if len(input.allCommands) != len(palette.commands) {
+		t.Fatalf("composer commands = %d, palette commands = %d", len(input.allCommands), len(palette.commands))
+	}
+	for i := range input.allCommands {
+		if input.allCommands[i].Name != palette.commands[i].Name {
+			t.Fatalf("command %d = %q in composer, %q in palette", i, input.allCommands[i].Name, palette.commands[i].Name)
+		}
+	}
+}
+
 func TestCommandItemTruncatesByCellWidth(t *testing.T) {
 	palette := NewCommandPalette(ClaudeCodeTheme())
 	palette.width = 20
