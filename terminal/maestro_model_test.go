@@ -54,6 +54,65 @@ func TestModelPickerSelectsNextRunModel(t *testing.T) {
 	}
 }
 
+func TestModelPickerFuzzyFiltersBeforeSelection(t *testing.T) {
+	backend := &modelPickerBackend{
+		NoOpBackend: NewNoOpBackend("owner", "repo"),
+		models: []ModelOption{
+			{ID: "google:gemini-3-flash", Description: "fast"},
+			{ID: "openai-codex:gpt-5.4", Description: "coding"},
+		},
+	}
+	model := NewMaestroModel(&MaestroConfig{}, backend)
+	_, _ = model.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	_, _ = model.Update(ModelPickerMsg{Models: backend.models})
+	for _, text := range []string{"g", "5", "4"} {
+		_, _ = model.Update(tea.KeyPressMsg{Text: text, Code: []rune(text)[0]})
+	}
+	if filtered := model.filteredModels(); len(filtered) != 1 || filtered[0].ID != "openai-codex:gpt-5.4" {
+		t.Fatalf("filtered models = %#v", filtered)
+	}
+	if view := ansi.Strip(model.renderModelPicker()); !containsAll(view, "Filter: g54", "gpt-5.4") || strings.Contains(view, "gemini") {
+		t.Fatalf("filtered picker view = %q", view)
+	}
+	_, selectCmd := model.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if selectCmd == nil {
+		t.Fatal("filtered model selection command = nil")
+	}
+	_, _ = model.Update(selectCmd())
+	if backend.selected != "openai-codex:gpt-5.4" {
+		t.Fatalf("selected model = %q", backend.selected)
+	}
+}
+
+func TestPickerFilterHandlesUnicodeAndCtrlH(t *testing.T) {
+	if !pickerFuzzyMatch("café", "CAFE\u0301 model") {
+		t.Fatal("canonically equivalent Unicode text did not match")
+	}
+	model := NewMaestroModel(&MaestroConfig{}, &modelPickerBackend{NoOpBackend: NewNoOpBackend("owner", "repo")})
+	_, _ = model.Update(ModelPickerMsg{Models: []ModelOption{{ID: "café"}}})
+	_, _ = model.Update(tea.KeyPressMsg{Text: "é", Code: 'é'})
+	_, _ = model.Update(tea.KeyPressMsg{Code: 'h', Mod: tea.ModCtrl})
+	if model.pickerFilter != "" {
+		t.Fatalf("ctrl+h filter = %q, want empty", model.pickerFilter)
+	}
+}
+
+func TestPickerFilterHandlesNoMatchesAndClear(t *testing.T) {
+	model := NewMaestroModel(&MaestroConfig{}, &modelPickerBackend{
+		NoOpBackend: NewNoOpBackend("owner", "repo"),
+		models:      []ModelOption{{ID: "model-a"}},
+	})
+	_, _ = model.Update(ModelPickerMsg{Models: []ModelOption{{ID: "model-a"}}})
+	_, _ = model.Update(tea.KeyPressMsg{Text: "z", Code: 'z'})
+	if cmdModel, cmd := model.Update(tea.KeyPressMsg{Code: tea.KeyEnter}); cmd != nil || cmdModel.(*MaestroModel).modelSelectionPending {
+		t.Fatal("empty filtered picker admitted selection")
+	}
+	_, _ = model.Update(tea.KeyPressMsg{Code: 'u', Mod: tea.ModCtrl})
+	if model.pickerFilter != "" || len(model.filteredModels()) != 1 {
+		t.Fatalf("cleared filter = %q models=%d", model.pickerFilter, len(model.filteredModels()))
+	}
+}
+
 func TestModelSelectionReservationBlocksRunsAndStaleResults(t *testing.T) {
 	backend := &modelPickerBackend{NoOpBackend: NewNoOpBackend("owner", "repo"), models: []ModelOption{{ID: "model-a"}}}
 	model := NewMaestroModel(&MaestroConfig{}, backend)
@@ -122,6 +181,24 @@ func TestSessionLoadOutcomesRespectGeneration(t *testing.T) {
 	_, _ = model.Update(SessionPickerMsg{RequestID: 2})
 	if !model.progressModel.IsVisible() || !strings.Contains(model.messages[len(model.messages)-1].Content, "No sessions") {
 		t.Fatal("accepted empty session result disturbed unrelated progress or omitted its message")
+	}
+}
+
+func TestPickerNoMatchStateFitsShortPanel(t *testing.T) {
+	model := NewMaestroModel(&MaestroConfig{}, &modelPickerBackend{NoOpBackend: NewNoOpBackend("owner", "repo")})
+	model.width, model.height = 40, 7
+	model.mode = ModeModelPicker
+	model.modelPickerModels = []ModelOption{{ID: "model-a"}}
+	if _, cmd := model.Update(tea.KeyPressMsg{Code: tea.KeyEnter}); cmd != nil || model.modelSelectionPending {
+		t.Fatal("zero-capacity picker selected an invisible model")
+	}
+	model.pickerFilter = "missing"
+	view := model.renderModelPicker()
+	if height := lipgloss.Height(view); height > model.height {
+		t.Fatalf("short picker height = %d, terminal = %d", height, model.height)
+	}
+	if !strings.Contains(ansi.Strip(view), "No matching") {
+		t.Fatalf("short picker omitted no-match state: %q", ansi.Strip(view))
 	}
 }
 

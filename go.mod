@@ -20,6 +20,7 @@ require (
 	github.com/mattn/go-sqlite3 v1.14.48
 	github.com/stretchr/testify v1.11.1
 	golang.org/x/oauth2 v0.36.0
+	golang.org/x/text v0.40.0
 )
 
 require (
@@ -86,7 +87,6 @@ require (
 	golang.org/x/net v0.56.0 // indirect
 	golang.org/x/sync v0.22.0 // indirect
 	golang.org/x/telemetry v0.0.0-20260625142307-59b4966ccb57 // indirect
-	golang.org/x/text v0.40.0 // indirect
 	golang.org/x/tools v0.47.0 // indirect
 	golang.org/x/xerrors v0.0.0-20240903120638-7835f813f4da // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260414002931-afd174a4e478 // indirect

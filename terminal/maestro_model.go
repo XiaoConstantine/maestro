@@ -11,6 +11,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
+	"golang.org/x/text/unicode/norm"
 )
 
 // MaestroModel is the root TUI model that manages all modes.
@@ -55,6 +56,7 @@ type MaestroModel struct {
 	modelPickerIdx         int
 	pickerRequestID        uint64
 	pickerLoadID           uint64
+	pickerFilter           string
 	modelSelectionPending  bool
 	sessionMutationPending bool
 	specialistRuns         int
@@ -271,6 +273,7 @@ func (m *MaestroModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.sessionPickerIdx = 0
 				m.modelPickerModels = nil
 				m.modelPickerIdx = 0
+				m.pickerFilter = ""
 				m.statusBar.SetMode("")
 				m.setInputFocus(FocusInput)
 				return m, nil
@@ -322,48 +325,82 @@ func (m *MaestroModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		// Handle session picker navigation
-		if m.mode == ModeSessionPicker && len(m.sessionPickerSessions) > 0 {
+		if m.mode == ModeSessionPicker {
+			filtered := m.filteredSessions()
+			if m.updatePickerFilter(msg) {
+				m.sessionPickerIdx = 0
+				return m, nil
+			}
+			if m.sessionPickerCapacity() == 0 {
+				return m, nil
+			}
 			switch msg.String() {
-			case "j", "down":
+			case "down":
+				if len(filtered) == 0 {
+					return m, nil
+				}
 				m.sessionPickerIdx++
-				if m.sessionPickerIdx >= len(m.sessionPickerSessions) {
+				if m.sessionPickerIdx >= len(filtered) {
 					m.sessionPickerIdx = 0
 				}
 				m.renderMessages()
 				return m, nil
-			case "k", "up":
+			case "up":
+				if len(filtered) == 0 {
+					return m, nil
+				}
 				m.sessionPickerIdx--
 				if m.sessionPickerIdx < 0 {
-					m.sessionPickerIdx = len(m.sessionPickerSessions) - 1
+					m.sessionPickerIdx = len(filtered) - 1
 				}
 				m.renderMessages()
 				return m, nil
 			case "enter":
+				if len(filtered) == 0 {
+					return m, nil
+				}
 				if m.codingRunActive || m.sessionMutationPending || m.modelSelectionPending || m.specialistRuns > 0 {
 					return m, func() tea.Msg { return ErrorMsg{Error: fmt.Errorf("session changes require an idle coding session")} }
 				}
 				m.sessionMutationPending = true
 				requestID := m.nextPickerRequestID()
-				selected := m.sessionPickerSessions[m.sessionPickerIdx]
+				selected := filtered[m.sessionPickerIdx]
 				return m, m.cmdSessionSwitch(selected.Name, requestID)
 			}
 		}
 
-		if m.mode == ModeModelPicker && len(m.modelPickerModels) > 0 {
-			switch msg.String() {
-			case "j", "down":
-				m.modelPickerIdx = (m.modelPickerIdx + 1) % len(m.modelPickerModels)
+		if m.mode == ModeModelPicker {
+			filtered := m.filteredModels()
+			if m.updatePickerFilter(msg) {
+				m.modelPickerIdx = 0
 				return m, nil
-			case "k", "up":
-				m.modelPickerIdx = (m.modelPickerIdx - 1 + len(m.modelPickerModels)) % len(m.modelPickerModels)
+			}
+			if m.modelPickerCapacity() == 0 {
+				return m, nil
+			}
+			switch msg.String() {
+			case "down":
+				if len(filtered) == 0 {
+					return m, nil
+				}
+				m.modelPickerIdx = (m.modelPickerIdx + 1) % len(filtered)
+				return m, nil
+			case "up":
+				if len(filtered) == 0 {
+					return m, nil
+				}
+				m.modelPickerIdx = (m.modelPickerIdx - 1 + len(filtered)) % len(filtered)
 				return m, nil
 			case "enter":
+				if len(filtered) == 0 {
+					return m, nil
+				}
 				if m.codingRunActive || m.modelSelectionPending || m.sessionMutationPending || m.specialistRuns > 0 {
 					return m, func() tea.Msg { return ErrorMsg{Error: fmt.Errorf("model changes require an idle coding session")} }
 				}
 				m.modelSelectionPending = true
 				requestID := m.nextPickerRequestID()
-				return m, m.cmdModelSelect(m.modelPickerModels[m.modelPickerIdx].ID, requestID)
+				return m, m.cmdModelSelect(filtered[m.modelPickerIdx].ID, requestID)
 			}
 		}
 
@@ -519,6 +556,7 @@ func (m *MaestroModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.commandPalette.Hide()
 		m.sessionPickerSessions = msg.Sessions
 		m.sessionPickerIdx = 0
+		m.pickerFilter = ""
 		// Find current session and select it
 		for i, s := range msg.Sessions {
 			if s.IsCurrent {
@@ -547,6 +585,7 @@ func (m *MaestroModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.commandPalette.Hide()
 		m.modelPickerModels = msg.Models
 		m.modelPickerIdx = 0
+		m.pickerFilter = ""
 		for i, option := range msg.Models {
 			if option.Current {
 				m.modelPickerIdx = i
@@ -570,6 +609,7 @@ func (m *MaestroModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.mode = ModeInput
 		m.modelPickerModels = nil
 		m.modelPickerIdx = 0
+		m.pickerFilter = ""
 		m.setInputFocus(FocusInput)
 		m.addMessage("assistant", fmt.Sprintf("Model changed to %s for the next run.", msg.ID))
 
@@ -586,6 +626,7 @@ func (m *MaestroModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.mode = ModeInput
 		m.sessionPickerSessions = nil
 		m.sessionPickerIdx = 0
+		m.pickerFilter = ""
 		m.resetSessionUI()
 		action := "Switched to"
 		if msg.Created {
@@ -890,10 +931,10 @@ func (m *MaestroModel) configureStatusBar() {
 	switch {
 	case m.mode == ModeModelPicker:
 		m.statusBar.SetMode("MODELS")
-		m.statusBar.SetHints("↑↓ navigate", "enter select", "esc close")
+		m.statusBar.SetHints("type filter", "↑↓ navigate", "enter select", "esc close")
 	case m.mode == ModeSessionPicker:
 		m.statusBar.SetMode("SESSIONS")
-		m.statusBar.SetHints("↑↓ navigate", "enter switch", "esc close")
+		m.statusBar.SetHints("type filter", "↑↓ navigate", "enter switch", "esc close")
 	case m.inputFocus == FocusToolActivity && m.toolActivity.HasTools():
 		m.statusBar.SetMode("TOOLS")
 		if m.codingRunActive {
@@ -1537,6 +1578,84 @@ func (m *MaestroModel) renderMessages() {
 	m.viewport.SetContent(sb.String())
 }
 
+func (m *MaestroModel) updatePickerFilter(msg tea.KeyPressMsg) bool {
+	switch msg.String() {
+	case "backspace", "ctrl+h":
+		runes := []rune(m.pickerFilter)
+		if len(runes) > 0 {
+			m.pickerFilter = string(runes[:len(runes)-1])
+		}
+		return true
+	case "ctrl+u":
+		m.pickerFilter = ""
+		return true
+	}
+	key := tea.Key(msg)
+	if key.Text == "" || key.Mod&(tea.ModCtrl|tea.ModAlt|tea.ModMeta|tea.ModSuper|tea.ModHyper) != 0 {
+		return false
+	}
+	m.pickerFilter += key.Text
+	return true
+}
+
+func pickerFuzzyMatch(query, text string) bool {
+	query = strings.ToLower(norm.NFC.String(strings.TrimSpace(query)))
+	if query == "" {
+		return true
+	}
+	textRunes := []rune(strings.ToLower(norm.NFC.String(text)))
+	position := 0
+	for _, wanted := range query {
+		found := false
+		for position < len(textRunes) {
+			if textRunes[position] == wanted {
+				found = true
+				position++
+				break
+			}
+			position++
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
+}
+
+func (m *MaestroModel) filteredSessions() []SessionInfo {
+	filtered := make([]SessionInfo, 0, len(m.sessionPickerSessions))
+	for _, session := range m.sessionPickerSessions {
+		if pickerFuzzyMatch(m.pickerFilter, session.Name+" "+session.CreatedAt) {
+			filtered = append(filtered, session)
+		}
+	}
+	return filtered
+}
+
+func (m *MaestroModel) filteredModels() []ModelOption {
+	filtered := make([]ModelOption, 0, len(m.modelPickerModels))
+	for _, option := range m.modelPickerModels {
+		if pickerFuzzyMatch(m.pickerFilter, option.ID+" "+option.Description) {
+			filtered = append(filtered, option)
+		}
+	}
+	return filtered
+}
+
+func (m *MaestroModel) sessionPickerCapacity() int {
+	if m.height <= 0 {
+		return len(m.sessionPickerSessions)
+	}
+	return max(0, m.height-7)
+}
+
+func (m *MaestroModel) modelPickerCapacity() int {
+	if m.height <= 0 {
+		return len(m.modelPickerModels)
+	}
+	return max(0, (m.height-7)/2)
+}
+
 // renderSessionPicker renders the interactive session selector.
 func (m *MaestroModel) renderSessionPicker() string {
 	var sb strings.Builder
@@ -1548,13 +1667,16 @@ func (m *MaestroModel) renderSessionPicker() string {
 		Render("Select a session")
 	hint := lipgloss.NewStyle().
 		Foreground(m.theme.TextMuted).
-		Render(" (↑/↓ navigate, enter select, esc cancel)")
-	sb.WriteString(header + hint + "\n\n")
+		Render(" (type to filter, ↑/↓ navigate, enter select, esc cancel)")
+	sb.WriteString(header + hint + "\n")
+	sb.WriteString(lipgloss.NewStyle().Foreground(m.theme.TextMuted).Render("Filter: ") + m.pickerFilter + "\n")
 
-	// Session list
-	start, end := pickerWindow(len(m.sessionPickerSessions), m.sessionPickerIdx, max(1, m.height-8))
+	// Session list. Four rows are reserved for panel border/padding and three
+	// for title, filter, and an overflow/empty-state footer.
+	filtered := m.filteredSessions()
+	start, end := pickerWindow(len(filtered), m.sessionPickerIdx, m.sessionPickerCapacity())
 	for i := start; i < end; i++ {
-		session := m.sessionPickerSessions[i]
+		session := filtered[i]
 		isSelected := i == m.sessionPickerIdx
 
 		// Selection indicator
@@ -1589,9 +1711,13 @@ func (m *MaestroModel) renderSessionPicker() string {
 
 		sb.WriteString(indicator + name + currentMarker + date + "\n")
 	}
-	if start > 0 || end < len(m.sessionPickerSessions) {
+	if len(filtered) == 0 {
+		sb.WriteString(lipgloss.NewStyle().Foreground(m.theme.TextMuted).Render("No matching sessions"))
+	} else if end == 0 {
+		sb.WriteString(lipgloss.NewStyle().Foreground(m.theme.TextMuted).Render("Increase terminal height"))
+	} else if start > 0 || end < len(filtered) {
 		sb.WriteString(lipgloss.NewStyle().Foreground(m.theme.TextMuted).Render(
-			fmt.Sprintf("%d–%d of %d", start+1, end, len(m.sessionPickerSessions)),
+			fmt.Sprintf("%d–%d of %d", start+1, end, len(filtered)),
 		))
 	}
 
@@ -1601,11 +1727,12 @@ func (m *MaestroModel) renderSessionPicker() string {
 func (m *MaestroModel) renderModelPicker() string {
 	var lines []string
 	title := lipgloss.NewStyle().Foreground(m.theme.Accent).Bold(true).Render("Select model")
-	hint := lipgloss.NewStyle().Foreground(m.theme.TextMuted).Render(" (↑/↓ navigate, enter select, esc cancel)")
-	lines = append(lines, title+hint, "")
-	start, end := pickerWindow(len(m.modelPickerModels), m.modelPickerIdx, max(1, (m.height-8)/2))
+	hint := lipgloss.NewStyle().Foreground(m.theme.TextMuted).Render(" (type to filter, ↑/↓ navigate, enter select, esc cancel)")
+	lines = append(lines, title+hint, lipgloss.NewStyle().Foreground(m.theme.TextMuted).Render("Filter: ")+m.pickerFilter)
+	filtered := m.filteredModels()
+	start, end := pickerWindow(len(filtered), m.modelPickerIdx, m.modelPickerCapacity())
 	for i := start; i < end; i++ {
-		option := m.modelPickerModels[i]
+		option := filtered[i]
 		prefix := "  "
 		if i == m.modelPickerIdx {
 			prefix = lipgloss.NewStyle().Foreground(m.theme.Accent).Bold(true).Render("> ")
@@ -1619,19 +1746,23 @@ func (m *MaestroModel) renderModelPicker() string {
 			lines = append(lines, "    "+lipgloss.NewStyle().Foreground(m.theme.TextMuted).Render(option.Description))
 		}
 	}
-	if start > 0 || end < len(m.modelPickerModels) {
+	if len(filtered) == 0 {
+		lines = append(lines, lipgloss.NewStyle().Foreground(m.theme.TextMuted).Render("No matching models"))
+	} else if end == 0 {
+		lines = append(lines, lipgloss.NewStyle().Foreground(m.theme.TextMuted).Render("Increase terminal height"))
+	} else if start > 0 || end < len(filtered) {
 		lines = append(lines, lipgloss.NewStyle().Foreground(m.theme.TextMuted).Render(
-			fmt.Sprintf("%d–%d of %d", start+1, end, len(m.modelPickerModels)),
+			fmt.Sprintf("%d–%d of %d", start+1, end, len(filtered)),
 		))
 	}
 	return m.renderPickerPanel(strings.Join(lines, "\n"))
 }
 
 func pickerWindow(total, selected, limit int) (int, int) {
-	if total <= 0 {
+	if total <= 0 || limit <= 0 {
 		return 0, 0
 	}
-	limit = max(1, min(limit, total))
+	limit = min(limit, total)
 	start := max(0, selected-limit+1)
 	return start, min(total, start+limit)
 }
@@ -1640,7 +1771,8 @@ func (m *MaestroModel) renderPickerPanel(content string) string {
 	width := max(1, min(72, m.width-4))
 	lines := strings.Split(content, "\n")
 	for i := range lines {
-		lines[i] = ansi.Truncate(lines[i], max(1, width-4), "…")
+		// Width includes the two-cell padding and border frame in Lip Gloss v2.
+		lines[i] = ansi.Truncate(lines[i], max(1, width-6), "…")
 	}
 	return lipgloss.NewStyle().
 		Width(width).

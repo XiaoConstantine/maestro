@@ -8,7 +8,7 @@ A small optional `modelSelectionProvider` interface lets a Maestro backend list 
 
 Model and session mutations reserve one correlated request before launching asynchronous work. Coding-run admission and additional mutations are blocked until it completes, stale result messages are ignored, and session changes are rejected during active coding or specialist `/ask`/review/subagent work. A confirmed session switch resets session-scoped visible messages, tool activity, and review state. Subagent tools and session ids are snapshotted under the service read lock before execution, matching the writer lock used by session switching.
 
-Both pickers share the ANSI-safe canvas compositor, terminal-height scrolling windows, arrow navigation, Enter selection, and Esc dismissal. Pickers are modal: unrelated keys are consumed and Ctrl+P cannot place a command palette above them. Overlays close before Esc is interpreted as coding-run cancellation.
+Both pickers share the ANSI-safe canvas compositor, terminal-height scrolling windows, arrow navigation, Enter selection, and Esc dismissal. Typing applies case-insensitive subsequence filtering across session names or model IDs/descriptions; Backspace edits the query and Ctrl+U clears it. Pickers are modal: unrelated keys are consumed and Ctrl+P cannot place a command palette above them. Overlays close before Esc is interpreted as coding-run cancellation.
 
 ## Why
 
