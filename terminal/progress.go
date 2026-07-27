@@ -34,10 +34,14 @@ type ProgressModel struct {
 	visible       bool
 	spinning      bool
 	reducedMotion bool
+	now           func() time.Time
 }
 
 // ProgressTickMsg triggers animation updates.
-type ProgressTickMsg struct{ id int }
+type ProgressTickMsg struct {
+	id int
+	at time.Time
+}
 
 var progressID int64
 
@@ -50,6 +54,7 @@ func NewProgressModel(theme *Theme) *ProgressModel {
 	return &ProgressModel{
 		theme: theme,
 		id:    nextProgressID(),
+		now:   time.Now,
 	}
 }
 
@@ -70,7 +75,11 @@ func (p *ProgressModel) Update(msg tea.Msg) (*ProgressModel, tea.Cmd) {
 		}
 		if p.spinning {
 			p.frame++
-			p.elapsed = time.Since(p.start)
+			at := msg.at
+			if at.IsZero() {
+				at = p.now()
+			}
+			p.elapsed = at.Sub(p.start)
 			return p, p.tick()
 		}
 	}
@@ -181,7 +190,7 @@ func (p *ProgressModel) tick() tea.Cmd {
 		interval = time.Second
 	}
 	return tea.Tick(interval, func(t time.Time) tea.Msg {
-		return ProgressTickMsg{id: p.id}
+		return ProgressTickMsg{id: p.id, at: t}
 	})
 }
 
@@ -197,7 +206,7 @@ func (p *ProgressModel) Start(message string) tea.Cmd {
 	p.state = ProgressWorking
 	p.message = message
 	p.detail = ""
-	p.start = time.Now()
+	p.start = p.now()
 	p.elapsed = 0
 	p.frame = 0
 	p.visible = true

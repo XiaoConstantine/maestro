@@ -382,7 +382,7 @@ func TestEscapeBeforeCodingCommandStartsCancelsReservedContext(t *testing.T) {
 	}
 
 	if _, updateCmd := model.Update(tea.KeyPressMsg{Code: tea.KeyEscape}); updateCmd != nil {
-		_ = updateCmd
+		executeTestCommand(updateCmd)
 	}
 	batch, ok := cmd().(tea.BatchMsg)
 	if !ok {
@@ -395,6 +395,17 @@ func TestEscapeBeforeCodingCommandStartsCancelsReservedContext(t *testing.T) {
 	}
 	if !backend.sawCanceledContext {
 		t.Fatal("backend did not receive the pre-start canceled context")
+	}
+}
+
+func executeTestCommand(cmd tea.Cmd) {
+	if cmd == nil {
+		return
+	}
+	if batch, ok := cmd().(tea.BatchMsg); ok {
+		for _, child := range batch {
+			executeTestCommand(child)
+		}
 	}
 }
 
