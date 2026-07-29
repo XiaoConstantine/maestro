@@ -2,6 +2,7 @@ package coding
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -54,6 +55,59 @@ func TestSessionPromptRunsWorkspaceToolsAndEmitsLifecycle(t *testing.T) {
 	}
 }
 
+func TestSessionRunsInjectedExecutor(t *testing.T) {
+	executor := &recordingExecutor{}
+	var factoryWorkspace string
+	root := t.TempDir()
+	canonicalRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatalf("EvalSymlinks() error = %v", err)
+	}
+	session, err := NewSessionWithExecutor(root+string(os.PathSeparator)+".", func(workspace string) (Executor, error) {
+		factoryWorkspace = workspace
+		return executor, nil
+	})
+	if err != nil {
+		t.Fatalf("NewSessionWithExecutor() error = %v", err)
+	}
+	if factoryWorkspace != canonicalRoot {
+		t.Fatalf("factory workspace = %q, want canonical root %q", factoryWorkspace, canonicalRoot)
+	}
+	if session.Workspace() != canonicalRoot {
+		t.Fatalf("session workspace = %q, want canonical root %q", session.Workspace(), canonicalRoot)
+	}
+
+	eventCount := 0
+	result, err := session.Prompt(context.Background(), "delegate this task", agents.EventSinkFunc(func(context.Context, agents.ExecutionEvent) {
+		eventCount++
+	}))
+	if err != nil {
+		t.Fatalf("Prompt() error = %v", err)
+	}
+	if got := executor.input["task"]; got != "delegate this task" {
+		t.Fatalf("executor task = %#v, want delegate this task", got)
+	}
+	if got := result.Output["final_answer"]; got != "injected executor" {
+		t.Fatalf("final answer = %#v, want injected executor", got)
+	}
+	if eventCount != 1 {
+		t.Fatalf("event count = %d, want 1", eventCount)
+	}
+	if err := session.Close(context.Background()); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	if !executor.closed {
+		t.Fatal("executor was not closed")
+	}
+}
+
+func TestZeroValueSessionCloseIsSafe(t *testing.T) {
+	var session Session
+	if err := session.Close(context.Background()); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+}
+
 func TestSessionCloseIsTerminal(t *testing.T) {
 	session, err := NewSession(Config{LLM: &scriptedLLM{}, Workspace: t.TempDir()})
 	if err != nil {
@@ -64,6 +118,51 @@ func TestSessionCloseIsTerminal(t *testing.T) {
 	}
 	if _, err := session.Prompt(context.Background(), "after close", nil); err != ErrSessionClosed {
 		t.Fatalf("Prompt() error = %v, want %v", err, ErrSessionClosed)
+	}
+}
+
+func TestSessionCloseContinuesExecutorCleanupAfterTimeout(t *testing.T) {
+	executor := &blockingExecutor{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+		closed:  make(chan struct{}),
+	}
+	session, err := NewSessionWithExecutor(t.TempDir(), func(string) (Executor, error) {
+		return executor, nil
+	})
+	if err != nil {
+		t.Fatalf("NewSessionWithExecutor() error = %v", err)
+	}
+
+	promptDone := make(chan error, 1)
+	go func() {
+		_, promptErr := session.Prompt(context.Background(), "block", nil)
+		promptDone <- promptErr
+	}()
+	select {
+	case <-executor.started:
+	case <-time.After(time.Second):
+		t.Fatal("executor did not start")
+	}
+
+	closeCtx, cancel := context.WithTimeout(context.Background(), time.Millisecond)
+	defer cancel()
+	if err := session.Close(closeCtx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Close() error = %v, want deadline exceeded", err)
+	}
+	select {
+	case <-executor.closed:
+		t.Fatal("executor closed before active run finished")
+	default:
+	}
+	close(executor.release)
+	select {
+	case <-executor.closed:
+	case <-time.After(time.Second):
+		t.Fatal("executor was not closed after active run finished")
+	}
+	if err := <-promptDone; err != nil {
+		t.Fatalf("Prompt() error = %v", err)
 	}
 }
 
@@ -134,6 +233,53 @@ func TestSessionRejectsOverlappingRunsAndCancels(t *testing.T) {
 		t.Fatal("canceled prompt did not return")
 	}
 }
+
+type blockingExecutor struct {
+	started chan struct{}
+	release chan struct{}
+	closed  chan struct{}
+}
+
+func (e *blockingExecutor) ExecuteWithTrace(
+	context.Context,
+	map[string]any,
+	agents.EventSink,
+) (agents.AgentExecutionResult, error) {
+	close(e.started)
+	<-e.release
+	return agents.AgentExecutionResult{}, nil
+}
+
+func (e *blockingExecutor) Close(context.Context) error {
+	close(e.closed)
+	return nil
+}
+
+var _ Executor = (*blockingExecutor)(nil)
+
+type recordingExecutor struct {
+	input  map[string]any
+	closed bool
+}
+
+func (e *recordingExecutor) ExecuteWithTrace(
+	ctx context.Context,
+	input map[string]any,
+	sink agents.EventSink,
+) (agents.AgentExecutionResult, error) {
+	e.input = input
+	if sink != nil {
+		sink.EmitEvent(ctx, agents.ExecutionEvent{})
+	}
+	return agents.AgentExecutionResult{Output: map[string]any{"final_answer": "injected executor"}}, nil
+}
+
+func (e *recordingExecutor) Close(context.Context) error {
+	e.closed = true
+	return nil
+}
+
+var _ Executor = (*recordingExecutor)(nil)
 
 type scriptedLLM struct {
 	mu        sync.Mutex

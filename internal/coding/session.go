@@ -30,16 +30,29 @@ type Config struct {
 	ExtraTools   []core.Tool
 }
 
+// Executor is the execution boundary used by a coding Session. Each Session
+// exclusively owns one Executor. Close must release executor-specific resources.
+type Executor interface {
+	ExecuteWithTrace(context.Context, map[string]any, agents.EventSink) (agents.AgentExecutionResult, error)
+	Close(context.Context) error
+}
+
+// ExecutorFactory constructs an executor bound to the canonical workspace root
+// supplied by Session.
+type ExecutorFactory func(workspace string) (Executor, error)
+
 type Session struct {
 	workspace string
-	agent     *native.Agent
-	forwarder *eventForwarder
+	executor  Executor
 
-	runMu   sync.Mutex
-	mu      sync.Mutex
-	stop    context.CancelFunc
-	runDone chan struct{}
-	closed  bool
+	runMu     sync.Mutex
+	mu        sync.Mutex
+	stop      context.CancelFunc
+	runDone   chan struct{}
+	closed    bool
+	closeOnce sync.Once
+	closeDone chan struct{}
+	closeErr  error
 }
 
 func NewSession(cfg Config) (*Session, error) {
@@ -82,7 +95,42 @@ func NewSession(cfg Config) (*Session, error) {
 		}
 	}
 
-	return &Session{workspace: toolset.Root(), agent: agent, forwarder: forwarder}, nil
+	return &Session{
+		workspace: toolset.Root(),
+		executor: &nativeExecutor{
+			agent:     agent,
+			forwarder: forwarder,
+		},
+		closeDone: make(chan struct{}),
+	}, nil
+}
+
+// NewSessionWithExecutor creates a coding session around an alternate execution
+// implementation. The factory receives Session's canonical workspace root and
+// must return a new executor for the exclusive ownership of this Session.
+func NewSessionWithExecutor(workspace string, factory ExecutorFactory) (*Session, error) {
+	if factory == nil {
+		return nil, fmt.Errorf("coding executor factory is required")
+	}
+	if strings.TrimSpace(workspace) == "" {
+		return nil, fmt.Errorf("workspace is required")
+	}
+	toolset, err := defaults.NewToolset(defaults.Config{Root: workspace})
+	if err != nil {
+		return nil, fmt.Errorf("resolve coding workspace: %w", err)
+	}
+	executor, err := factory(toolset.Root())
+	if err != nil {
+		return nil, fmt.Errorf("create coding executor: %w", err)
+	}
+	if executor == nil {
+		return nil, fmt.Errorf("coding executor factory returned nil")
+	}
+	return &Session{
+		workspace: toolset.Root(),
+		executor:  executor,
+		closeDone: make(chan struct{}),
+	}, nil
 }
 
 func (s *Session) Workspace() string {
@@ -93,7 +141,7 @@ func (s *Session) Workspace() string {
 }
 
 func (s *Session) Prompt(ctx context.Context, prompt string, sink agents.EventSink) (agents.AgentExecutionResult, error) {
-	if s == nil || s.agent == nil {
+	if s == nil || s.executor == nil {
 		return agents.AgentExecutionResult{}, fmt.Errorf("coding session is not initialized")
 	}
 	if strings.TrimSpace(prompt) == "" {
@@ -115,9 +163,7 @@ func (s *Session) Prompt(ctx context.Context, prompt string, sink agents.EventSi
 	s.stop = cancel
 	s.runDone = done
 	s.mu.Unlock()
-	s.forwarder.Set(sink)
 	defer func() {
-		s.forwarder.Set(nil)
 		cancel()
 		s.mu.Lock()
 		s.stop = nil
@@ -126,7 +172,7 @@ func (s *Session) Prompt(ctx context.Context, prompt string, sink agents.EventSi
 		s.mu.Unlock()
 	}()
 
-	return s.agent.ExecuteWithTrace(runCtx, map[string]any{"task": prompt})
+	return s.executor.ExecuteWithTrace(runCtx, map[string]any{"task": prompt}, sink)
 }
 
 func (s *Session) Close(ctx context.Context) error {
@@ -137,16 +183,26 @@ func (s *Session) Close(ctx context.Context) error {
 	s.closed = true
 	cancel := s.stop
 	done := s.runDone
+	executor := s.executor
 	if cancel != nil {
 		cancel()
 	}
 	s.mu.Unlock()
-	if done == nil {
+	if executor == nil {
 		return nil
 	}
+	s.closeOnce.Do(func() {
+		go func() {
+			if done != nil {
+				<-done
+			}
+			s.closeErr = executor.Close(context.Background())
+			close(s.closeDone)
+		}()
+	})
 	select {
-	case <-done:
-		return nil
+	case <-s.closeDone:
+		return s.closeErr
 	case <-ctx.Done():
 		return ctx.Err()
 	}
@@ -164,6 +220,30 @@ func (s *Session) Cancel() bool {
 	s.stop()
 	return true
 }
+
+type nativeExecutor struct {
+	agent     *native.Agent
+	forwarder *eventForwarder
+}
+
+func (e *nativeExecutor) ExecuteWithTrace(
+	ctx context.Context,
+	input map[string]any,
+	sink agents.EventSink,
+) (agents.AgentExecutionResult, error) {
+	if e == nil || e.agent == nil || e.forwarder == nil {
+		return agents.AgentExecutionResult{}, fmt.Errorf("native coding executor is not initialized")
+	}
+	e.forwarder.Set(sink)
+	defer e.forwarder.Set(nil)
+	return e.agent.ExecuteWithTrace(ctx, input)
+}
+
+func (e *nativeExecutor) Close(context.Context) error {
+	return nil
+}
+
+var _ Executor = (*nativeExecutor)(nil)
 
 type eventForwarder struct {
 	mu   sync.RWMutex
